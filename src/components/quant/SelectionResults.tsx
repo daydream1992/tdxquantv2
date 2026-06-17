@@ -21,7 +21,7 @@ import {
 } from '@/components/ui/select'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Download, Filter, ChevronDown, ChevronUp } from 'lucide-react'
+import { Download, Filter, ChevronDown, ChevronUp, List, Layers3 } from 'lucide-react'
 import { StockTable, type Column } from './StockTable'
 import { ScoreBadge } from './ScoreBadge'
 import { LoadingState } from './LoadingState'
@@ -33,6 +33,20 @@ import {
   type SelectionRowDTO,
   type StrategyDTO,
 } from '@/lib/api'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+
+// 按股票聚合的视图类型
+interface StockAggRow {
+  stock_code: string
+  stock_name: string
+  strategy_count: number
+  strategy_ids: string[]
+  strategy_names: string[]
+  best_score: number
+  best_rank: number
+  avg_score: number
+  runs: Array<{ strategy_id: string; strategy_name: string; score: number; rank: number }>
+}
 
 export function SelectionResults() {
   const [strategies, setStrategies] = React.useState<StrategyDTO[]>([])
@@ -43,6 +57,50 @@ export function SelectionResults() {
   const [startDate, setStartDate] = React.useState<string>('')
   const [endDate, setEndDate] = React.useState<string>('')
   const [expandedKey, setExpandedKey] = React.useState<string | null>(null)
+  // 视图切换: 'detail' (明细) | 'agg' (按股票汇总)
+  const [viewMode, setViewMode] = React.useState<'detail' | 'agg'>('detail')
+
+  // 按股票聚合：同一只股票被多少策略选中
+  const aggRows = React.useMemo<StockAggRow[]>(() => {
+    const map = new Map<string, StockAggRow>()
+    for (const r of rows) {
+      const key = r.stock_code
+      if (!map.has(key)) {
+        map.set(key, {
+          stock_code: r.stock_code,
+          stock_name: r.stock_name,
+          strategy_count: 0,
+          strategy_ids: [],
+          strategy_names: [],
+          best_score: r.score,
+          best_rank: r.rank,
+          avg_score: 0,
+          runs: [],
+        })
+      }
+      const agg = map.get(key)!
+      agg.strategy_count += 1
+      agg.strategy_ids.push(r.strategy_id)
+      agg.strategy_names.push(r.strategy_name || r.strategy_id)
+      agg.best_score = Math.max(agg.best_score, r.score)
+      agg.best_rank = Math.min(agg.best_rank, r.rank)
+      agg.runs.push({
+        strategy_id: r.strategy_id,
+        strategy_name: r.strategy_name || r.strategy_id,
+        score: r.score,
+        rank: r.rank,
+      })
+    }
+    const list = Array.from(map.values())
+    for (const a of list) {
+      a.avg_score = a.runs.reduce((s, x) => s + x.score, 0) / a.runs.length
+      // 按得分降序排
+      a.runs.sort((x, y) => y.score - x.score)
+    }
+    // 默认按"被选次数"降序，其次按"最高分"降序
+    list.sort((a, b) => b.strategy_count - a.strategy_count || b.best_score - a.best_score)
+    return list
+  }, [rows])
 
   // 加载策略列表
   React.useEffect(() => {
@@ -153,6 +211,72 @@ export function SelectionResults() {
     },
   ]
 
+  // 汇总视图列定义
+  const aggColumns: Column<StockAggRow>[] = [
+    {
+      key: 'stock_code',
+      header: '代码',
+      width: '6rem',
+      render: (r) => <span className="font-mono text-xs">{r.stock_code}</span>,
+    },
+    {
+      key: 'stock_name',
+      header: '名称',
+      width: '7rem',
+      render: (r) => <span className="text-xs">{r.stock_name}</span>,
+    },
+    {
+      key: 'strategy_count',
+      header: '被选次数',
+      align: 'center',
+      width: '6rem',
+      render: (r) => {
+        const n = r.strategy_count
+        // 高亮：被多策略选中 = 强信号
+        const tone = n >= 3 ? 'bg-amber-500/20 text-amber-400 border-amber-500/30' : n >= 2 ? 'bg-[var(--quant-up)]/15 text-up border-[var(--quant-up)]/30' : 'border-quant text-muted-foreground'
+        return (
+          <Badge variant="outline" className={`font-mono text-xs ${tone}`}>
+            {n} 次
+          </Badge>
+        )
+      },
+      sortValue: (r) => r.strategy_count,
+    },
+    {
+      key: 'strategies',
+      header: '入选策略',
+      render: (r) => (
+        <div className="flex flex-wrap gap-1">
+          {r.strategy_names.map((name, i) => (
+            <Badge key={i} variant="outline" className="text-[10px] border-quant font-mono">
+              {name}
+            </Badge>
+          ))}
+        </div>
+      ),
+    },
+    {
+      key: 'best_score',
+      header: '最高分',
+      align: 'right',
+      width: '7rem',
+      render: (r) => <ScoreBadge score={r.best_score} size="sm" />,
+      sortValue: (r) => r.best_score,
+    },
+    {
+      key: 'avg_score',
+      header: '平均分',
+      align: 'right',
+      width: '6rem',
+      render: (r) => (
+        <span className="text-xs tabular-nums text-muted-foreground">
+          {r.avg_score.toFixed(2)}
+        </span>
+      ),
+      sortValue: (r) => r.avg_score,
+    },
+  ]
+
   return (
     <div className="space-y-4">
       {/* 筛选栏 */}
@@ -204,7 +328,31 @@ export function SelectionResults() {
               className="h-8 w-24 border-quant"
             />
           </div>
-          <div className="ml-auto flex items-center gap-1">
+          <div className="ml-auto flex items-center gap-2">
+            {/* 视图切换 */}
+            <ToggleGroup
+              type="single"
+              value={viewMode}
+              onValueChange={(v) => v && setViewMode(v as 'detail' | 'agg')}
+              className="rounded-md border border-quant bg-transparent h-8"
+            >
+              <ToggleGroupItem
+                value="detail"
+                className="h-7 px-2 text-xs data-[state=on]:bg-amber-500/15 data-[state=on]:text-amber-400"
+                title="明细视图：每行一条选股记录"
+              >
+                <List className="size-3.5" />
+                明细
+              </ToggleGroupItem>
+              <ToggleGroupItem
+                value="agg"
+                className="h-7 px-2 text-xs data-[state=on]:bg-amber-500/15 data-[state=on]:text-amber-400"
+                title="汇总视图：同一只股票被多少策略选中"
+              >
+                <Layers3 className="size-3.5" />
+                汇总
+              </ToggleGroupItem>
+            </ToggleGroup>
             <Button
               size="sm"
               variant="outline"
@@ -230,7 +378,11 @@ export function SelectionResults() {
         <div className="flex items-center gap-2 mt-2 text-xs text-muted-foreground">
           <Filter className="size-3" />
           <span>
-            共 {rows.length} 条结果 · {strategies.find((s) => s.strategy_id === strategyId)?.strategy_name || '全部策略'}
+            {viewMode === 'detail'
+              ? `共 ${rows.length} 条选股记录`
+              : `共 ${aggRows.length} 只股票 · ${aggRows.filter((x) => x.strategy_count >= 2).length} 只被多策略选中`}
+            {' · '}
+            {strategies.find((s) => s.strategy_id === strategyId)?.strategy_name || '全部策略'}
           </span>
         </div>
       </Card>
@@ -245,6 +397,47 @@ export function SelectionResults() {
             description="尝试调整筛选条件，或在策略管理页运行策略"
           />
         </Card>
+      ) : viewMode === 'agg' ? (
+        /* 汇总视图：按股票聚合，显示被多少策略选中 */
+        <StockTable
+          columns={aggColumns}
+          data={aggRows}
+          rowKey={(r) => r.stock_code}
+          maxHeight="32rem"
+          pageSize={30}
+          expandedRowKey={expandedKey}
+          renderExpanded={(r) => (
+            <div className="p-2 space-y-2">
+              <div className="text-xs font-semibold text-muted-foreground flex items-center gap-1">
+                <ChevronUp className="size-3" />
+                各策略得分明细 ({r.runs.length})
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                {r.runs.map((run) => (
+                  <div
+                    key={run.strategy_id}
+                    className="rounded-md border border-quant p-2 bg-background/40 hover:bg-background/60 transition-colors"
+                  >
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-mono text-foreground/80">{run.strategy_name}</span>
+                      <Badge variant="outline" className="text-[10px] border-quant">
+                        #{run.rank}
+                      </Badge>
+                    </div>
+                    <div className="flex items-center justify-between text-xs mt-1 tabular-nums">
+                      <span className="text-muted-foreground">得分</span>
+                      <span className="text-quant-primary font-semibold">{run.score.toFixed(2)}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          onRowClick={(r) =>
+            setExpandedKey((prev) => (prev === r.stock_code ? null : r.stock_code))
+          }
+          emptyText="暂无汇总数据"
+        />
       ) : (
         <StockTable
           columns={columns}

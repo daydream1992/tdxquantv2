@@ -209,12 +209,25 @@ export function SignalCenter() {
         {(Object.keys(TYPE_META) as SignalDTO['type'][]).map((t) => {
           const meta = TYPE_META[t]
           const Icon = meta.icon
+          const count = stats[t] || 0
+          const total = signals.length || 1
+          const pct = (count / total) * 100
+          const isActive = typeFilter === t
           return (
-            <Card key={t} className="p-3 gap-0 bg-quant-card border-quant">
+            <Card
+              key={t}
+              className={`p-3 gap-0 bg-quant-card border-quant cursor-pointer transition-all hover:border-[var(--quant-primary)]/40 hover:shadow-md ${
+                isActive ? 'ring-1 ring-amber-500/30 border-amber-500/40' : ''
+              }`}
+              onClick={() => setTypeFilter(isActive ? 'all' : t)}
+              style={{
+                backgroundImage: `radial-gradient(circle at top right, color-mix(in srgb, ${meta.color} 15%, transparent) 0%, transparent 60%)`,
+              }}
+            >
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <div
-                    className="size-8 rounded-md flex items-center justify-center"
+                    className="size-8 rounded-md flex items-center justify-center transition-transform hover:scale-110"
                     style={{ backgroundColor: `color-mix(in srgb, ${meta.color} 12%, transparent)` }}
                   >
                     <Icon className="size-4" style={{ color: meta.color }} />
@@ -222,8 +235,21 @@ export function SignalCenter() {
                   <span className="text-xs text-muted-foreground">{meta.label}</span>
                 </div>
                 <span className="text-xl font-semibold tabular-nums" style={{ color: meta.color }}>
-                  {stats[t] || 0}
+                  {count}
                 </span>
+              </div>
+              {/* 占比进度条 */}
+              <div className="mt-2 h-1 rounded-full bg-muted/30 overflow-hidden">
+                <div
+                  className="h-full rounded-full transition-all duration-500"
+                  style={{
+                    width: `${Math.max(2, pct)}%`,
+                    backgroundColor: meta.color,
+                  }}
+                />
+              </div>
+              <div className="mt-1 text-[10px] text-muted-foreground tabular-nums">
+                {pct.toFixed(1)}% · 点击{isActive ? '取消' : '筛选'}
               </div>
             </Card>
           )

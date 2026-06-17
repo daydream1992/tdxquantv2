@@ -241,7 +241,8 @@ export const sectorAPI = {
 
 export const monitorAPI = {
   getStatus: () => fetchAPI<MonitorStatusDTO>('/api/monitor?action=status'),
-  getQuotes: () => fetchAPI<QuoteDTO[]>('/api/monitor?action=quotes'),
+  getQuotes: (count = 100) =>
+    fetchAPI<QuoteDTO[]>(`/api/monitor?action=quotes&count=${count}`),
 }
 
 export const themeAPI = {

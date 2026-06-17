@@ -4,7 +4,7 @@
  * 板块管理
  * - 策略↔板块映射表
  * - 每板块：查看股票/手动刷新/编辑映射（占位）
- * - 板块股票表格
+ * - 板块股票表格 + 涨跌幅 + 统计汇总
  */
 
 import * as React from 'react'
@@ -18,7 +18,7 @@ import {
   DialogTitle,
   DialogDescription,
 } from '@/components/ui/dialog'
-import { RefreshCw, Eye, Layers, Link2, Calendar } from 'lucide-react'
+import { RefreshCw, Eye, Layers, Link2, Calendar, TrendingUp, TrendingDown, Activity } from 'lucide-react'
 import { StockTable, type Column } from './StockTable'
 import { ScoreBadge } from './ScoreBadge'
 import { LoadingState } from './LoadingState'
@@ -26,8 +26,10 @@ import { EmptyState } from './EmptyState'
 import { toast } from 'sonner'
 import {
   sectorAPI,
+  monitorAPI,
   type SectorDTO,
   type SectorStockDTO,
+  type QuoteDTO,
 } from '@/lib/api'
 
 export function SectorManager() {
@@ -37,6 +39,7 @@ export function SectorManager() {
   const [viewSector, setViewSector] = React.useState<SectorDTO | null>(null)
   const [stocks, setStocks] = React.useState<SectorStockDTO[]>([])
   const [stocksLoading, setStocksLoading] = React.useState(false)
+  const [quotes, setQuotes] = React.useState<Record<string, QuoteDTO>>({})
 
   const load = React.useCallback(async () => {
     setLoading(true)
@@ -70,15 +73,48 @@ export function SectorManager() {
   const handleView = async (s: SectorDTO) => {
     setViewSector(s)
     setStocksLoading(true)
+    setQuotes({})
     try {
       const data = await sectorAPI.getStocks(s.code)
       setStocks(data)
+      // 同时拉取这些股票的实时行情（通过 monitor quotes，拉取更多以保证覆盖）
+      try {
+        const qs = await monitorAPI.getQuotes(200)
+        const qmap: Record<string, QuoteDTO> = {}
+        for (const q of qs) {
+          qmap[q.code] = q
+        }
+        setQuotes(qmap)
+      } catch {
+        /* 行情拉取失败不阻断 */
+      }
     } catch (e) {
       toast.error('加载股票失败', { description: (e as Error).message })
     } finally {
       setStocksLoading(false)
     }
   }
+
+  // 派生统计：根据 quotes 计算涨跌分布
+  const stats = React.useMemo(() => {
+    const codes = stocks.map((s) => s.stock_code)
+    const matched = codes.map((c) => quotes[c]).filter(Boolean)
+    if (matched.length === 0) {
+      return { total: stocks.length, up: 0, down: 0, flat: 0, avgPct: 0, hasQuote: false }
+    }
+    const up = matched.filter((q) => q.pct > 0).length
+    const down = matched.filter((q) => q.pct < 0).length
+    const flat = matched.length - up - down
+    const avgPct = matched.reduce((sum, q) => sum + q.pct, 0) / matched.length
+    return {
+      total: stocks.length,
+      up,
+      down,
+      flat,
+      avgPct: avgPct * 100,
+      hasQuote: true,
+    }
+  }, [stocks, quotes])
 
   const stockColumns: Column<SectorStockDTO>[] = [
     {
@@ -91,13 +127,55 @@ export function SectorManager() {
       key: 'name',
       header: '名称',
       width: '8rem',
-      render: (r) => <span className="text-xs">{r.stock_name}</span>,
+      render: (r) => <span className="text-xs">{r.stock_name || '—'}</span>,
+    },
+    {
+      key: 'price',
+      header: '现价',
+      align: 'right',
+      width: '5rem',
+      render: (r) => {
+        const q = quotes[r.stock_code]
+        if (!q) return <span className="text-xs text-muted-foreground/50">—</span>
+        return (
+          <span className="text-xs tabular-nums" style={{ color: q.pct >= 0 ? 'var(--quant-up)' : 'var(--quant-down)' }}>
+            {q.last.toFixed(2)}
+          </span>
+        )
+      },
+      sortValue: (r) => quotes[r.stock_code]?.last ?? 0,
+    },
+    {
+      key: 'pct',
+      header: '涨跌幅',
+      align: 'right',
+      width: '6rem',
+      render: (r) => {
+        const q = quotes[r.stock_code]
+        if (!q) return <span className="text-xs text-muted-foreground/50">—</span>
+        const pct = q.pct * 100
+        const isUp = pct >= 0
+        return (
+          <span
+            className="text-xs tabular-nums font-medium px-1.5 py-0.5 rounded"
+            style={{
+              color: isUp ? 'var(--quant-up)' : 'var(--quant-down)',
+              backgroundColor: isUp
+                ? 'rgba(239, 68, 68, 0.1)'
+                : 'rgba(16, 185, 129, 0.1)',
+            }}
+          >
+            {isUp ? '▲' : '▼'} {Math.abs(pct).toFixed(2)}%
+          </span>
+        )
+      },
+      sortValue: (r) => quotes[r.stock_code]?.pct ?? 0,
     },
     {
       key: 'score',
       header: '得分',
       align: 'right',
-      width: '8rem',
+      width: '7rem',
       render: (r) => <ScoreBadge score={r.score} size="sm" />,
       sortValue: (r) => r.score,
     },
@@ -107,12 +185,14 @@ export function SectorManager() {
       align: 'right',
       render: (r) => (
         <span className="text-xs text-muted-foreground tabular-nums">
-          {new Date(r.added_at).toLocaleString('zh-CN', {
-            month: '2-digit',
-            day: '2-digit',
-            hour: '2-digit',
-            minute: '2-digit',
-          })}
+          {r.added_at
+            ? new Date(r.added_at).toLocaleString('zh-CN', {
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+              })
+            : '—'}
         </span>
       ),
     },
@@ -185,6 +265,14 @@ export function SectorManager() {
                 </span>
               </div>
 
+              {/* 股票数量进度条 (相对 30 目标) */}
+              <div className="h-1 rounded-full bg-muted/30 overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-gradient-to-r from-amber-500/60 to-amber-400 transition-all duration-500"
+                  style={{ width: `${Math.min(100, (s.stock_count / 30) * 100)}%` }}
+                />
+              </div>
+
               {s.last_update && (
                 <div className="text-[10px] text-muted-foreground flex items-center gap-1">
                   <Calendar className="size-3" />
@@ -238,6 +326,70 @@ export function SectorManager() {
               关联策略 {viewSector?.strategy_name} · 共 {stocks.length} 只股票
             </DialogDescription>
           </DialogHeader>
+
+          {/* 统计汇总栏 */}
+          {stocks.length > 0 && (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 p-2 rounded-md border border-quant bg-quant-card/50">
+              <div className="flex items-center gap-2">
+                <div className="flex items-center justify-center rounded size-7 bg-amber-500/10">
+                  <Activity className="size-3.5 text-amber-400" />
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">总数</div>
+                  <div className="text-sm font-semibold tabular-nums">{stats.total}</div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="flex items-center justify-center rounded size-7 bg-[var(--quant-up)]/10">
+                  <TrendingUp className="size-3.5" style={{ color: 'var(--quant-up)' }} />
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">上涨</div>
+                  <div className="text-sm font-semibold tabular-nums" style={{ color: 'var(--quant-up)' }}>
+                    {stats.up}
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="flex items-center justify-center rounded size-7 bg-[var(--quant-down)]/10">
+                  <TrendingDown className="size-3.5" style={{ color: 'var(--quant-down)' }} />
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">下跌</div>
+                  <div className="text-sm font-semibold tabular-nums" style={{ color: 'var(--quant-down)' }}>
+                    {stats.down}
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <div
+                  className="flex items-center justify-center rounded size-7"
+                  style={{
+                    backgroundColor: stats.avgPct >= 0
+                      ? 'rgba(239, 68, 68, 0.1)'
+                      : 'rgba(16, 185, 129, 0.1)',
+                  }}
+                >
+                  <span
+                    className="text-xs font-bold tabular-nums"
+                    style={{ color: stats.avgPct >= 0 ? 'var(--quant-up)' : 'var(--quant-down)' }}
+                  >
+                    {stats.avgPct >= 0 ? '▲' : '▼'}
+                  </span>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">平均涨跌</div>
+                  <div
+                    className="text-sm font-semibold tabular-nums"
+                    style={{ color: stats.avgPct >= 0 ? 'var(--quant-up)' : 'var(--quant-down)' }}
+                  >
+                    {stats.hasQuote ? `${stats.avgPct >= 0 ? '+' : ''}${stats.avgPct.toFixed(2)}%` : '—'}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="flex-1 overflow-hidden">
             {stocksLoading ? (
               <LoadingState rows={6} />
@@ -248,7 +400,7 @@ export function SectorManager() {
                 columns={stockColumns}
                 data={stocks}
                 rowKey={(r) => r.stock_code}
-                maxHeight="32rem"
+                maxHeight="28rem"
                 pageSize={50}
               />
             )}

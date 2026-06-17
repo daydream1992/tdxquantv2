@@ -1,13 +1,13 @@
 'use client'
 
 import * as React from 'react'
-import { Activity, BarChart3, Cpu, Layers, Bell, Sun, Moon, RefreshCw, Settings } from 'lucide-react'
+import { Activity, BarChart3, Cpu, Layers, Bell, Sun, Moon, RefreshCw, Settings, Play, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { cn } from '@/lib/utils'
 import { useThemeMode } from '@/lib/theme'
-import { monitorAPI, configAPI, type MonitorStatusDTO } from '@/lib/api'
+import { monitorAPI, configAPI, strategyAPI, type MonitorStatusDTO } from '@/lib/api'
 import { toast } from 'sonner'
 import { Dashboard } from '@/components/quant/Dashboard'
 import { StrategyManager } from '@/components/quant/StrategyManager'
@@ -28,6 +28,7 @@ export default function Home() {
   const { toggleMode, theme } = useThemeMode()
   const [status, setStatus] = React.useState<MonitorStatusDTO | null>(null)
   const [reloadSpin, setReloadSpin] = React.useState(false)
+  const [runningAll, setRunningAll] = React.useState(false)
 
   // 拉取监控状态用于顶部状态指示
   React.useEffect(() => {
@@ -57,6 +58,32 @@ export default function Home() {
       toast.error('配置加载失败', { description: (e as Error).message })
     } finally {
       setTimeout(() => setReloadSpin(false), 500)
+    }
+  }
+
+  // 一键运行全部启用策略
+  const handleRunAll = async () => {
+    setRunningAll(true)
+    const toastId = toast.loading('正在批量运行所有启用策略...', {
+      description: '请稍候，5 个策略依次执行',
+    })
+    try {
+      const r = await strategyAPI.runAll()
+      const total = r.results.reduce((s, x) => s + x.count, 0)
+      const ok = r.results.filter((x) => x.ok).length
+      const fail = r.results.length - ok
+      toast.success(`批量运行完成：${ok}/${r.results.length} 成功 · 共选出 ${total} 只`, {
+        id: toastId,
+        description: r.results.map((x) => `${x.id}: ${x.count}`).join(' · '),
+      })
+      // 触发 status 刷新
+      setTimeout(() => {
+        monitorAPI.getStatus().then(setStatus).catch(() => {})
+      }, 500)
+    } catch (e) {
+      toast.error('批量运行失败', { id: toastId, description: (e as Error).message })
+    } finally {
+      setRunningAll(false)
     }
   }
 
@@ -123,6 +150,21 @@ export default function Home() {
 
             {/* Actions */}
             <div className="flex items-center gap-1">
+              <Button
+                variant="default"
+                size="sm"
+                className="h-9 gap-1.5 bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25 hover:text-amber-300"
+                onClick={handleRunAll}
+                disabled={runningAll}
+                title="一键运行所有启用的策略"
+              >
+                {runningAll ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Play className="size-4" />
+                )}
+                <span className="hidden sm:inline">{runningAll ? '运行中...' : '运行全部'}</span>
+              </Button>
               <Button
                 variant="ghost"
                 size="icon"

@@ -236,14 +236,17 @@ def _query_latest_snapshots(storage: Any) -> dict[str, dict[str, Any]]:
 
 
 def _query_snapshot_stocks(storage: Any, code: str) -> list[SectorStockResponse]:
-    """从最近一次 ``sector_snapshots`` 取 ``stock_list`` (JSON 数组)。"""
+    """从最近一次 ``sector_snapshots`` 取 ``stock_list`` (JSON 数组)。
+
+    增强：联表 ``selection_results`` 取股票中文名 + 真实得分（修复 stock_name 为空的 Bug）
+    """
     import json
 
     if not _table_exists(storage, "sector_snapshots"):
         return []
     try:
         row = storage.fetchone(
-            "SELECT stock_list, snapshot_at FROM sector_snapshots "
+            "SELECT stock_list, snapshot_at, strategy_id FROM sector_snapshots "
             "WHERE sector_code = ? ORDER BY snapshot_at DESC LIMIT 1",
             (code,),
         )
@@ -254,18 +257,48 @@ def _query_snapshot_stocks(storage: Any, code: str) -> list[SectorStockResponse]
         return []
     raw_list = row[0]
     snap_at = _to_str(row[1]) if len(row) > 1 else None
+    snap_strategy_id = str(row[2]) if len(row) > 2 and row[2] else ""
     try:
         codes = json.loads(str(raw_list)) if raw_list else []
     except (TypeError, ValueError, json.JSONDecodeError):
         return []
+
+    # 联表查 selection_results 取 stock_name + total_score
+    code_to_info: dict[str, dict[str, Any]] = {}
+    if codes and _table_exists(storage, "selection_results") and snap_strategy_id:
+        try:
+            # 取该策略最近一次 run 的全部选股结果
+            placeholders = ", ".join(["?"] * len(codes))
+            sql = (
+                "SELECT stock_code, stock_name, total_score, rank "
+                "FROM selection_results "
+                f"WHERE strategy_id = ? AND stock_code IN ({placeholders}) "
+                "AND run_id = ("
+                "  SELECT run_id FROM selection_results "
+                "  WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1"
+                ") "
+                "ORDER BY rank ASC"
+            )
+            params = [snap_strategy_id, *codes, snap_strategy_id]
+            df = storage.query(sql, params)
+            for _, r in df.iterrows():
+                code_to_info[str(r["stock_code"])] = {
+                    "name": str(r.get("stock_name", "") or ""),
+                    "score": float(r.get("total_score") or 0.0),
+                    "rank": int(r.get("rank") or 0),
+                }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("联表查 selection_results 失败: %s", exc)
+
     out: list[SectorStockResponse] = []
     for i, c in enumerate(codes, start=1):
+        info = code_to_info.get(str(c), {})
         out.append(
             SectorStockResponse(
                 stock_code=str(c),
-                stock_name="",
+                stock_name=str(info.get("name", "")),
                 added_at=snap_at or "",
-                score=round(max(0.0, 1.0 - i * 0.02), 3),
+                score=float(info.get("score", 0.0)) or round(max(0.0, 100.0 - i * 2.0), 3),
             )
         )
     return out

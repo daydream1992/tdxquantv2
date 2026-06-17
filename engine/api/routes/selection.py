@@ -16,7 +16,7 @@ import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 
-from engine.api.deps import get_storage
+from engine.api.deps import get_config, get_storage
 from engine.api.schemas import (
     SelectionDetailResponse,
     SelectionFactorScore,
@@ -40,11 +40,12 @@ router = APIRouter(tags=["selection"])
 )
 async def list_selections(
     storage: Any = Depends(get_storage),
+    cfg: Any = Depends(get_config),
     strategy_id: str | None = Query(None, description="按策略 ID 筛选"),
     run_id: str | None = Query(None, description="按 run_id 筛选"),
     start_date: str | None = Query(None, description="开始日期 YYYY-MM-DD"),
     end_date: str | None = Query(None, description="结束日期 YYYY-MM-DD"),
-    min_score: float | None = Query(None, ge=0, le=1, description="最低得分门槛"),
+    min_score: float | None = Query(None, ge=0, le=100, description="最低得分门槛（0-100）"),
     limit: int = Query(200, ge=1, le=2000),
 ) -> list[SelectionRowResponse]:
     """从 DuckDB ``selection_results`` 表查询。"""
@@ -85,7 +86,7 @@ async def list_selections(
         logger.warning("查询 selection_results 失败: %s", exc)
         return []
 
-    return _rows_from_df(df)
+    return _rows_from_df(df, cfg)
 
 
 # ============================================================================
@@ -101,6 +102,7 @@ async def list_selections(
 async def get_selection_detail(
     run_id: str,
     storage: Any = Depends(get_storage),
+    cfg: Any = Depends(get_config),
 ) -> SelectionDetailResponse:
     """返回某次 run 的全部股票 + 该 run 的元信息。"""
     if not _table_exists(storage, "selection_results"):
@@ -120,7 +122,9 @@ async def get_selection_detail(
         raise HTTPException(status_code=404, detail=f"run_id={run_id} 无数据")
 
     first = df.iloc[0]
-    rows = _rows_from_df(df)
+    rows = _rows_from_df(df, cfg)
+    strategy_id_str = str(first.get("strategy_id", ""))
+    strategy_name = _lookup_strategy_name(cfg, strategy_id_str)
 
     # 取 strategy_runs 元信息（如果表存在）
     started_at: str | None = None
@@ -149,8 +153,8 @@ async def get_selection_detail(
 
     return SelectionDetailResponse(
         run_id=run_id,
-        strategy_id=str(first.get("strategy_id", "")),
-        strategy_name="",
+        strategy_id=strategy_id_str,
+        strategy_name=strategy_name,
         started_at=started_at,
         finished_at=finished_at,
         duration_sec=duration_sec,
@@ -258,16 +262,46 @@ async def export_selection(
 # ============================================================================
 
 
-def _rows_from_df(df: pd.DataFrame) -> list[SelectionRowResponse]:
+def _rows_from_df(df: pd.DataFrame, cfg: Any = None) -> list[SelectionRowResponse]:
+    """把 DataFrame 转 SelectionRowResponse 列表。
+
+    增强：
+    - ``strategy_name`` 从 ``cfg.strategies()`` 反查填充（之前为空）
+    - ``factors[].weight`` 从策略 YAML 的 ``factors`` 段反查填充（之前为 0）
+    """
+    # 预构建 strategy_id → (name, factor_id → weight) 映射
+    strategy_map: dict[str, dict[str, Any]] = {}
+    if cfg is not None:
+        try:
+            strategies = cfg.strategies() or {}
+            for sid, sc in strategies.items():
+                factors_dict: dict[str, float] = {}
+                for f in getattr(sc, "factors", []) or []:
+                    fid = getattr(f, "factor_id", "")
+                    w = float(getattr(f, "weight", 1.0))
+                    if fid:
+                        factors_dict[fid] = w
+                strategy_map[sid] = {
+                    "name": getattr(sc, "strategy_name", "") or sid,
+                    "factors": factors_dict,
+                }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("构建 strategy_map 失败: %s", exc)
+
     out: list[SelectionRowResponse] = []
     for _, row in df.iterrows():
+        sid = str(row.get("strategy_id", ""))
+        sm = strategy_map.get(sid, {})
+        strategy_name = sm.get("name", "") or sid
+        factor_weights = sm.get("factors", {})
+
         factors_raw = row.get("factor_scores", "{}")
-        factors_list = _parse_factor_scores(factors_raw)
+        factors_list = _parse_factor_scores(factors_raw, factor_weights)
         out.append(
             SelectionRowResponse(
                 run_id=str(row.get("run_id", "")),
-                strategy_id=str(row.get("strategy_id", "")),
-                strategy_name="",
+                strategy_id=sid,
+                strategy_name=strategy_name,
                 stock_code=str(row.get("stock_code", "")),
                 stock_name=str(row.get("stock_name", "")),
                 score=float(row.get("total_score") or 0.0),
@@ -279,8 +313,27 @@ def _rows_from_df(df: pd.DataFrame) -> list[SelectionRowResponse]:
     return out
 
 
-def _parse_factor_scores(raw: Any) -> list[SelectionFactorScore]:
-    """``factor_scores`` 列存的是 JSON 字符串 ``{"factor_id": score}``。"""
+def _lookup_strategy_name(cfg: Any, strategy_id: str) -> str:
+    """从 ConfigLoader 反查策略中文名。"""
+    if not strategy_id or cfg is None:
+        return ""
+    try:
+        sc = cfg.strategy(strategy_id)
+        if sc is not None:
+            return getattr(sc, "strategy_name", "") or strategy_id
+    except Exception:  # noqa: BLE001
+        pass
+    return strategy_id
+
+
+def _parse_factor_scores(raw: Any, factor_weights: dict[str, float] | None = None) -> list[SelectionFactorScore]:
+    """``factor_scores`` 列存的是 JSON 字符串 ``{"factor_id": score}``。
+
+    Args:
+        raw: DuckDB 中存的 JSON 字符串 / dict
+        factor_weights: 策略 YAML 中各因子的权重映射 ``{factor_id: weight}``，
+            用于填充 ``SelectionFactorScore.weight`` 字段（DuckDB 中不存权重）
+    """
     if not raw:
         return []
     if isinstance(raw, dict):
@@ -292,13 +345,21 @@ def _parse_factor_scores(raw: Any) -> list[SelectionFactorScore]:
             return []
     if not isinstance(d, dict):
         return []
+    weights = factor_weights or {}
     out: list[SelectionFactorScore] = []
     for k, v in d.items():
         try:
             val = float(v) if v is not None else 0.0
         except (TypeError, ValueError):
             val = 0.0
-        out.append(SelectionFactorScore(factor_id=str(k), value=val, score=val))
+        out.append(
+            SelectionFactorScore(
+                factor_id=str(k),
+                value=val,
+                weight=float(weights.get(str(k), 0.0)),
+                score=val,
+            )
+        )
     return out
 
 

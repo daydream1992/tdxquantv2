@@ -11,9 +11,11 @@ export async function GET(req: Request) {
   const path = url.searchParams.get('action') || 'status'
 
   if (path === 'quotes') {
-    const r = await tryFastAPI('/api/monitor/quotes')
+    // 透传 count 参数（默认 12，最大 200）
+    const count = url.searchParams.get('count') || '12'
+    const r = await tryFastAPI(`/api/monitor/quotes?count=${count}`)
     if (r) return ok(await r.json())
-    return ok(genQuotes(12))
+    return ok(genQuotes(Number(count) || 12))
   }
 
   // status
