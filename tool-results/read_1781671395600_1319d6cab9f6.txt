@@ -1,0 +1,1600 @@
+   625→  ```
+   626→
+   627→##### 3.2 `refresh_kline` - 定向下载某品种某周期历史 K 线
+   628→- 函数签名:
+   629→  ```python
+   630→  refresh_kline(stock_list: List[str] = [], period: str = '')
+   631→  ```
+   632→- 参数:
+   633→  | 参数 | 必选 | 类型 | 说明 |
+   634→  |------|------|------|------|
+   635→  | `stock_list` | 是 | `List[str]` | 6位代码+市场后缀（.SH/.SZ/.BJ 等） |
+   636→  | `period` | 是 | `str` | 仅支持 `1d` / `1m` / `5m`，其他周期由这三种生成 |
+   637→- 注：盘中交易时间段下载 1m/5m 只能下载到截止上个交易日的数据
+   638→- 返回: `dict`，例 `{"Error": "refresh kline cache success.", "ErrorId": "0", "run_id": "1"}`
+   639→- 示例:
+   640→  ```python
+   641→  from tqcenter import tq
+   642→  tq.initialize(__file__)
+   643→  refresh_kline = tq.refresh_kline(stock_list=['688318.SH'], period='1d')
+   644→  print(refresh_kline)
+   645→  ```
+   646→
+   647→---
+   648→
+   649→#### 4. 什么是量化交易（概念说明文档，无 API）
+   650→
+   651→5 步流程：投资想法 → 可执行策略 → 代码程序 → 回测/模拟验证 → 实盘交易并持续优化。
+   652→
+   653→策略三要素：**Security（品种）+ Condition（条件）+ Quantity（数量）**。
+   654→
+   655→文档内含完整金叉死叉策略回测代码示例（vectorbt）：
+   656→```python
+   657→import pandas as pd
+   658→import vectorbt as vbt
+   659→from tqcenter import tq
+   660→
+   661→tq.initialize(__file__)
+   662→
+   663→# 解决 pandas future warning
+   664→pd.set_option('future.no_silent_downcasting', True)
+   665→
+   666→# ========================= 核心配置（用户可直接修改这里）=========================
+   667→target_start = '20240930'  # 【目标回测开始时间】（真正想回测的起始日）
+   668→target_end = '20250930'    # 【目标回测结束时间】
+   669→stock_code_list = ['688318.SH']     # 股票代码
+   670→window = 5         # MA指标周期（如MA5、MA10、MA20，改这里自动适配历史数据）
+   671→# ================================================================================
+   672→
+   673→start_time = (pd.to_datetime(target_start) - pd.Timedelta(days=window + 10)).strftime('%Y%m%d')
+   674→
+   675→# 1.获取价格数据
+   676→df_real = tq.get_market_data(
+   677→    field_list=['Close', 'Open'],
+   678→    stock_list=stock_code_list,
+   679→    start_time=start_time,
+   680→    end_time=target_end,
+   681→    dividend_type='front',
+   682→    period='1d',
+   683→    fill_data=True
+   684→)
+   685→close_df = tq.price_df(df_real, 'Close', column_names=stock_code_list)
+   686→open_df = tq.price_df(df_real, 'Open', column_names=stock_code_list)
+   687→
+   688→
+   689→# 2.买卖信号计算与生成
+   690→ma5_dynamic = vbt.MA.run(close_df, window=window).ma
+   691→ma5_dynamic.columns = close_df.columns
+   692→
+   693→entries_raw = close_df.vbt.crossed_above(ma5_dynamic)
+   694→exits_raw = close_df.vbt.crossed_below(ma5_dynamic)
+   695→
+   696→# 信号移位+1
+   697→entries_df = entries_raw.shift(1).fillna(False).astype(bool)
+   698→exits_df = exits_raw.shift(1).fillna(False).astype(bool)
+   699→
+   700→
+   701→# 3. 执行回测
+   702→portfolio = vbt.Portfolio.from_signals(
+   703→    close=close_df,             # 净值计算用未复权收盘价
+   704→    entries=entries_df,              # 延迟后的买入信号
+   705→    exits=exits_df,                  # 延迟后的卖出信号
+   706→    price=open_df,                # 含滑点的成交价格
+   707→    init_cash=100000,            #  初始资金10万元
+   708→    fees=0.0003,                  # 手续费0.03%（双边）
+   709→    freq='D',                     # 日线频率
+   710→    size_granularity=100          # A股最小交易单位100股
+   711→)
+   712→
+   713→
+   714→# 4. 输出回测结果
+   715→print(f"\n======投资组合回测表现=====")
+   716→print(portfolio.stats())
+   717→print(f"\n======投资组合回测记录======")
+   718→print(portfolio.trades.records_readable)
+   719→```
+   720→
+   721→---
+   722→
+   723→#### 5. 发送消息与信号（监控系统关键）
+   724→
+   725→##### 5.1 `send_message` - 发送文本消息到客户端 TQ 策略界面
+   726→- 函数签名:
+   727→  ```python
+   728→  send_message(msg_str: str) -> Dict
+   729→  ```
+   730→- 参数: `msg_str` (`str`) 消息字符串；用 `|` 分两段，用 `\n` 换行
+   731→- 示例:
+   732→  ```python
+   733→  from tqcenter import tq
+   734→  tq.initialize(__file__)
+   735→  msg_str = "这是第一行. | 这是第二行. "
+   736→  tq.send_message(msg_str)
+   737→  ```
+   738→
+   739→##### 5.2 `send_warn` - 发送预警信号（信号推送机制核心）
+   740→- 函数签名:
+   741→  ```python
+   742→  send_warn(stock_list:     List[str] = [],
+   743→            time_list:      List[str] = [],
+   744→            price_list:     List[str] = [],
+   745→            close_list:     List[str] = [],
+   746→            volum_list:     List[str] = [],
+   747→            bs_flag_list:   List[str] = [],
+   748→            warn_type_list: List[str] = [],
+   749→            reason_list:    List[str] = [],
+   750→            count:          int = 1) -> Dict
+   751→  ```
+   752→- 参数:
+   753→  | 参数 | 必选 | 类型 | 说明 |
+   754→  |------|------|------|------|
+   755→  | `stock_list` | 是 | `List[str]` | 证券代码列表（多只时同一股票可重复出现） |
+   756→  | `time_list` | 是 | `List[str]` | 时间列表（格式如 `20251215141115`） |
+   757→  | `price_list` | 否 | `List[str]` | 现价列表（纯数字字符串） |
+   758→  | `close_list` | 否 | `List[str]` | 收盘价列表（纯数字字符串） |
+   759→  | `volum_list` | 否 | `List[str]` | 成交额列表（纯数字字符串） |
+   760→  | `bs_flag_list` | 否 | `List[str]` | 0=买 1=卖 2=未知；长度<count 自动补 2 |
+   761→  | `warn_type_list` | 否 | `List[str]` | 预警类型，目前仅支持 `0`（常规预警） |
+   762→  | `reason_list` | 否 | `List[str]` | 预警原因，每元素最多 25 汉字 / 50 英文 |
+   763→  | `count` | 否 | `int` | 每个 list 前 count 个数据为有效数据 |
+   764→- 返回: `dict`，例 `{'Error': '发送预警信号成功.', 'ErrorId': '0', 'run_id': '1'}`
+   765→- 示例:
+   766→  ```python
+   767→  from tqcenter import tq
+   768→  tq.initialize(__file__)
+   769→
+   770→  warn_res = tq.send_warn(
+   771→      stock_list    = ['688318.SH', '688318.SH', '600519.SH'],
+   772→      time_list     = ['20251215141115', '20251215142100', '20251215143101'],
+   773→      price_list    = ['123.45', '133.45', '1823.45'],
+   774→      close_list    = ['122.50', '132.50', '1822.50'],
+   775→      volum_list    = ['1000', '2000', '15000'],
+   776→      bs_flag_list  = ['0'],
+   777→      warn_type_list = ['0'],
+   778→      reason_list   = ['价格突破预警线', '收盘价突破预警线', '成交量突破预警线'],
+   779→      count         = 3
+   780→  )
+   781→  print(warn_res)
+   782→  ```
+   783→
+   784→##### 5.3 `send_file` - 推送文件到客户端（可被 TQ 策略数据浏览打开）
+   785→- 函数签名:
+   786→  ```python
+   787→  send_file(file: str) -> Dict
+   788→  ```
+   789→- 参数: `file` (`str`)；放 `.\PYPlugins\file\` 下可只传文件名，否则需绝对路径。支持 txt/pdf/html
+   790→- 示例:
+   791→  ```python
+   792→  from tqcenter import tq
+   793→  tq.initialize(__file__)
+   794→  file = "test.txt"
+   795→  tq.send_file(file)
+   796→  ```
+   797→
+   798→##### 5.4 `send_bt_data` - 推送回测数据到客户端
+   799→- 函数签名:
+   800→  ```python
+   801→  send_bt_data(stock_code: str = '',
+   802→               time_list:  List[str] = [],
+   803→               data_list:  List[List[str]] = [],
+   804→               count:      int = 1) -> Dict
+   805→  ```
+   806→- 参数:
+   807→  | 参数 | 必选 | 类型 | 说明 |
+   808→  |------|------|------|------|
+   809→  | `stock_code` | 是 | `str` | 证券代码 |
+   810→  | `time_list` | 是 | `List[str]` | 时间列表 |
+   811→  | `data_list` | 否 | `List[List[str]]` | 二维 List，每个子元素对应一个时间点，最多 16 个有效纯数字字符串 |
+   812→  | `count` | 否 | `int` | 每个 list 前 count 个数据为有效数据 |
+   813→- 返回: `dict`，例 `{'Error': '发送回测结果成功.', 'ErrorId': '0', 'run_id': '1'}`
+   814→- 示例:
+   815→  ```python
+   816→  from tqcenter import tq
+   817→  tq.initialize(__file__)
+   818→  bt_data = tq.send_bt_data(
+   819→      stock_code = '688318.SH',
+   820→      time_list  = ['20251215141115'],
+   821→      data_list  = [['11']],
+   822→      count      = 1
+   823→  )
+   824→  print(bt_data)
+   825→  ```
+   826→
+   827→---
+   828→
+   829→#### 6. 导出多组数据到客户端 `print_to_tdx`（数据导出能力）
+   830→
+   831→- 函数签名:
+   832→  ```python
+   833→  print_to_tdx(df_list:       list[pd.DataFrame] = [],
+   834→               sp_name:       str  = "",
+   835→               xml_filename:  str  = "",
+   836→               jsn_filenames: list[str] = None,
+   837→               vertical:      int  = None,
+   838→               horizontal:    int  = None,
+   839→               height:        list[str | float] = None,
+   840→               table_names:   list[str] = None) -> None
+   841→  ```
+   842→- 参数:
+   843→  | 参数 | 必选 | 类型 | 说明 |
+   844→  |------|------|------|------|
+   845→  | `df_list` | 是 | `list[pd.DataFrame]` | 多组数据的 DataFrame 列表；每个 DataFrame 第一列为日期（`datetime64[ns]` 或字符串），后续列为指标/因子名 |
+   846→  | `sp_name` | 否 | `str` | .sp 文件名前缀，为空默认 `python.sp` |
+   847→  | `xml_filename` | 否 | `str` | xml 文件名（需 .xml 后缀），建议必填，否则影响面板配置关联 |
+   848→  | `jsn_filenames` | 是 | `list[str]` | 每组对应的 .jsn 文件名列表，长度需等于组数 |
+   849→  | `vertical` | 否 | `int` | 纵向排列 table 组数（≥1），与 horizontal 二选一 |
+   850→  | `horizontal` | 否 | `int` | 横向排列 table 组数（≥1），优先级高于 vertical |
+   851→  | `height` | 否 | `list[str\|float]` | 每组 gridctrl 高度占比（0-1），未指定时自动计算（1/组数，最后一组为 0） |
+   852→  | `table_names` | 否 | `list[str]` | 每组面板标题，为空则取 jsn 文件名前缀 |
+   853→- 约束：`df_list`、`jsn_filenames` 长度必须等于 `vertical`/`horizontal` 指定组数，否则抛 `ValueError`
+   854→- 默认行为：未指定 `vertical`/`horizontal` 时按 1 组纵向排列，自动计算面板高度
+   855→
+   856→---
+   857→
+   858→#### 7. 通用函数（initialize / 订阅行情三件套 + 常量附录）
+   859→
+   860→##### 7.1 `initialize` - 必备初始化
+   861→```python
+   862→from tqcenter import tq
+   863→tq.initialize(__file__)
+   864→```
+   865→> 字符串 "initialize" 不可修改，每个策略必须有此函数。
+   866→
+   867→##### 7.2 `subscribe_hq` - 订阅股票实时更新（最多 100 条）
+   868→- 函数签名:
+   869→  ```python
+   870→  subscribe_hq(stock_list: List[str] = [], callback = None)
+   871→  ```
+   872→- 回调函数格式：`on_data(datas)`，`datas` JSON：`{"Code": "XXXXXX.XX", "ErrorId": "0"}`
+   873→- 示例:
+   874→  ```python
+   875→  from tqcenter import tq
+   876→  import json
+   877→  tq.initialize(__file__)
+   878→
+   879→  def my_callback_func(data_str):
+   880→      print("Callback received data:", data_str)
+   881→      code_json = json.loads(data_str)
+   882→      print(f"codes = {code_json.get('Code')}")
+   883→      report_ptr = tq.get_report_data(code_json.get('Code'))
+   884→      print(report_ptr)
+   885→      return None
+   886→
+   887→  sub_hq = tq.subscribe_hq(stock_list=['688318.SH'], callback=my_callback_func)
+   888→  print(sub_hq)
+   889→  # while True: time.sleep(1)  # 收到更新时策略需正在运行
+   890→  ```
+   891→- 返回: `{"Error": "订阅688318.SH更新成功.", "ErrorId": "0", "run_id": "1"}`
+   892→
+   893→##### 7.3 `unsubscribe_hq` - 取消订阅
+   894→- 函数签名: `unsubscribe_hq(stock_list: List[str] = [])`
+   895→- 示例:
+   896→  ```python
+   897→  un_sub_ptr = tq.unsubscribe_hq(stock_list=['688318.SH'])
+   898→  print(un_sub_ptr)
+   899→  ```
+   900→
+   901→##### 7.4 `get_subscribe_hq_stock_list` - 获取当前策略订阅列表
+   902→- 函数签名: `get_subscribe_hq_stock_list()`
+   903→- 示例:
+   904→  ```python
+   905→  sub_list = tq.get_subscribe_hq_stock_list()
+   906→  print(sub_list)   # ['600519.SH']
+   907→  ```
+   908→
+   909→##### 附录常量（重要）
+   910→- **市场类型后缀**：`.SZ`=0 / `.SH`=1 / `.BJ`=2 / `.NQ`=44 / `.SHO`=8 / `.SZO`=9 / `.HK`=31 / `.US`=74 / `.CSI`=62 / `.CNI`=102 / `.HG`=38 / `.CFF`=47 / `.CZC`=28 / `.DCE`=29 / `.SHF`=30 / `.GFE`=66 / `.INE`=30 / `.HI`=27 / `.OF`=33 / `.CFFO`=7 / `.CZCO`=4 / `.DCEO`=5 / `.SHFO`=6 / `.GFEO`=67 / `.QHZ`=42
+   911→- **dividend_type 复权**：`none` 不复权 / `front` 前复权 / `back` 后复权
+   912→- **period 周期**：`1m` / `5m` / `15m` / `30m` / `1h` / `1d` / `1w` / `1mon` / `1q` / `1y` / `tick`
+   913→- **order_type 订单类型**：`STOCK_BUY=0` / `STOCK_SELL=1` / `CREDIT_BUY=0` / `CREDIT_SELL=1` / `CREDIT_FIN_BUY=69` / `CREDIT_SLO_SELL=70` / `CREDIT_COV_BUY=71` / `CREDIT_STK_REPAY=76` / `ETF_PURCHASE=45` / `ETF_REDEMPTION=46` / `FUTURE_OPEN_LONG=101` / `FUTURE_OPEN_SHORT=102` / `FUTURE_CLOSE_LONG=103` / `FUTURE_CLOSE_SHORT=104` / `OPTION_OPEN_LONG=201` / `OPTION_OPEN_SHORT=202` / `OPTION_CLOSE_LONG=203` / `OPTION_CLOSE_SHORT=204`
+   914→- **price_type 价格类型**：`PRICE_MY=0` 自填价 / `PRICE_SJ=1` 市价 / `PRICE_ZTJ=2` 涨停/笼子上限 / `PRICE_DTJ=3` 跌停/笼子下限
+   915→- **Status 委托状态**：`WTSTATUS_NULL=0` 无效 / `WTSTATUS_NOCJ=1` 未成交 / `WTSTATUS_PARTCJ=2` 部分成交 / `WTSTATUS_ALLCJ=3` 全部成交 / `WTSTATUS_BCBC=4` 部分成交部分撤单 / `WTSTATUS_ALLCD=5` 全部撤单
+   916→
+   917→---
+   918→
+   919→#### 8. 调用客户端功能 `exec_to_tdx`（客户端功能调用）
+   920→
+   921→- 函数签名:
+   922→  ```python
+   923→  def exec_to_tdx(url: str = '')
+   924→  ```
+   925→- 参数: `url` (`str`)，功能串以 `http://www.treeid` 开头
+   926→- 主要功能串:
+   927→  | 功能串 | 说明和示例 |
+   928→  |--------|-----------|
+   929→  | `inhttp` | 内部打开，`http://www.treeid/inhttp://.......` |
+   930→  | `dlghttp` | 内部对话框打开，`http://www.treeid/dlghttp://.......&tdxmyietitle=标题&tdxmyiewidth=500&tdxmyieheight=300&noborder=0` |
+   931→  | `localurl` | 内部打开（非对话框），`http://www.treeid/localurlc:\pa\tips.html.......` |
+   932→  | `dlglocalurl` | 内部打开（对话框），`http://www.treeid/dlglocalurlc:\pa\tips.mht.......` |
+   933→  | `code_` | 进入某只股票（只传入代码） |
+   934→  | `breed_` | 到某个品种，`http://www.treeid/breed_1#688318`；市场：`0#`深 / `1#`沪 / `2#`京；代码前加 `-` 模糊处理 |
+   935→  | `zb_` | 指标公式，`http://www.treeid/zb_MACD` |
+   936→  | `exp_` | 专家系统公式 |
+   937→  | `padcode_` | 进入用户定制版面（后接版面简称） |
+   938→  | `ZXG` | 自选股列表 |
+   939→  | `ETF` | ETF 基金 |
+   940→  | `HK` | 显示港股 |
+   941→  | `QH` | 显示期货 |
+   942→  | `MAINQH` | 显示为主力期货合约 |
+   943→  | `SORT67` | 排行（67） |
+   944→- 返回: `dict`，例 `{'ErrorId': '0', 'Msg': 'http://www.treeid/dlghttp://www.tdx.com.cn', 'run_id': '1'}`
+   945→- 示例:
+   946→  ```python
+   947→  from tqcenter import tq
+   948→  tq.initialize(__file__)
+   949→
+   950→  # 显示主力期货合约
+   951→  exec_res1 = tq.exec_to_tdx(url='http://www.treeid/MAINQH')
+   952→
+   953→  # 对话框打开网页
+   954→  exec_res2 = tq.exec_to_tdx(url='http://www.treeid/dlghttp://www.tdx.com.cn')
+   955→  print(exec_res2)
+   956→  ```
+   957→
+   958→---
+   959→
+   960→#### 9. 检索证券信息 `get_match_stkinfo`（股票代码检索）
+   961→
+   962→- 函数签名:
+   963→  ```python
+   964→  def get_match_stkinfo(key_word: str = '')
+   965→  ```
+   966→- 参数: `key_word` (`str`) 关键词
+   967→- 返回: `List[dict]`，每项 `{"Code": "代码", "Name": "名称"}`
+   968→- 示例:
+   969→  ```python
+   970→  from tqcenter import tq
+   971→  tq.initialize(__file__)
+   972→  match_stkinfo = tq.get_match_stkinfo(key_word='通达信')
+   973→  print(match_stkinfo)
+   974→  ```
+   975→- 数据样本:
+   976→  ```python
+   977→  [{'Code': '880515.SH', 'Name': '通达信88'},
+   978→   {'Code': '880818.SH', 'Name': '通达信热股'},
+   979→   {'Code': '688318.SH', 'Name': '财富趋势'}]
+   980→  ```
+   981→
+   982→---
+   983→
+   984→#### 10. 第一章-涨幅选股策略（完整选股策略示例）
+   985→
+   986→**操作步骤**：
+   987→1. 在通达信客户端手动新增自定义板块（如 `ZFXG`），用于存放筛选结果
+   988→2. 在 VSCode 中运行 Python 策略代码
+   989→
+   990→**策略说明**：如果运行时间点价格高出昨收 5%，则进入涨幅选股板块，否则清空该板块。
+   991→
+   992→**关键参数**：
+   993→| 参数 | 默认值 | 说明 |
+   994→|------|--------|------|
+   995→| `start_time` | `"20251025"` | 数据起始日期 |
+   996→| `target_gain` | `5.0` | 目标涨幅阈值（%），可按需修改 |
+   997→| `target_block_name` | `'ZFXG'` | 自定义板块简称，需与第一步创建的板块一致 |
+   998→| `dividend_type` | `'front'` | 前复权 |
+   999→| `period` | `'1d'` | 日线周期 |
+  1000→
+  1001→**完整代码（原样保留）**：
+  1002→```python
+  1003→# 策略说明：如果运行时间点价格高出昨收5%, 则进入涨幅选股板块，否则清空该板块
+  1004→import pandas as pd
+  1005→import numpy as np
+  1006→from datetime import datetime
+  1007→from tqcenter import tq
+  1008→
+  1009→# 初始化tq
+  1010→tq.initialize(__file__)
+  1011→
+  1012→# 1. 基础配置
+  1013→batch_codes = tq.get_stock_list_in_sector('通达信88')     # 目标板块
+  1014→start_time = "20251025"                                  # 数据起始日期
+  1015→target_end = datetime.now().strftime("%Y%m%d")           # 数据结束日期（当前日期）
+  1016→target_gain = 5.0                                        # 目标涨幅（%），可修改
+  1017→target_block_name = 'ZFXG'                               # 目标自定义板块简称
+  1018→
+  1019→# 2. 获取并整理收盘价数据
+  1020→df_real = tq.get_market_data(
+  1021→    field_list=['Close'],
+  1022→    stock_list=batch_codes,
+  1023→    start_time=start_time,
+  1024→    end_time=target_end,
+  1025→    dividend_type='front',  # 前复权
+  1026→    period='1d',            # 日线
+  1027→    fill_data=True          # 填充缺失数据
+  1028→)
+  1029→# 转换为「日期×股票代码」的收盘价宽表
+  1030→close_df = tq.price_df(df_real, 'Close', column_names=batch_codes)
+  1031→
+  1032→# 3. 核心：计算当日相较于昨日的涨幅（%）
+  1033→# 昨日收盘价（向下平移1行）
+  1034→prev_close = close_df.shift(1)
+  1035→# 计算涨幅：(当日收盘价 - 昨日收盘价) / 昨日收盘价 × 100%
+  1036→daily_gain = (close_df - prev_close) / prev_close * 100
+  1037→
+  1038→# 4. 筛选符合条件的股票（最新交易日涨幅超target_gain%）
+  1039→latest_date = daily_gain.index[-1]              # 最新交易日
+  1040→latest_daily_gain = daily_gain.loc[latest_date] # 每只股票最新交易日的涨幅
+  1041→# 筛选条件：涨幅 > target_gain%（排除NaN，避免数据异常）
+  1042→target_stocks = latest_daily_gain[latest_daily_gain > target_gain].sort_values(ascending=False)
+  1043→target_stocks_list = target_stocks.index.tolist()  # 提取符合条件的股票代码列表
+  1044→
+  1045→# 5. 结果输出与自定义板块操作（可按需注释）
+  1046→print(f"\n=== 筛选结果（当日涨幅＞{target_gain}%）===")
+  1047→if not target_stocks.empty:
+  1048→    # ===================== 模块1：打印筛选结果 =====================
+  1049→    print("【模块1：打印筛选结果】")
+  1050→    print(f"符合条件的股票共 {len(target_stocks)} 只：")
+  1051→    print(f"{'股票代码':<12} {'昨日收盘价':<12} {'当日收盘价':<12} {'当日涨幅':<10}")
+  1052→    print("-" * 50)
+  1053→    for stock_code, gain in target_stocks.items():
+  1054→        prev_price = prev_close.loc[latest_date, stock_code]
+  1055→        curr_price = close_df.loc[latest_date, stock_code]
+  1056→        print(f"{stock_code:<12} {prev_price:<12.2f} {curr_price:<12.2f} {gain:<.2f}%")
+  1057→    print("-" * 50)
+  1058→
+  1059→    # ===================== 模块2：添加至自定义板块 =====================
+  1060→    try:
+  1061→        print("【模块2：自定义板块操作】")
+  1062→        tq.send_user_block(block_code=target_block_name, stocks=target_stocks_list, show=True)
+  1063→        print(f"已成功将股票添加至自定义板块「{target_block_name}」")
+  1064→    except Exception as e:
+  1065→        print(f"添加自定义板块失败：{e}")
+  1066→    print("-" * 50)
+  1067→
+  1068→else:
+  1069→    # ===================== 模块1：打印空结果 =====================
+  1070→    print("【模块1：打印筛选结果】")
+  1071→    print(f"暂无当日涨幅＞{target_gain}%的股票")
+  1072→    print("-" * 50)
+  1073→
+  1074→    # ===================== 模块2：清空自定义选板块 =====================
+  1075→    try:
+  1076→        print("【模块2：自定义板块操作】")
+  1077→        tq.send_user_block(block_code=target_block_name, stocks=[], show=True)
+  1078→        print(f"已清空自定义板块「{target_block_name}」")
+  1079→    except Exception as e:
+  1080→        print(f"清空自定义板块失败：{e}")
+  1081→    print("-" * 50)
+  1082→```
+  1083→
+  1084→**代码逻辑说明**：
+  1085→| 步骤 | 说明 |
+  1086→|------|------|
+  1087→| 基础配置 | 设置目标板块（通达信88）、数据日期范围、目标涨幅阈值（5%）、自定义板块简称 |
+  1088→| 获取数据 | 调用 `tq.get_market_data` 获取前复权日线收盘价，转为宽表格式 |
+  1089→| 计算涨幅 | 用 `shift(1)` 获取昨日收盘价，计算当日涨幅百分比 |
+  1090→| 筛选股票 | 取最新交易日数据，筛选涨幅 > 5% 的股票，按涨幅降序排列 |
+  1091→| 板块操作 | 有结果则写入自定义板块，无结果则清空板块 |
+  1092→
+  1093→> **附加发现**：本示例额外引入了未在通用函数文档单独列出的两个 API：
+  1094→> - `tq.get_stock_list_in_sector('板块名')` — 获取板块成分股代码列表
+  1095→> - `tq.send_user_block(block_code=..., stocks=[...], show=True)` — 写入/清空自定义板块
+  1096→
+  1097→---
+  1098→
+  1099→### 通用能力总结
+  1100→
+  1101→| 能力维度 | 关键 API | 用途 |
+  1102→|----------|----------|------|
+  1103→| **交易日/调度** | `get_trading_dates` | 获取 SH 市场交易日列表，回测/调度基础 |
+  1104→| **行情缓存** | `refresh_cache` / `refresh_kline` | 强制刷新全市场缓存或定向下载历史 K 线 |
+  1105→| **数据下载** | `download_file` | 10大股东/ETF申赎/舆情/股票综合信息 |
+  1106→| **实时订阅** | `subscribe_hq` / `unsubscribe_hq` / `get_subscribe_hq_stock_list` | 实时行情回调推送，最多 100 条 |
+  1107→| **信号推送（监控关键）** | `send_warn` | 多股票多时刻预警信号推送，支持价格/收盘价/成交量/买卖标志/原因 |
+  1108→| **消息推送** | `send_message` | 文本消息推送到 TQ 策略界面（`|` 分段，`\n` 换行） |
+  1109→| **文件推送** | `send_file` | 推送 txt/pdf/html 文件到客户端 |
+  1110→| **回测数据推送** | `send_bt_data` | 推送单股多时间点回测数据（每点最多 16 字段） |
+  1111→| **多组数据导出** | `print_to_tdx` | 多 DataFrame 横/纵向排列导出到客户端面板 |
+  1112→| **客户端功能调用** | `exec_to_tdx` | 通过 `http://www.treeid/...` 功能串调用客户端功能 |
+  1113→| **证券检索** | `get_match_stkinfo` | 关键词模糊匹配证券代码与名称 |
+  1114→| **板块操作（来自示例）** | `get_stock_list_in_sector` / `send_user_block` | 读取板块成分股、写入/清空自定义板块 |
+  1115→| **初始化** | `initialize` | 所有策略必备初始化 |
+  1116→| **常量参考** | 市场后缀 / dividend_type / period / order_type / price_type / Status | 见第 7 节附录 |
+  1117→
+  1118→**与 V8 选股系统改造的衔接点**：
+  1119→- 用 `get_trading_dates` 取代 V8 中从 CSV 推断交易日的方式
+  1120→- 用 `send_warn` + `send_message` 构建实盘监控系统（项目核心新增能力）
+  1121→- 用 `print_to_tdx` / `send_bt_data` 将选股结果导出到客户端面板，替代 CSV 落盘
+  1122→- 用 `get_match_stkinfo` 做股票代码模糊检索，替代 V8 的 name_map.csv
+  1123→- 涨幅选股策略示例可直接作为新框架的「场景化模板」基础
+  1124→
+  1125→Task ID: 2-d
+  1126→Agent: general-purpose
+  1127→Task: 读取 c分类板块 + d客户端操作 + e ETF可转债 文档
+  1128→
+  1129→Work Log:
+  1130→- 读取 6 个文档：
+  1131→  1. c分类板块/获取板块成份股.md
+  1132→  2. c分类板块/获取系统分类成份股.md
+  1133→  3. c分类板块/获取A股板块代码列表.md
+  1134→  4. d客户端操作类/自定义板块管理.md
+  1135→  5. e ETF/可转债/获取可转债信息.md
+  1136→  6. e ETF/可转债/获取跟踪指数的ETF信息.md
+  1137→
+  1138→Stage Summary:
+  1139→
+  1140→### 分类板块 API
+  1141→
+  1142→#### 1. 获取板块成份股 `tq.get_stock_list_in_sector`
+  1143→
+  1144→**函数签名**：
+  1145→
+  1146→```python
+  1147→get_stock_list_in_sector(block_code: str,
+  1148→                         block_type: int = 0,
+  1149→                         list_type: int = 0) -> List
+  1150→```
+  1151→
+  1152→**参数说明**：
+  1153→
+  1154→| 参数 | 是否必选 | 参数类型 | 参数说明 |
+  1155→|------|----------|----------|----------|
+  1156→| `block_code` | Y | `str` | 板块代码 |
+  1157→| `block_type` | N | `int` | 板块类型：`0`=传入板块指数代码或板块指数名称（默认）；`1`=传入自定义板块简称（`ZXG`=自选股，`TJG`=临时条件股） |
+  1158→| `list_type` | Y | `int` | 返回数据类型：`0` 只返回代码，`1` 返回代码和名称 |
+  1159→
+  1160→**注意事项**：
+  1161→- 入参板块只能是**自定义板块**或者**板块指数**（15 板块指数），**不支持**系统全部 A 股、沪深 A 股等板块（这些应使用 `get_stock_list`）。
+  1162→- 获取 A 股成份股时支持板块名称或板块代码两种方式传入。
+  1163→
+  1164→**完整代码示例**：
+  1165→
+  1166→```python
+  1167→from tqcenter import tq
+  1168→
+  1169→tq.initialize(__file__)
+  1170→
+  1171→# 通过板块代码获取成份股
+  1172→block_stocks = tq.get_stock_list_in_sector('880081.SH')
+  1173→print(block_stocks)
+  1174→print(len(block_stocks))
+  1175→
+  1176→# 通过板块名获取成份股
+  1177→block_stocks = tq.get_stock_list_in_sector('钛金属')
+  1178→print(block_stocks)
+  1179→print(len(block_stocks))
+  1180→
+  1181→# 返回代码和名称
+  1182→block_stocks2 = tq.get_stock_list_in_sector('钛金属', list_type=1)
+  1183→print(block_stocks2)
+  1184→
+  1185→# 获取自定义板块成份股
+  1186→block_stocks = tq.get_stock_list_in_sector('CSBK', block_type=1)
+  1187→print(block_stocks)
+  1188→print(len(block_stocks))
+  1189→```
+  1190→
+  1191→**返回值结构**：
+  1192→- `list_type=0`：`['000545.SZ', '000629.SZ', ...]`（字符串列表）
+  1193→- `list_type=1`：`[{'Code': '000545.SZ', 'Name': '金浦钛业'}, ...]`（字典列表，字段 Code / Name）
+  1194→
+  1195→---
+  1196→
+  1197→#### 2. 获取系统分类成份股 `tq.get_stock_list`
+  1198→
+  1199→**函数签名**：
+  1200→
+  1201→```python
+  1202→get_stock_list(market=None,
+  1203→               list_type: int = 0) -> List
+  1204→```
+  1205→
+  1206→**参数说明**：
+  1207→
+  1208→| 参数 | 是否必选 | 参数类型 | 参数说明 |
+  1209→|------|----------|----------|----------|
+  1210→| `market` | Y | `str` | 指定代码（实际为 `list_type` 枚举值，作为字符串传入，如 `'16'`） |
+  1211→| `list_type` | Y | `int` | 返回数据类型：`0` 只返回代码，`1` 返回代码和名称 |
+  1212→
+  1213→**list_type 枚举值（重要！）**：
+  1214→
+  1215→| 值 | 说明 |
+  1216→|----|------|
+  1217→| 0 | 自选股 |
+  1218→| 1 | 持仓股 |
+  1219→| 5 | 所有 A 股 |
+  1220→| 6 | 上证指数成份股 |
+  1221→| 7 | 上证主板 |
+  1222→| 8 | 深证主板 |
+  1223→| 9 | 重点指数 |
+  1224→| 10 | 所有板块指数 |
+  1225→| 11 | 缺省行业板块 |
+  1226→| 12 | 概念板块 |
+  1227→| 13 | 风格板块 |
+  1228→| 14 | 地区板块 |
+  1229→| 15 | 缺省行业分类+概念板块 |
+  1230→| 16 | 研究行业一级 |
+  1231→| 17 | 研究行业二级 |
+  1232→| 18 | 研究行业三级 |
+  1233→| 21 | 含 H 股 |
+  1234→| 22 | 含可转债 |
+  1235→| 23 | 沪深 300 |
+  1236→| 24 | 中证 500 |
+  1237→| 25 | 中证 1000 |
+  1238→| 26 | 国证 2000 |
+  1239→| 27 | 中证 2000 |
+  1240→| 28 | 中证 A500 |
+  1241→| 30 | REITs |
+  1242→| 31 | ETF 基金 |
+  1243→| 32 | 可转债 |
+  1244→| 33 | LOF 基金 |
+  1245→| 34 | 所有可交易基金 |
+  1246→| 35 | 所有沪深基金 |
+  1247→| 36 | T+0 基金 |
+  1248→| 49 | 金融类企业 |
+  1249→| 50 | 沪深 A 股 |
+  1250→| 51 | 创业板 |
+  1251→| 52 | 科创板 |
+  1252→| 53 | 北交所 |
+  1253→| 91 | ETF 追踪的指数 |
+  1254→| 92 | 国内期货主力合约 |
+  1255→| 101 | 国内期货 |
+  1256→| 102 | 港股 |
+  1257→| 103 | 美股 |
+  1258→
+  1259→> 默认为全部 A 股。
+  1260→
+  1261→**完整代码示例**：
+  1262→
+  1263→```python
+  1264→from tqcenter import tq
+  1265→
+  1266→tq.initialize(__file__)
+  1267→
+  1268→# list_type=0 只返回代码
+  1269→stock_list = tq.get_stock_list('16')
+  1270→print(stock_list)
+  1271→
+  1272→# list_type=1 返回代码和名称
+  1273→stock_list2 = tq.get_stock_list('16', list_type=1)
+  1274→print(stock_list2)
+  1275→```
+  1276→
+  1277→**返回值结构**：
+  1278→- `list_type=0`：`['881001.SH', '881006.SH', ...]`（字符串列表）
+  1279→- `list_type=1`：`[{'Code': '881001.SH', 'Name': '煤炭'}, ...]`（字典列表）
+  1280→
+  1281→---
+  1282→
+  1283→#### 3. 获取A股板块代码列表 `tq.get_sector_list`
+  1284→
+  1285→**函数签名**：
+  1286→
+  1287→```python
+  1288→def get_sector_list(list_type: int = 0) -> List
+  1289→```
+  1290→
+  1291→**参数说明**：
+  1292→
+  1293→| 参数 | 是否必选 | 参数类型 | 参数说明 |
+  1294→|------|----------|----------|----------|
+  1295→| `list_type` | 是 | `int` | 返回数据类型。`0` 只返回代码，`1` 返回代码和名称 |
+  1296→
+  1297→> 注：此接口相当于 `get_stock_list('10')`。
+  1298→
+  1299→**完整代码示例**：
+  1300→
+  1301→```python
+  1302→from tqcenter import tq
+  1303→
+  1304→tq.initialize(__file__)
+  1305→
+  1306→# 只返回代码
+  1307→block_list = tq.get_sector_list()
+  1308→print(block_list)
+  1309→
+  1310→# 返回代码和名称
+  1311→block_list2 = tq.get_sector_list(list_type=1)
+  1312→print(block_list2)
+  1313→```
+  1314→
+  1315→**返回值结构**：
+  1316→- `list_type=0`：`['880081.SH', '880082.SH', '880201.SH', ...]`
+  1317→- `list_type=1`：`[{'Code': '880081.SH', 'Name': '轮动趋势'}, {'Code': '880082.SH', 'Name': '板块趋势'}, {'Code': '880201.SH', 'Name': '黑龙江'}, ...]`
+  1318→
+  1319→---
+  1320→
+  1321→### 客户端操作 API（自定义板块管理）
+  1322→
+  1323→> 此模块为监控系统股票池管理的核心能力。共 6 个 API，构成完整的「增 / 删 / 改 / 查 / 清空」自定义板块能力闭环。
+  1324→
+  1325→#### 1. 查 - 获取自定义板块列表 `tq.get_user_sector`
+  1326→
+  1327→**函数签名**：
+  1328→
+  1329→```python
+  1330→get_user_sector() -> List
+  1331→```
+  1332→
+  1333→**完整代码示例**：
+  1334→
+  1335→```python
+  1336→from tqcenter import tq
+  1337→
+  1338→tq.initialize(__file__)
+  1339→
+  1340→user_list = tq.get_user_sector()
+  1341→print(user_list)
+  1342→print(len(user_list))
+  1343→```
+  1344→
+  1345→**返回值结构**：
+  1346→
+  1347→```python
+  1348→[{'Code': 'CSBK', 'Name': '测试板块'}, {'Code': 'CSBK2', 'Name': '测试板块2'}]
+  1349→```
+  1350→
+  1351→---
+  1352→
+  1353→#### 2. 增 - 添加自定义板块成份股 `tq.send_user_block`
+  1354→
+  1355→**函数签名**：
+  1356→
+  1357→```python
+  1358→send_user_block(block_code: str = '',
+  1359→                stocks: List[str] = [],
+  1360→                show: bool = False) -> Dict
+  1361→```
+  1362→
+  1363→**参数说明**：
+  1364→
+  1365→| 参数 | 是否必选 | 参数类型 | 参数说明 |
+  1366→|------|----------|----------|----------|
+  1367→| `block_code` | Y | `str` | 自定义板块简称 |
+  1368→| `stocks` | Y | `List[str]` | 添加的自选股 |
+  1369→| `show` | N | `bool` | 客户端是否切换至对应板块界面 |
+  1370→
+  1371→**注意事项（关键）**：
+  1372→- `block_code` 为客户端**已有的自定义板块简称**，如果不存在则无效果，空则为添加到临时条件股。
+  1373→- `block_code` 存在，传入**空列表**则表示**清空**该板块所有股票，否则为添加新股票。
+  1374→- 自选股的 `block_code` 为 `ZXG`。
+  1375→
+  1376→**完整代码示例**：
+  1377→
+  1378→```python
+  1379→from tqcenter import tq
+  1380→
+  1381→tq.initialize(__file__)
+  1382→
+  1383→zxg_result = tq.send_user_block(block_code='CSBK', stocks=["600000.SH","600004.SH","000001.SZ","000002.SZ"])
+  1384→```
+  1385→
+  1386→**返回值结构**：
+  1387→
+  1388→```python
+  1389→{'Error': 'Add User Block Completed', 'ErrorId': '0', 'run_id': '1'}
+  1390→```
+  1391→
+  1392→---
+  1393→
+  1394→#### 3. 清空 - 清空自定义板块成份股 `tq.clear_sector`
+  1395→
+  1396→**函数签名**：
+  1397→
+  1398→```python
+  1399→clear_sector(block_code: str = '')
+  1400→```
+  1401→
+  1402→**参数说明**：
+  1403→
+  1404→| 参数 | 是否必选 | 参数类型 | 参数说明 |
+  1405→|------|----------|----------|----------|
+  1406→| `block_code` | Y | `str` | 自定义板块简称 |
+  1407→
+  1408→**完整代码示例**：
+  1409→
+  1410→```python
+  1411→from tqcenter import tq
+  1412→
+  1413→tq.initialize(__file__)
+  1414→
+  1415→clear_ptr = tq.clear_sector(block_code='CSBK')
+  1416→print(clear_ptr)
+  1417→```
+  1418→
+  1419→**返回值结构**：
+  1420→
+  1421→```python
+  1422→{
+  1423→    "Error": "清空CSBK板块成功",
+  1424→    "ErrorId": "0",
+  1425→    "run_id": "1"
+  1426→}
+  1427→```
+  1428→
+  1429→---
+  1430→
+  1431→#### 4. 创建 - 创建自定义板块 `tq.create_sector`
+  1432→
+  1433→**函数签名**：
+  1434→
+  1435→```python
+  1436→create_sector(block_code: str = '',
+  1437→              block_name: str = '')
+  1438→```
+  1439→
+  1440→**参数说明**：
+  1441→
+  1442→| 参数 | 是否必选 | 参数类型 | 参数说明 |
+  1443→|------|----------|----------|----------|
+  1444→| `block_code` | Y | `str` | 自定义板块简称 |
+  1445→| `block_name` | Y | `str` | 自定义板块名称 |
+  1446→
+  1447→**完整代码示例**：
+  1448→
+  1449→```python
+  1450→from tqcenter import tq
+  1451→
+  1452→tq.initialize(__file__)
+  1453→
+  1454→create_ptr = tq.create_sector(block_code='CSBK2', block_name='测试板块2')
+  1455→print(create_ptr)
+  1456→```
+  1457→
+  1458→**返回值结构**：
+  1459→
+  1460→```python
+  1461→{
+  1462→    "Error": "创建CSBK2板块成功",
+  1463→    "ErrorId": "0",
+  1464→    "run_id": "1"
+  1465→}
+  1466→```
+  1467→
+  1468→---
+  1469→
+  1470→#### 5. 删 - 删除自定义板块 `tq.delete_sector`
+  1471→
+  1472→**函数签名**：
+  1473→
+  1474→```python
+  1475→delete_sector(block_code: str = '')
+  1476→```
+  1477→
+  1478→**参数说明**：
+  1479→
+  1480→| 参数 | 是否必选 | 参数类型 | 参数说明 |
+  1481→|------|----------|----------|----------|
+  1482→| `block_code` | Y | `str` | 自定义板块简称 |
+  1483→
+  1484→**完整代码示例**：
+  1485→
+  1486→```python
+  1487→from tqcenter import tq
+  1488→
+  1489→tq.initialize(__file__)
+  1490→
+  1491→delete_ptr = tq.delete_sector(block_code='CSBK')
+  1492→print(delete_ptr)
+  1493→```
+  1494→
+  1495→**返回值结构**：
+  1496→
+  1497→```python
+  1498→{
+  1499→    "Error": "删除CSBK板块成功",
+  1500→    "ErrorId": "0",
+  1501→    "run_id": "1"
+  1502→}
+  1503→```
+  1504→
+  1505→---
+  1506→
+  1507→#### 6. 改 - 重命名自定义板块 `tq.rename_sector`
+  1508→
+  1509→**函数签名**：
+  1510→
+  1511→```python
+  1512→rename_sector(block_code: str = '',
+  1513→              block_name: str = '')
+  1514→```
+  1515→
+  1516→**参数说明**：
+  1517→
+  1518→| 参数 | 是否必选 | 参数类型 | 参数说明 |
+  1519→|------|----------|----------|----------|
+  1520→| `block_code` | Y | `str` | 自定义板块简称 |
+  1521→| `block_name` | Y | `str` | 重命名后的自定义板块名称 |
+  1522→
+  1523→**完整代码示例**：
+  1524→
+  1525→```python
+  1526→from tqcenter import tq
+  1527→
+  1528→tq.initialize(__file__)
+  1529→
+  1530→rename_ptr = tq.rename_sector(block_code='CSBK', block_name='测试板块重命名')
+  1531→print(rename_ptr)
+  1532→```
+  1533→
+  1534→**返回值结构**：
+  1535→
+  1536→```python
+  1537→{
+  1538→    "Error": "重命名CSBK板块成功",
+  1539→    "ErrorId": "0",
+  1540→    "run_id": "1"
+  1541→}
+  1542→```
+  1543→
+  1544→#### 应用场景：监控系统股票池管理 / 选股结果回写
+  1545→
+  1546→- **股票池回写**：选股策略每日选出标的 → `clear_sector` 清空旧池 → `send_user_block` 写入新标的 → 客户端即时显示，实现「程序选股 + 通达信客户端盯盘」闭环。
+  1547→- **多策略隔离**：每个策略一个自定义板块（如 `STRA`、`STRB`），用 `create_sector` 建池，`get_user_sector` 列举全部，便于统一管理。
+  1548→- **临时条件股**：`send_user_block` 传空 `block_code` 可写入临时条件股 `TJG`，用于盘中监控快照。
+  1549→- **自选股操作**：`block_code='ZXG'` 即可操作自选股池。
+  1550→- **更新而非追加**：`send_user_block` 在已有板块上为**追加**，回写前必须先 `clear_sector`，否则会重复堆积。
+  1551→
+  1552→---
+  1553→
+  1554→### ETF/可转债 API
+  1555→
+  1556→#### 1. 获取可转债信息 `tq.get_kzz_info`
+  1557→
+  1558→**函数签名**：
+  1559→
+  1560→```python
+  1561→get_kzz_info(stock_code: str = '',
+  1562→             field_list: List[str] = [])
+  1563→```
+  1564→
+  1565→**参数说明**：
+  1566→
+  1567→| 参数 | 是否必选 | 参数类型 | 参数说明 |
+  1568→|------|----------|----------|----------|
+  1569→| `stock_code` | Y | `str` | 可转债代码 |
+  1570→| `field_list` | N | `List[str]` | 字段筛选，传空则返回全部 |
+  1571→
+  1572→**返回字段（共 25 个）**：
+  1573→
+  1574→| 名称 | 类型 | 说明 |
+  1575→|------|------|------|
+  1576→| `SetCode` | `str` | 证券市场 |
+  1577→| `KZZCode` | `str` | 可转债代码 |
+  1578→| `HSCode` | `str` | 正股代码 |
+  1579→| `ZGPrice` | `str` | 转股价格 |
+  1580→| `CurRate` | `str` | 当期利率 |
+  1581→| `RestScope` | `str` | 剩余规模(万) |
+  1582→| `PutBack` | `str` | 回售触发价 |
+  1583→| `ForceRedeem` | `str` | 强赎触发价 |
+  1584→| `ZGDate` | `str` | 转股日 |
+  1585→| `EndPrice` | `str` | 到期价 |
+  1586→| `EndDate` | `str` | 到期日期 |
+  1587→| `ZGRate` | `str` | 转股比率% |
+  1588→| `RealValue` | `str` | 纯债价值 |
+  1589→| `ExpireYield` | `str` | 到期收益率% |
+  1590→| `KZZScore` | `str` | 可转债评级 |
+  1591→| `HSScore` | `str` | 主体评级 |
+  1592→| `RedeemDate` | `str` | 赎回登记日期 |
+  1593→| `RedeemPrice` | `str` | 赎回价格 |
+  1594→| `PutDate` | `str` | 回售申报起始日期 |
+  1595→| `PutPrice` | `str` | 回售价格 |
+  1596→| `ZGCode` | `str` | 转股代码 |
+  1597→| `AGPrice` | `str` | 正股当前价格 |
+  1598→| `KZZPrice` | `str` | 可转债当前价格 |
+  1599→| `KZZYj` | `str` | 溢价率 |
+  1600→| `ZGValue` | `str` | 转股价值 |
+  1601→
+  1602→> **监控关键字段**：`ForceRedeem`（强赎触发价）、`PutBack`（回售触发价）、`KZZYj`（溢价率）、`ZGValue`（转股价值）、`KZZPrice`（转债现价）、`AGPrice`（正股现价）、`RestScope`（剩余规模）、`EndDate`/`RedeemDate`/`PutDate`（关键日期）。
+  1603→
+  1604→**完整代码示例**：
+  1605→
+  1606→```python
+  1607→from tqcenter import tq
+  1608→
+  1609→tq.initialize(__file__)
+  1610→
+  1611→kzz_info = tq.get_kzz_info(stock_code='123039.SZ')
+  1612→print(kzz_info)
+  1613→```
+  1614→
+  1615→**返回值结构样本**：
+  1616→
+  1617→```python
+  1618→{'CurRate': '2.80',
+  1619→ 'EndDate': '20251226',
+  1620→ 'EndPrice': '115.00',
+  1621→ 'ExpireYield': '0.00',
+  1622→ 'ForceRedeem': '37.90',
+  1623→ 'HSCode': '300577',
+  1624→ 'HSScore': 'A+',
+  1625→ 'KZZCode': '123039',
+  1626→ 'KZZScore': 'A+',
+  1627→ 'PutBack': '20.41',
+  1628→ 'PutDate': '0',
+  1629→ 'PutPrice': '0.00',
+  1630→ 'RealValue': '0.00',
+  1631→ 'RedeemDate': '0',
+  1632→ 'RedeemPrice': '0.00',
+  1633→ 'RestScope': '22044.02',
+  1634→ 'ZGCode': '123039',
+  1635→ 'ZGDate': '20200702',
+  1636→ 'ZGPrice': '29.15',
+  1637→ 'ZGRate': '1.15',
+  1638→ 'setcode': '0'}
+  1639→```
+  1640→
+  1641→> 注意：样本中字段返回为**字典**（单只可转债），日期型字段如 `PutDate`、`RedeemDate` 在无相关事件时为 `'0'`；样本里字段大小写实际返回时可能为小写（如 `setcode`），使用时需注意兼容。
+  1642→
+  1643→---
+  1644→
+  1645→#### 2. 获取跟踪指数的 ETF 信息 `tq.get_trackzs_etf_info`
+  1646→
+  1647→**函数签名**：
+  1648→
+  1649→```python
+  1650→get_trackzs_etf_info(zs_code: str = '')
+  1651→```
+  1652→
+  1653→**参数说明**：
+  1654→
+  1655→| 参数 | 是否必选 | 参数类型 | 参数说明 |
+  1656→|------|----------|----------|----------|
+  1657→| `zs_code` | Y | `str` | 指数代码（如 `950162.CSI`） |
+  1658→
+  1659→**返回字段**：
+  1660→
+  1661→| 名称 | 类型 | 说明 |
+  1662→|------|------|------|
+  1663→| `Code` | `str` | 证券代码 |
+  1664→| `Name` | `str` | 证券名称 |
+  1665→| `NowPrice` | `str` | 现价 |
+  1666→| `PreClose` | `str` | 昨收 |
+  1667→| `IOPV` | `str` | 净值 |
+  1668→| `Zgb` | `str` | 净额（万份） |
+  1669→| `Sz` | `str` | 规模（亿元） |
+  1670→
+  1671→**完整代码示例**：
+  1672→
+  1673→```python
+  1674→from tqcenter import tq
+  1675→
+  1676→tq.initialize(__file__)
+  1677→
+  1678→trackzs_etf_info = tq.get_trackzs_etf_info(zs_code='950162.CSI')
+  1679→print(trackzs_etf_info)
+  1680→```
+  1681→
+  1682→**返回值结构样本**（列表，每只跟踪 ETF 为一个字典）：
+  1683→
+  1684→```python
+  1685→[{'Code': '589210.SH', 'Name': '科创芯片设计ETF', 'NowPrice': '1.208', 'PreClose': '1.192', 'IOPV': '1.2071', 'Zgb': '7646.90', 'Sz': '0.92'},
+  1686→ {'Code': '589070.SH', 'Name': '科创芯片设计ETF', 'NowPrice': '0.954', 'PreClose': '0.942', 'IOPV': '0.9547', 'Zgb': '65129.30', 'Sz': '6.21'},
+  1687→ {'Code': '588780.SH', 'Name': ' 科创芯片设计ETF', 'NowPrice': '0.875', 'PreClose': '0.866', 'IOPV': '0.8756', 'Zgb': '106790.20', 'Sz': '9.34'},
+  1688→ {'Code': '589170.SH', 'Name': '科创芯片设计ETF', 'NowPrice': '0.969', 'PreClose': '0.956', 'IOPV': '0.9685', 'Zgb': '37890.90', 'Sz': '3.67'},
+  1689→ {'Code': '589250.SH', 'Name': '芯设计PY', 'NowPrice': '0.000', 'PreClose': '0.000', 'IOPV': '0.0000', 'Zgb': '0.00', 'Sz': '0.00'},
+  1690→ {'Code': '589030.SH', 'Name': '科创芯片设计ETF', 'NowPrice': '1.013', 'PreClose': '1.000', 'IOPV': '1.0130', 'Zgb': '48407.70', 'Sz': '4.90'}]
+  1691→```
+  1692→
+  1693→> 注意：返回为**列表**（同一指数可能有多只跟踪 ETF），规模 `Sz` 为 0 或 `NowPrice` 为 0 的项可能是已清盘 / 暂未交易产品，使用前需过滤。
+  1694→
+  1695→---
+  1696→
+  1697→### 关键能力总结
+  1698→
+  1699→#### 板块管理完整能力（自定义板块 CRUD + 成份股管理）
+  1700→
+  1701→| 能力 | API | 说明 |
+  1702→|------|-----|------|
+  1703→| 列出自定义板块 | `tq.get_user_sector()` | 返回 `[{Code, Name}]` |
+  1704→| 创建板块 | `tq.create_sector(block_code, block_name)` | 创建空板块 |
+  1705→| 重命名板块 | `tq.rename_sector(block_code, block_name)` | 改板块名称（不改 code） |
+  1706→| 删除板块 | `tq.delete_sector(block_code)` | 删除整个板块 |
+  1707→| 清空成份股 | `tq.clear_sector(block_code)` | 仅清股票，板块保留 |
+  1708→| 追加成份股 | `tq.send_user_block(block_code, stocks, show)` | 追加而非覆盖；传空列表=清空 |
+  1709→| 读取成份股 | `tq.get_stock_list_in_sector(code, block_type=1)` | 配合 `block_type=1` 读自定义板块 |
+  1710→
+  1711→**板块成份股读取三类接口对比**：
+  1712→
+  1713→| 场景 | API | 备注 |
+  1714→|------|-----|------|
+  1715→| 系统大类（全 A、沪深 300、可转债、ETF 等） | `tq.get_stock_list('xx')` | `list_type` 枚举 0~103，最强大 |
+  1716→| 板块指数成份股（如钛金属 `880xxx.SH`） | `tq.get_stock_list_in_sector(code)` | 支持 code 或名称 |
+  1717→| 自定义板块成份股 | `tq.get_stock_list_in_sector(code, block_type=1)` | 必须 `block_type=1` |
+  1718→| 获取全部板块指数列表 | `tq.get_sector_list()` | 等价于 `get_stock_list('10')` |
+  1719→
+  1720→#### 可转债/ETF 字段
+  1721→
+  1722→- **可转债 `get_kzz_info`**：单只返回 dict，25 字段覆盖**转股价 / 转股价值 / 溢价率 / 强赎触发价 / 回售触发价 / 剩余规模 / 评级 / 关键日期 / 正股现价 / 转债现价**，是可转债监控全套字段。
+  1723→- **ETF `get_trackzs_etf_info`**：按指数反查跟踪 ETF 列表，7 字段覆盖**现价 / 昨收 / IOPV净值 / 净额 / 规模**，用于指数套利、ETF 流动性筛选。
+  1724→
+  1725→#### 监控系统对接要点
+  1726→1. **股票池回写闭环**：选股结果 → `clear_sector` → `send_user_block` → 通达信客户端即时显示，是程序选股与人工盯盘衔接的关键链路。
+  1727→2. **`send_user_block` 是追加语义**：每日回写必须先 clear，否则股票堆积。
+  1728→3. **`block_code` 必须预先存在**：`send_user_block` 不会自动创建板块，需先 `create_sector`。
+  1729→4. **`ZXG`/`TJG` 是系统保留板块**：自选股 / 临时条件股可直接使用，无需 create。
+  1730→5. **可转债监控**：通过 `get_stock_list('32')` 拿全市场可转债列表，再循环 `get_kzz_info` 拉单只详情，可构建全市场可转债监控表。
+  1731→6. **ETF 选流动性**：`get_trackzs_etf_info` 返回多只 ETF，按 `Sz`（规模）和 `Zgb`（净额）排序可挑出最具流动性的标的。
+  1732→
+  1733→---
+  1734→---
+  1735→Task ID: 2-a
+  1736→Agent: general-purpose
+  1737→Task: 读取核心API参考文件 CLAUDE.md + tongdaxin_query.py + probe README
+  1738→
+  1739→Work Log:
+  1740→- 读取 CLAUDE.md（注意：内容是"数据库重构项目规范"，并非 TdxQuant API 速查表，属于项目规范文件混入，下文已就实际内容做总结）
+  1741→- 读取 tongdaxin_query.py（API 字段查询工具源码，3 大字典 + 6 个工具函数）
+  1742→- 读取 probe_scripts/README_probe_summary.md（15 个探针脚本总览）
+  1743→
+  1744→Stage Summary:
+  1745→
+  1746→### 核心 API 完整清单（按模块分组）
+  1747→
+  1748→> 数据来源：`tongdaxin_query.py` 中定义的 `MARKET_APIS` / `FINANCIAL_APIS` / `SECTOR_APIS` 三大字典。
+  1749→> 注意：本文件给出的是 **field_list 字段清单**，并非完整函数签名；实际函数签名需查阅各分册说明文档。
+  1750→
+  1751→#### 模块1: 行情类信息接口（MARKET_APIS，8 个）
+  1752→
+  1753→- `get_market_data`
+  1754→  - 用途: 获取 K 线行情
+  1755→  - 返回字段: Date, Time, Open, High, Low, Close, Volume, Amount, ForwardFactor(复权因子), VolInStock
+  1756→
+  1757→- `get_market_snapshot`
+  1758→  - 用途: 获取快照数据（实时盘口）
+  1759→  - 返回字段: ItemNum, LastClose, Open, Max, Min, Now, Volume, NowVol, Amount, Inside, Outside, TickDiff, InOutFlag, Jjjz(基金净值), Buyp, Buyv, Sellp, Sellv, UpHome, DownHome, Before5MinNow, Average, XsFlag, Zangsu, ZAFPre3
+  1760→
+  1761→- `get_stock_info`
+  1762→  - 用途: 获取证券基本信息（基本信息 + 分类标识 + 股本与资产 + 收入与利润 + 每股指标 + 其他）
+  1763→  - 返回字段(分组):
+  1764→    - 基本信息: Name, Unit, VolBase, MinPrice, XsFlag, Fz, DelayMin, QHVolBaseRate, HKVolBaseRate
+  1765→    - 分类标识: BelongHS300, BelongHasKQZ, BelongRZRQ, BelongHSGT, IsHKGP, IsQH, IsQQ, IsSTGP, IsQuitGP, TodayDRFlag, HSStockKind
+  1766→    - 股本与资产: ActiveCapital, J_zgb, J_bg, J_hg, J_zzc, J_ldzc, J_gdzc, J_wxzc, J_ldfz, J_cqfz, J_zbgjj, J_jzc
+  1767→    - 收入与利润: J_yysy, J_yycb, J_yszk, J_yyly, J_tzsy, J_jyxjl, J_zxjl, J_ch, J_lyze, J_shly, J_jly, J_wfply
+  1768→    - 每股指标: J_jyl, J_mgwfp, J_mgsy, J_mgsy2, J_mggjj, J_mgjzc, J_mgjzc2, J_gdqyb, J_gdrs, J_HalfYearFlag
+  1769→    - 其他: J_start, tdx_dycode, tdx_dyname, rs_hycode_sim, rs_hyname, blockzscode, underly_setcode, underly_code
+  1770→
+  1771→- `get_more_info`
+  1772→  - 用途: 获取股票更多信息（涨跌停/资金流/估值/财务关键日期等）
+  1773→  - 返回字段(分组):
+  1774→    - 基本与形态: MainBusiness, SafeValue, ShineValue, ShapeValue, TPFlag, ZTPrice, DTPrice, HqDate
+  1775→    - 成交量与市值: fHSL, fLianB, Wtb, Zsz, Ltsz, vzangsu, Fzhsl, FzAmo, FreeLtgb
+  1776→    - 涨幅类: VOpenZAF, ZAF, ZAFYesterday, ZAFPre2D, ZAFPre5, ZAFPre10, ZAFPre20, ZAFPre30, ZAFPre60, ZAFYear, ZAFPreMyMonth, ZAFPreOneYear, ConZAFDateNum
+  1777→    - 资金流向: Zjl, Zjl_HB, TotalBVol, TotalSVol, BCancel, SCancel, L2TicNum, L2OrderNum
+  1778→    - 涨停封板: FCAmo, FCb, OpenAmo, OpenZTBuy, OpenAmoPre1, OpenVolPre1, CJJEPre1, CJJEPre3, FDEPre1, FDEPre2, ZTGPNum, LastStartZT, LastZTHzNum, EverZTCount, YearZTDay
+  1779→    - 价格与估值: MA5Value, HisHigh, HisLow, IPO_Price, More_YJL, BetaValue, DynaPE, MorePE, StaticPE_TTM, DYRatio, PB_MRQ
+  1780→    - 类型标识: IsT0Fund, IsZCZGP, IsKzz, Kzz_HSCode, QHMainYYMM, Yield
+  1781→    - 财务指标: KfEarnMoney, RDInputFee, CashZJ, PreReceiveZJ, OtherQYJzc, StaffNum
+  1782→    - 关键日期: RecentGGJYDate, RecentHGDate, RecentIncentDate, NoticeDate_Recent, RecentReleaseDate, RecentDZDate, ReportDate, ZTDate_Recent, DTDate_Recent, TopDate_Recent, StopJYDate_Recent
+  1783→
+  1784→- `get_pricevol`
+  1785→  - 用途: 批量获取价量（轻量接口）
+  1786→  - 返回字段: LastClose, Now, Volume
+  1787→
+  1788→- `get_relation`
+  1789→  - 用途: 获取股票所属板块
+  1790→  - 返回字段: BlockCode, BlockName, BlockType, GPNume
+  1791→  - 备注: memory/get_relation-api.md 已有专项记忆
+  1792→
+  1793→- `get_gb_info`
+  1794→  - 用途: 获取每天的股本数据
+  1795→  - 返回字段: Date, Zgb(总股本), Ltgb(流通股本)
+  1796→
+  1797→- `get_gb_info_by_date`
+  1798→  - 用途: 根据时间段获取股本数据
+  1799→  - 返回字段: Date, Zgb, Ltgb
+  1800→
+  1801→#### 模块2: 财务类数据接口（FINANCIAL_APIS，6 个）
+  1802→
+  1803→- `get_financial_data`
+  1804→  - 用途: 获取专业财务数据（FN 系列）
+  1805→  - 返回字段（前缀 FN，节选关键）:
+  1806→    - 每股指标: FN1基本每股收益, FN2扣非每股收益, FN3每股未分配利润, FN4每股净资产, FN5每股资本公积金, FN6净资产收益率, FN7每股经营现金流量
+  1807→    - 资产类: FN8货币资金, FN9交易性金融资产, FN10应收票据, FN11应收账款, FN12预付款项, FN13其他应收款, FN17存货, FN21流动资产合计, FN27固定资产, FN33无形资产, FN35商誉, FN40资产总计
+  1808→    - 负债类: FN41短期借款, FN44应付账款, FN45预收款项, FN54流动负债合计, FN55长期借款, FN63负债合计
+  1809→    - 权益类: FN64实收资本, FN68未分配利润, FN69少数股东权益, FN72所有者权益合计
+  1810→    - 现金流量: FN107经营活动现金流量净额, FN119投资活动现金流量净额, FN128筹资活动现金流量净额
+  1811→    - 财务指标: FN197净资产收益率, FN199销售净利率, FN200总资产净利率
+  1812→    - 其他常用: FN230营业收入, FN232归母净利润, FN238总股本, FN239已上市流通A股, FN266自由流通股, FN242股东人数
+  1813→  - 备注: 实际可用字段范围 FN1-FN266+，py 文件中只列出了常用子集
+  1814→
+  1815→- `get_financial_data_by_date`
+  1816→  - 用途: 获取指定日期专业财务数据
+  1817→  - 返回字段: 字段同 get_financial_data
+  1818→  - 备注: 支持按日期范围查询的成对接口
+  1819→
+  1820→- `get_gp_one_data`
+  1821→  - 用途: 获取股票的单个财务数据（GO 系列，多为非报表类数据）
+  1822→  - 返回字段（前缀 GO，节选）: GO1发行价, GO2总发行数量, GO3一致预期目标价, GO4一致预期T年度, GO5-GO7 T年/T+1/T+2每股收益, GO8-GO10 T年/T+1/T+2净利润, GO11-GO13 T年/T+1/T+2营业收入, GO26最新解禁日, GO27最新解禁数量, GO29最新持股机构家数, GO30最新机构持股总量, GO33最新总股本, GO34最新实际流通A股, GO35-GO39业绩预告相关, GO40-GO41业绩快报
+  1823→
+  1824→- `get_gpjy_value`
+  1825→  - 用途: 获取股票交易数据（GP 系列）
+  1826→  - 返回字段: GP01股东人数, GP02龙虎榜买卖, GP03融资融券余额, GP14涨停数据, GP15涨跌停状态, GP16总市值, GP25盘前盘后成交量
+  1827→
+  1828→- `get_bkjy_value`
+  1829→  - 用途: 获取板块交易数据（BK 系列）
+  1830→  - 返回字段: BK5市盈率TTM, BK6市净率MRQ, BK7市销率TTM, BK9涨跌数, BK12涨停数, BK13跌停数
+  1831→
+  1832→- `get_scjy_value`
+  1833→  - 用途: 获取市场交易数据（SC 系列）
+  1834→  - 返回字段: SC01融资融券余额, SC03沪深京涨停股个数, SC04沪深京跌停股个数, SC11大宗交易, SC15打板资金, SC31涨跌家数
+  1835→
+  1836→#### 模块3: 分类板块接口（SECTOR_APIS，3 个）
+  1837→
+  1838→- `get_stock_list`
+  1839→  - 用途: 获取系统分类成份股
+  1840→  - 返回字段: Code, Name
+  1841→  - 备注: list_type=0 只返回 Code, list_type=1 返回 Code 和 Name
+  1842→
+  1843→- `get_sector_list`
+  1844→  - 用途: 获取 A 股板块代码列表
+  1845→  - 返回字段: Code, Name
+  1846→  - 备注: 相当于 `get_stock_list('10')`
+  1847→
+  1848→- `get_stock_list_in_sector`
+  1849→  - 用途: 获取板块成份股
+  1850→  - 返回字段: Code, Name
+  1851→  - 备注: block_type=0 板块指数, block_type=1 自定义板块
+  1852→
+  1853→#### 模块4: 工具函数（tongdaxin_query.py 自带，6 个）
+  1854→
+  1855→- `_extract_field_key(field: str) -> str`
+  1856→  - 用途: 提取字段名（去掉冒号后的描述），内部辅助
+  1857→- `_get_fields(api_info: dict) -> list`
+  1858→  - 用途: 获取接口的字段列表，内部辅助
+  1859→- `find_field_in_apis(field_name: str, case_sensitive: bool = False) -> list`
+  1860→  - 用途: 反向查询字段在哪些接口中出现，返回 [{api, category, description}]
+  1861→- `get_api_fields(api_name: str) -> dict`
+  1862→  - 用途: 正向查询某接口的字段清单，返回 {category, description, fields}
+  1863→- `find_duplicates() -> dict`
+  1864→  - 用途: 检测字段在多接口中的重叠情况
+  1865→- `print_duplicates() -> None`
+  1866→  - 用途: 打印所有重叠字段
+  1867→
+  1868→#### 模块5: 探针脚本中暴露但 tongdaxin_query.py 未登记的 API（10 个）
+  1869→
+  1870→> 这些 API 在 `probe_scripts/README_probe_summary.md` 中被引用，属于"成对接口"或专项接口，但 `tongdaxin_query.py` 未给出字段清单，需要在后续分册说明书中补全：
+  1871→
+  1872→- `get_market_snapshot_by_date` — 快照按日期（成对，对应 probe_02）
+  1873→- `get_ipo_info` — 新股申购信息（probe_05，参数 ipo_type × ipo_date）
+  1874→- `get_match_stkinfo` — 模糊检索证券信息（probe_07，参数 max_count）
+  1875→- `get_scjy_value_by_date` — 市场交易按日期（probe_09）
+  1876→- `get_gpjy_value_by_date` — 个股交易按日期（probe_10）
+  1877→- `get_bkjy_value_by_date` — 板块交易按日期（probe_11）
+  1878→- `get_user_sector` — 用户自定义板块（probe_12）
+  1879→- `get_user_sector_by_code` — 按代码取用户自定义板块（probe_12）
+  1880→- `get_kzz_info` — 可转债信息（probe_13）
+  1881→- `get_trackzs_etf_info` — ETF 跟踪指数信息（probe_14）
+  1882→
+  1883→### API 调用模式总结
+  1884→
+  1885→- **如何初始化连接**: tongdaxin_query.py 本身只是字段查询工具（无网络调用），未暴露连接初始化代码；实际 tqcenter SDK 的连接初始化方式需查阅其他分册（推测在"通用函数/"目录下的初始化文档中）。后续开发需先定位 tqcenter 的 import 与 connect 入口。
+  1886→
+  1887→- **数据返回格式**: tongdaxin_query.py 只给出字段名清单，未给出返回类型；根据探针 README 中提到输出为 `csv_outputs/*.csv`，可推断实际接口返回的是 DataFrame 或可转 DataFrame 的二维结构（字段名 + 多行数据）。具体是 DataFrame / dict / list 需运行探针脚本或查阅分册确认。
+  1888→
+  1889→- **同步/异步模式**: 文件中未体现异步模式，推测为同步阻塞调用（典型的 Python 量化平台模式）。实时订阅/推送能力未在本文件中体现。
+  1890→
+  1891→- **错误处理方式**: 文件中无 try/except，无错误码定义；属于 SDK 包装层，错误处理应在 tqcenter 底层 SDK 中。后续开发需通过探针脚本实测错误返回结构。
+  1892→
+  1893→- **常见调用约定（探针 README 推断）**:
+  1894→  - 批量接口: `get_xxx_value(stock_code, date_list=[...], count=N)`
+  1895→  - 区间接口: `get_xxx_value_by_date(start=d1, end=d2)`
+  1896→  - 字段筛选: 多数接口支持 `field_list=[]` 参数（README 3.5 提到"每个主要接口 field_list=[] 的全量字段返回"）
+  1897→
+  1898→### 关键发现
+  1899→
+  1900→1. **CLAUDE.md 文件错配** ⚠️
+  1901→   - 当前 `/docs/tdx-quant/通达信量化平台说明书/CLAUDE.md` 实际是"数据库重构项目规范"（提到 `K:\DB数据库_v2\dbv2-skeleton.md`、DuckDB、@meta 头部规范、memory/ 目录等），与 TdxQuant 无关。
+  1902→   - **建议**: 后续在 TdxQuant 项目根目录写一份真正的 CLAUDE.md（API 速查 + 改造约束），否则其他子代理读到该文件会被误导。
+  1903→   - 该文件提到的 `memory/get_relation-api.md` / `memory/sector-tables.md` / `memory/kline-table-schema.md` 是另一个项目的记忆，不应被本任务引用。
+  1904→
+  1905→2. **可替代 CSV 数据源的 API 能力**（与 V8 选股系统的 8 个 CSV 对应）：
+  1906→   - `get_market_data` → 替代 K 线 CSV（多周期）
+  1907→   - `get_market_snapshot` / `get_market_snapshot_by_date` → 替代 L2 快照 CSV
+  1908→   - `get_relation` + `get_sector_list` + `get_stock_list_in_sector` + `get_user_sector` → 替代行业分类/板块关系/名称映射 CSV
+  1909→   - `get_stock_info` + `get_more_info` → 替代名称映射、市值、股本等元数据 CSV
+  1910→   - `get_financial_data` + `get_gp_one_data` → 新增能力（CSV 中没有财务数据），财务选股可直接走 API
+  1911→   - `get_gb_info_by_date` → 替代按日期的股本数据
+  1912→
+  1913→3. **支持实时/盘口监控的 API**（实盘监控改造重点）：
+  1914→   - `get_market_snapshot` 实时快照（含 Buyp/Buyv/Sellp/Sellv 五档盘口、Inside/Outside 内外盘、TickDiff）
+  1915→   - `get_pricevol` 轻量批量价量（适合轮询监控）
+  1916→   - `get_more_info` 中含 Zjl(资金流)、L2TicNum、L2OrderNum 等 L2 数据
+  1917→   - `get_scjy_value` 中 SC31 涨跌家数、SC15 打板资金（市场情绪监控）
+  1918→   - ⚠️ 未发现 push/subscribe 订阅接口，监控需采用**轮询模式**（频率需实测）
+  1919→
+  1920→4. **字段重叠现象**（tongdaxin_query.py 自带 `find_duplicates()` 工具可检测）：
+  1921→   - `Volume` / `Now` / `LastClose` 等基础字段在多个接口出现，开发时需选择最轻量接口（如 `get_pricevol`）。
+  1922→   - 市值数据在 `get_more_info.Zsz/Ltsz` 和 `get_gpjy_value.GP16` 重复，需做一致性比对（probe_03 / probe_06 已设计）。
+  1923→
+  1924→5. **FN 系列字段范围远超文件列出**：
+  1925→   - tongdaxin_query.py 只列出约 30 个常用 FN 字段，但实际范围是 FN1-FN266+。后续财务选股逻辑改造时，需要让子代理去 `b财务类数据/` 目录补全完整 FN 字段对照表。
+  1926→
+  1927→6. **探针脚本可执行性**：
+  1928→   - `probe_scripts/` 下有 15 个独立可执行脚本，入口 `run_all_probes.py`，无人值守。
+  1929→   - 当前 README 中 4.1/4.2/4.3 结论表"待执行后填"——意味着探针尚未在本环境跑过，需要在 TdxQuant 终端可用环境执行后才能拿到真实字段返回值/空值率/历史窗口上限。
+  1930→   - **下一步建议**: 在能连接通达信终端的环境跑一次 `run_all_probes.py`，将 csv_outputs 真实数据回填到本知识库。
+  1931→
+  1932→7. **多市场支持**：
+  1933→   - `get_stock_info` 含 IsHKGP/IsQH/IsQQ/IsSTGP/IsQuitGP/HSStockKind 等标识，支持区分主板/创业板/科创板/ETF/可转债/港股/期货。
+  1934→   - `get_kzz_info` / `get_trackzs_etf_info` 是可转债/ETF 专项接口。
+  1935→   - 开发改造时可直接用这些标识替代 V8 系统中 CSV 的市场过滤逻辑。
+  1936→
+  1937→---
+  1938→Task ID: 2-b
+  1939→Agent: general-purpose
+  1940→Task: 读取 a行情类信息 全部文档
+  1941→
+  1942→Work Log:
+  1943→- 逐个完整读取目录下 9 个 markdown 文档（任务说明列了 8 篇，但实际目录有 9 篇，含《根据时间段获取股本数据.md》）
+  1944→- 提取每个 API 的函数签名、参数、返回字段、示例代码、注意事项
+  1945→- 汇总行情类 API 能力地图
+  1946→
+  1947→Stage Summary:
+  1948→
+  1949→### 行情类 API 清单
+  1950→
+  1951→#### 1. 获取快照数据（get_market_snapshot）
+  1952→- 函数: `tq.get_market_snapshot(stock_code: str, field_list: List = []) -> Dict`
+  1953→- 参数:
+  1954→  - `stock_code` (str, 必填): 证券代码，如 `'688260.SH'`
+  1955→  - `field_list` (List[str], 可选, 默认 `[]`): 字段筛选，传空返回全部
+  1956→- 返回: `Dict`（单只股票的快照 dict，含 `ErrorId` 字段）。字段说明：
+  1957→  - `ItemNum` (str): 快照笔数
+  1958→  - `LastClose` (str): 前收盘价
+  1959→  - `Open` / `Max` / `Min` / `Now` (str): 开盘/最高/最低/现价
+  1960→  - `Volume` (str): 总手
+  1961→  - `NowVol` (str): 现手
+  1962→  - `Amount` (str): 总成交金额
+  1963→  - `Inside` (str): 内盘（板块指数时为跌停家数）
+  1964→  - `Outside` (str): 外盘（板块指数时为涨停家数）
+  1965→  - `TickDiff` (str): 笔涨跌
+  1966→  - `InOutFlag` (str): 内外盘标志：0 Buy / 1 Sell / 2 Unknown
+  1967→  - `Jjjz` (str): 基金净值
+  1968→  - `Buyp` / `Buyv` (List[str]): 五档买价 / 五档买盘量
+  1969→  - `Sellp` / `Sellv` (List[str]): 五档卖价 / 五档卖盘量
+  1970→  - `UpHome` / `DownHome` (str): 上涨/下跌家数（指数有效）
+  1971→  - `Before5MinNow` (str): 5 分钟前价格
+  1972→  - `Average` (str): 均价
+  1973→  - `XsFlag` (str): 小数位数
+  1974→  - `Zangsu` (str): 涨速
+  1975→  - `ZAFPre3` (str): 3 日涨幅
+  1976→  - `ErrorId` (str): 错误码（样本中为 `'0'`）
+  1977→- 示例代码:
+  1978→  ```python
+  1979→  from tqcenter import tq
+  1980→
+  1981→  tq.initialize(__file__)
+  1982→
+  1983→  market_snapshot = tq.get_market_snapshot(stock_code='688260.SH', field_list=[])
+  1984→  print(market_snapshot)
+  1985→  ```
+  1986→- 注意事项: 文档未单独列出注意事项；返回是单股 dict（非 DataFrame），五档买卖盘为 List[str]，需要时按 index 取值。
+  1987→
+  1988→#### 2. 批量获取价量（get_pricevol）
+  1989→- 函数: `tq.get_pricevol(stock_list: List[str] = [])`
+  1990→- 参数:
+  1991→  - `stock_list` (List[str], 必填): 证券代码列表
+  1992→- 返回: `Dict`，结构 `{stock_code: {'LastClose':..., 'Now':..., 'Volume':...}, ...}`。字段说明：
+  1993→  - `LastClose` (str): 前收盘价
+  1994→  - `Now` (str): 现价
+  1995→  - `Volume` (str): 成交量
+  1996→- 示例代码:
+  1997→  ```python
+  1998→  from tqcenter import tq
+  1999→
+  2000→  tq.initialize(__file__)
+  2001→
+  2002→  all_stocks = tq.get_stock_list(market='23')
+  2003→  pv_info = tq.get_pricevol(stock_list=all_stocks)
+  2004→  print(pv_info)
+  2005→  ```
+  2006→- 注意事项: 文档使用 `tq.get_stock_list(market='23')` 取全集后批量请求，适合全市场扫描；返回是嵌套 dict 而非 DataFrame。
+  2007→
+  2008→#### 3. 获取每天的股本数据（get_gb_info）
+  2009→- 函数: `tq.get_gb_info(stock_code: str = '', date_list: List[str] = [], count: int = 1)`
+  2010→- 参数:
+  2011→  - `stock_code` (str, 必填): 股票代码
+  2012→  - `date_list` (List[str], 必填): 日期数组（须从小到大排序）
+  2013→  - `count` (int, 必填): 日期有效个数（有效数据个数须 ≥ count，且 ≥ 1）
+  2014→- 返回: `List[Dict]`，每个元素含：
+  2015→  - `Date` (double): 日期（如 `20250101`）
+  2016→  - `Zgb` (double): 总股本
+  2017→  - `Ltgb` (double): 流通股本
+  2018→- 示例代码:
+  2019→  ```python
+  2020→  from tqcenter import tq
+  2021→
+  2022→  tq.initialize(__file__)
+  2023→
+  2024→  gb_info = tq.get_gb_info(stock_code='688318.SH', date_list=['20250101', '20250601'], count=2)
+  2025→  print(gb_info)
+  2026→  ```
+  2027→- 注意事项: `date_list` 必须升序排列；用于精确取若干关键日的股本快照。
+  2028→
+  2029→#### 4. 获取股票更多信息（get_more_info）
+  2030→- 函数: `tq.get_more_info(stock_code: str = '', field_list: List = [])`
+  2031→- 参数:
+  2032→  - `stock_code` (str, 必填): 股票代码
+  2033→  - `field_list` (List[str], 可选, 默认 `[]`): 字段筛选，传空返回全部
+  2034→- 返回: `Dict`（单只股票的扩展信息 dict）。字段分组说明：
+  2035→  - **基本与形态**: `MainBusiness`(主营构成)、`SafeValue`(安全分)、`ShineValue`(亮点数)、`ShapeValue`(短期+中期+长期形态编号)、`TPFlag`(停牌标识)、`ZTPrice`(涨停价)、`DTPrice`(跌停价)、`HqDate`(行情日期)
+  2036→  - **成交量与市值**: `fHSL`(换手率)、`fLianB`(量比)、`Wtb`(委比)、`Zsz`(总市值/亿)、`Ltsz`(流通市值/亿)、`vzangsu`(量涨速)、`Fzhsl`(分钟换手率)、`FzAmo`(2 分钟金额/万元)、`FreeLtgb`(自由流通股本/万)
+  2037→  - **涨幅类**: `VOpenZAF`(抢筹涨幅)、`ZAF`(涨幅)、`ZAFYesterday`(昨日涨幅)、`ZAFPre2D`(前天涨幅)、`ZAFPre5/10/20/30/60`(5/10/20/30/60 日涨幅)、`ZAFYear`(年初至今)、`ZAFPreMyMonth`(本月来)、`ZAFPreOneYear`(一年来)、`ConZAFDateNum`(连涨天数)
+  2038→  - **资金流向**: `Zjl`(主买净额/万元)、`Zjl_HB`(主力净流入/万元)、`TotalBVol`(总买量)、`TotalSVol`(总卖量)、`BCancel`(总撤买量)、`SCancel`(总撤卖量)、`L2TicNum`(L2 逐笔成交数)、`L2OrderNum`(L2 逐笔委托数)
+  2039→  - **涨停封板**: `FCAmo`(封单额/万元)、`FCb`(封成比)、`OpenAmo`(开盘金额/万元, A 股和板块指数有效)、`OpenZTBuy`(竞价涨停买入金额/万元)、`OpenAmoPre1`(昨开盘金额/万元)、`OpenVolPre1`(昨开盘量)、`CJJEPre1`(昨成交额/万元)、`CJJEPre3`(3 日成交额/万元)、`FDEPre1`(昨封单额/万元)、`FDEPre2`(前封单额/万元)、`ZTGPNum`(板块涨停家数)、`LastStartZT`(几天)、`LastZTHzNum`(几板)、`EverZTCount`(连板天)、`YearZTDay`(年涨停天数)
+  2040→  - **价格与估值**: `MA5Value`(5 日均价)、`HisHigh`(52 周最高)、`HisLow`(52 周最低)、`IPO_Price`(发行价)、`More_YJL`(ETF/LOF 溢价率)、`BetaValue`(贝塔系数)、`DynaPE`(动态市盈率)、`MorePE`(市盈率, 港股:动, 其他:静)、`StaticPE_TTM`(TTM 市盈率)、`DYRatio`(股息率)、`PB_MRQ`(MRQ 市净率)
+  2041→  - **类型标识**: `IsT0Fund`(是否 T+0 基金)、`IsZCZGP`(是否注册制 A 股)、`IsKzz`(是否可转债)、`Kzz_HSCode`(可转债正股代码)、`QHMainYYMM`(期货主力合约关联月份)、`Yield`(债券应计利息/回购占款天数)
+  2042→  - **财务指标**: `KfEarnMoney`(扣非净利润/万元)、`RDInputFee`(研发费用/万元)、`CashZJ`(货币资金/万元)、`PreReceiveZJ`(合同负债/万元)、`OtherQYJzc`(其它权益工具/万元)、`StaffNum`(员工人数)
+  2043→  - **关键日期**: `RecentGGJYDate`(最近北上大额交易日)、`RecentHGDate`(最近回购预案日)、`RecentIncentDate`(最近股权激励预案日)、`NoticeDate_Recent`(最近业绩预告日)、`RecentReleaseDate`(最近解禁日)、`RecentDZDate`(最近定增日)、`ReportDate`(最近财报公告日)、`ZTDate_Recent`(近 2 年最近涨停板日)、`DTDate_Recent`(近 2 年最近跌停板日)、`TopDate_Recent`(近 2 年最近龙虎榜日)、`StopJYDate_Recent`(最近停牌日)
+  2044→  - 样本中另含 `OpenFDE` 字段（表中未列出，含义疑似为开盘封单额）
+  2045→- 示例代码:
+  2046→  ```python
+  2047→  from tqcenter import tq
+  2048→
+  2049→  tq.initialize(__file__)
+  2050→
+  2051→  more_info = tq.get_more_info(stock_code='688318.SH', field_list=[])
+  2052→  print(more_info)
+  2053→  ```
+  2054→- 注意事项: 涨停跌停判断使用 `FCAmo`，**大于 0 为涨停，小于 0 为跌停**。这是字段量最丰富的接口（约 70+ 字段），覆盖估值/资金流/封板/财务/关键事件等。
+  2055→
+  2056→#### 5. 获取股票所属板块（get_relation）
+  2057→- 函数: `tq.get_relation(stock_code: str = '')`
+  2058→- 参数:
+  2059→  - `stock_code` (str, 必填): 股票代码
+  2060→- 返回: `List[Dict]`，每个元素含：
+  2061→  - `BlockCode` (str): 板块代码（无板块代码的板块返回 `"0"`，样本中部分指数类条目无该字段）
+  2062→  - `BlockName` (str): 板块名称
+  2063→  - `BlockType` (str): 板块类型（行业 / 地区 / 概念 / 风格 / 指数）
+  2064→  - `GPNume` (str): 成份股数量
+  2065→- 示例代码:
+  2066→  ```python
+  2067→  from tqcenter import tq
+  2068→  from tqcenter import tqconst
+  2069→
+  2070→  tq.initialize(__file__)
+  2071→
+  2072→  gp_block_res = tq.get_relation(stock_code='688318.SH')
+  2073→  print(gp_block_res)
+  2074→  ```
+  2075→- 注意事项: `import tqconst` 在示例中引入但本函数未直接使用；返回包含行业/地区/概念/风格/指数多类板块，其中部分指数类（如"中证500"）样本中无 `BlockCode` 字段。可替代 V8 CSV 中的板块关系表。
+  2076→
+  2077→#### 6. 获取新股申购信息（get_ipo_info）
+  2078→- 函数: `tq.get_ipo_info(ipo_type: int = 0, ipo_date: int = 0)`
+  2079→- 参数:
+  2080→  - `ipo_type` (int, 必填): `0`=新股申购 / `1`=新发债 / `2`=新股和新发债
+  2081→  - `ipo_date` (int, 必填): `0`=只取今天 / `1`=取今天及以后
+  2082→- 返回: `List[Dict]`，每个元素含：
+  2083→  - `Code` (str): 证券代码（如 `'001248.SZ'`、可转债如 `'603270.SH'`）
+  2084→  - `Name` (str): 证券名称
+  2085→  - `SGDate` (str): 申购日期（`'YYYYMMDD'`）
+  2086→  - `SGPrice` (str): 申购价格
+  2087→  - `SGCode` (str): 申购代码
+  2088→  - `MaxSG` (str): 申购上限
+  2089→  - `PE_Issue` (str): 发行市盈率
+  2090→- 示例代码:
+  2091→  ```python
+  2092→  from tqcenter import tq
+  2093→
+  2094→  tq.initialize(__file__)
+  2095→
+  2096→  ipo_info = tq.get_ipo_info(ipo_type=2, ipo_date=1)
+  2097→  print(ipo_info)
+  2098→  ```
+  2099→- 注意事项: 样本中新股市值未定时 `SGPrice='0.00'`；可转债 `SGPrice='100.00'`，`PE_Issue='0.00'`。日期范围靠 `ipo_date` 二值控制，无法自定义区间。
+  2100→
+  2101→#### 7. 获取证券基本信息（get_stock_info）
+  2102→- 函数: `tq.get_stock_info(cls, stock_code: str, field_list: List = []) -> Dict`（实际调用为 `tq.get_stock_info(stock_code=..., field_list=...)`）
+  2103→- 参数:
+  2104→  - `stock_code` (str, 必填): 证券代码
+  2105→  - `field_list` (List[str], 必填, 文档标注"不能为空"，但示例传 `[]`）：字段筛选
+  2106→- 返回: `Dict`（含 `ErrorId`）。字段分组说明：
+  2107→  - **基本信息**: `Name`(证券名称)、`Unit`(交易单位)、`VolBase`(量比基量)、`MinPrice`(最小价格变动)、`XsFlag`(价格小数位数)、`Fz`(List[str], 长度 8, 开收市时间 4 段)、`DelayMin`(延时分钟数)、`QHVolBaseRate`(期货期权每手乘数)、`HKVolBaseRate`(港股/日股/新加坡股每手股数)
+  2108→  - **分类标识**: `BelongHS300`(沪深 300)、`BelongHasKQZ`(含可转债)、`BelongRZRQ`(融资融券标的)、`BelongHSGT`(沪深股通)、`IsHKGP`(港股)、`IsQH`(期货)、`IsQQ`(期权)、`IsSTGP`(ST 股票)、`IsQuitGP`(退市整理板)、`TodayDRFlag`(当天除权除息)、`HSStockKind`(沪深京品种类型, 见下表)
+  2109→  - **HSStockKind 枚举**: 0=指数 / 1=A 股主板 / 2=北证 A 股 / 3=创业板 / 4=科创板 / 5=B 股 / 6=债券 / 7=基金 / 8=权证 / 9=其它 / 10=非沪深京品种
+  2110→  - **股本与资产**: `ActiveCapital`(流通股本/万股)、`J_zgb`(总股本/万股)、`J_bg`(B 股/万股)、`J_hg`(H 股/万股)、`J_zzc`(总资产/万元)、`J_ldzc`(流动资产)、`J_gdzc`(固定资产)、`J_wxzc`(无形资产)、`J_ldfz`(流动负债)、`J_cqfz`(少数股东权益)、`J_zbgjj`(资本公积金)、`J_jzc`(股东权益/净资产)
+  2111→  - **收入与利润**: `J_yysy`(营业收入)、`J_yycb`(营业成本)、`J_yszk`(应收账款)、`J_yyly`(营业利润)、`J_tzsy`(投资收益)、`J_jyxjl`(经营现金净流量)、`J_zxjl`(总现金净流量)、`J_ch`(存货)、`J_lyze`(利润总额)、`J_shly`(税后利润)、`J_jly`(净利润)、`J_wfply`(未分配利益)
+  2112→  - **每股指标**: `J_jyl`(净资产收益率)、`J_mgwfp`(每股未分配)、`J_mgsy`(每股收益-折算全年)、`J_mgsy2`(季报每股收益)、`J_mggjj`(每股公积金)、`J_mgjzc`(每股净资产)、`J_mgjzc2`(季报每股净资产)、`J_gdqyb`(股东权益比)、`J_gdrs`(股东人数)、`J_HalfYearFlag`(报告期月份 3/6/9/12)
+  2113→  - **其他信息**: `J_start`(上市日期)、`tdx_dycode`(通达信地域代码)、`tdx_dyname`(通达信地域)、`rs_hycode_sim`(通达信行业代码)、`rs_hyname`(通达信行业)、`blockzscode`(所属行业板块指数代码)、`underly_setcode`(标的市场代码, 如 ETF 跟踪的指数市场)、`underly_code`(标的代码, 如 ETF 跟踪的指数代码)
+  2114→  - 金额单位统一为"万元"
+  2115→- 示例代码:
+  2116→  ```python
+  2117→  from tqcenter import tq
+  2118→
+  2119→  tq.initialize(__file__)
+  2120→
+  2121→  fdc = tq.get_stock_info(stock_code='688318.SH', field_list=[])
+  2122→  print(fdc)
+  2123→  ```
+  2124→- 注意事项: 文档表格声明 `field_list` 不能为空，但示例中传 `[]` 也能返回全部字段，建议以"传空=返回全部"理解。这是替代 V8 名称映射 CSV 的核心接口（含 `Name`/`HSStockKind`/地域/行业等）。
+  2125→
+  2126→#### 8. 获取 K 线行情（get_market_data）
+  2127→- 函数: `tq.get_market_data(field_list: List[str] = [], stock_list: List[str] = [], period: str = '', start_time: str = '', end_time: str = '', count: int = -1, dividend_type: Optional[str] = None, fill_data: bool = True) -> Dict`
+  2128→- 参数:
+  2129→  - `field_list` (List[str], 可选, 默认 `[]`): 字段筛选，传空返回全部
+  2130→  - `stock_list` (List[str], 必填): 证券代码列表
+  2131→  - `period` (str, 必填): K 线周期（示例中用 `'1d'`，支持分钟/日/周/月等，需配合 `tqconst` 常量）
+  2132→  - `start_time` (str, 可选): 起始时间（`'YYYYMMDD'`）
+  2133→  - `end_time` (str, 可选): 结束时间（`'YYYYMMDD'`）
+  2134→  - `count` (int, 可选, 默认 `-1`): 每只股票返回数据个数
+  2135→  - `dividend_type` (Optional[str], 可选): `'none'`/`'front'`/`'back'`，不复权/前复权/后复权
+  2136→  - `fill_data` (bool, 可选, 默认 `True`): 是否向后填充空缺数据
+  2137→- 返回: `Dict[str, pd.DataFrame]`，key 为字段名（`Open`/`High`/`Low`/`Close`/...），value 为 `DataFrame`，index 为 `stock_list`、columns 为 `time_list`。各字段 DataFrame 维度与索引一致。字段说明：
+  2138→  - `Date` (str): 日期
+  2139→  - `Time` (str): 时间
+  2140→  - `Open` / `High` / `Low` / `Close` (str): 开/高/低/收
+  2141→  - `Volume` (str): 成交量
+  2142→  - `Amount` (str): 成交额
+  2143→  - `ForwardFactor` (str): 前复权因子（仅 `dividend_type='none'` 时有效）
+  2144→  - `VolInStock` (str): 持仓量（仅期货返回有效值，非期货为 0）
+  2145→- count 参数语义:
+  2146→  - **count ≤ 0 或为空**:
+  2147→    - 有 start 有 end: 取 start~end
+  2148→    - 有 start 无 end: 从 start 取到最新
+  2149→    - 无 start 有 end: 从最早取到 end
+  2150→    - 都无: 取全部本地数据
+  2151→  - **count > 0**:
+  2152→    - 有 end: 从 end 往前取 n 根
+  2153→    - 无 end: 从最新 K 线往前取 n 根
+  2154→- 示例代码:
+  2155→  ```python
+  2156→  from tqcenter import tq
+  2157→
+  2158→  tq.initialize(__file__)
+  2159→
+  2160→  df = tq.get_market_data(
+  2161→      field_list=[],
+  2162→      stock_list=['688318.SH'],
+  2163→      start_time='20251220',
+  2164→      end_time='',
+  2165→      count=1,
+  2166→      dividend_type='none',
+  2167→      period='1d',
+  2168→      fill_data=True
+  2169→  )
+  2170→  print(df)
+  2171→  ```
+  2172→- 注意事项:
+  2173→  - 仅 `dividend_type='none'` 时 `ForwardFactor` 返回有效值
+  2174→  - 后复权只对返回的窗口内数据进行后复权
+  2175→  - **一次最多返回 24000 条数据**，完整分钟线需分批多次调用
+  2176→  - 若窗口内未发生权息变动，复权价 = 未复权价
+  2177→  - 期货数据 `Amount=0`，非期货数据 `VolInStock=0`
+  2178→  - 返回结构为「字段 → DataFrame」字典，而非传统 long-form DataFrame，多股票多周期时需手动 reshape
+  2179→
+  2180→#### 9. 根据时间段获取股本数据（get_gb_info_by_date）
+  2181→- 函数: `tq.get_gb_info_by_date(stock_code: str = '', start_date: str = '', end_date: str = '')`
+  2182→- 参数:
+  2183→  - `stock_code` (str, 必填): 股票代码
+  2184→  - `start_date` (str, 必填): 开始日期（`'YYYYMMDD'`）
+  2185→  - `end_date` (str, 必填): 截止日期（示例中传 `''`，疑似表示到最新）
+  2186→- 返回: `List[Dict]`，每个元素含：
+  2187→  - `Date` (double): 日期
+  2188→  - `Zgb` (double): 总股本
+  2189→  - `Ltgb` (double): 流通股本
+  2190→- 示例代码:
+  2191→  ```python
+  2192→  from tqcenter import tq
+  2193→
+  2194→  tq.initialize(__file__)
+  2195→
+  2196→  gb_info_date = tq.get_gb_info_by_date(stock_code='688318.SH', start_date='20260101', end_date='')
+  2197→  print(gb_info_date)
+  2198→  ```
+  2199→- 注意事项: **须通过客户端或 `refresh_kline` 下载对应股票的日 K 线数据**才能返回结果；与 `get_gb_info`（指定离散日期）互补，此函数按连续时间段返回（每个交易日一条）。
+  2200→
+  2201→### 行情类 API 能力总结
+  2202→
+  2203→- **支持的行情类型**: 实时快照（`get_market_snapshot` 单股五档）、批量价量（`get_pricevol` 全市场前收/现价/成交量）、历史 K 线（`get_market_data`）、扩展行情/估值/资金流（`get_more_info`）、证券基本信息+财务摘要（`get_stock_info`）、板块归属（`get_relation`）、股本数据（`get_gb_info` 离散日 / `get_gb_info_by_date` 时间段）、新股/新债申购（`get_ipo_info`）。
+  2204→- **K 线支持的周期**: 文档示例中明确出现 `period='1d'`（日线）。完整周期集合需参考 `tqcenter.tqconst` 常量（推测含 1m/5m/15m/30m/60m/1d/1w/1M 等，待 Task 通用函数模块确认）。
+  2205→- **复权类型**: `none` / `front` / `back` 三种；仅 `none` 模式返回 `ForwardFactor` 前复权因子。
+  2206→- **实时订阅能力**: 本批文档未出现订阅类（subscribe/push）API；当前均为主动查询（pull）模式，无 Tick 级推送。
+  2207→- **历史数据深度**:
+  2208→  - K 线单次最多返回 **24000 条**，分钟线需分批。
+  2209→  - 股本数据可取「关键日」（`get_gb_info`）或「时间段全量」（`get_gb_info_by_date`，后者依赖日 K 线本地缓存）。
+  2210→  - `get_more_info` 提供 52 周高低、近 2 年涨停/跌停/龙虎榜日期、年初至今涨幅等回溯指标。
+  2211→- **批量能力**:
+  2212→  - `get_pricevol` 支持传入完整 `stock_list`（配合 `get_stock_list(market='23')` 全市场扫描）。
+  2213→  - `get_market_data` 的 `stock_list` 支持多股批量（返回结构 index=stock）。
+  2214→  - 其余接口（`get_market_snapshot`/`get_more_info`/`get_stock_info`/`get_relation`）均为单股调用，需循环。
+  2215→- **可替代哪些 V8 CSV**:
+  2216→  - `get_market_snapshot` / `get_pricevol` → 替代 V8 的 L2 快照 CSV（实时层）
+  2217→  - `get_market_data` → 替代 V8 多周期 K 线 CSV（日/分等）
+  2218→  - `get_stock_info` → 替代 V8 的名称映射 CSV（含 `Name`/`HSStockKind`/地域/行业）
+  2219→  - `get_relation` → 替代 V8 的板块关系 CSV
+  2220→  - `get_more_info` → 提供 V8 CSV 中没有的扩展维度（封单/资金流/估值/关键事件日期），增强选股因子
+  2221→  - `get_gb_info` / `get_gb_info_by_date` → 提供动态流通股本（V8 通常为静态），更精确算换手率/市值
+  2222→  - `get_ipo_info` → 新增能力（打新日历），V8 系统无对应
+  2223→- **统一调用约定**: 所有接口均需先 `tq.initialize(__file__)`；代码格式多为 `tq.xxx(stock_code='XXXXXX.SH', ...)`；返回多为 `Dict` 或 `List[Dict]`（非标准 DataFrame，仅 `get_market_data` 返回 `Dict[str, DataFrame]`），上层封装时需要自行转换。
+  2224→
