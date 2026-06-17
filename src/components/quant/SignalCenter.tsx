@@ -7,12 +7,20 @@
  * - 统计：今日各类型信号数
  * - 行末"重推"按钮: channelAPI.repush(signalId)
  * - 新信号 (1 分钟内) 左侧琥珀色边框 + glow
+ * - 行点击 -> 右侧 Sheet 抽屉显示信号完整详情 (含 snapshot JSON 树形展示) (R7-A)
  */
 
 import * as React from 'react'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+  SheetDescription,
+} from '@/components/ui/sheet'
 import {
   Select,
   SelectContent,
@@ -36,6 +44,11 @@ import {
   RefreshCw,
   X,
   Radio,
+  Copy,
+  Loader2,
+  Braces,
+  Hash,
+  Type as TypeIcon,
 } from 'lucide-react'
 import { StockTable, type Column } from './StockTable'
 import { LoadingState } from './LoadingState'
@@ -101,6 +114,11 @@ export function SignalCenter() {
   const [repushing, setRepushing] = React.useState<Set<string>>(new Set())
   // 用于刷新新信号判定
   const [, setTick] = React.useState(0)
+  // R7-A: 信号详情抽屉
+  const [detailOpen, setDetailOpen] = React.useState(false)
+  const [detailSignal, setDetailSignal] = React.useState<SignalDTO | null>(null)
+  const [detailLoading, setDetailLoading] = React.useState(false)
+  const [detailError, setDetailError] = React.useState<string | null>(null)
 
   React.useEffect(() => {
     strategyAPI.list().then(setStrategies).catch(() => {})
@@ -224,6 +242,40 @@ export function SignalCenter() {
       })
     }
   }, [])
+
+  // R7-A: 打开信号详情抽屉, 拉取完整详情 (含 snapshot)
+  const handleOpenDetail = React.useCallback(async (signal: SignalDTO) => {
+    setDetailSignal(signal) // 先显示行内已有的基本信息
+    setDetailOpen(true)
+    setDetailError(null)
+    setDetailLoading(true)
+    try {
+      const full = await signalAPI.getDetail(signal.id)
+      setDetailSignal(full)
+    } catch (e) {
+      setDetailError((e as Error).message || '加载详情失败')
+      // 保持已有 signal 信息可显示
+    } finally {
+      setDetailLoading(false)
+    }
+  }, [])
+
+  // R7-A: 复制 snapshot JSON 到剪贴板
+  const handleCopyJson = React.useCallback(async () => {
+    if (!detailSignal?.snapshot) {
+      toast.warning('当前信号无 snapshot JSON')
+      return
+    }
+    try {
+      const text = JSON.stringify(detailSignal.snapshot, null, 2)
+      await navigator.clipboard.writeText(text)
+      toast.success('已复制 snapshot JSON', {
+        description: `${text.length} 字符`,
+      })
+    } catch (e) {
+      toast.error('复制失败', { description: (e as Error).message })
+    }
+  }, [detailSignal])
 
   // 判断是否新信号 (1 分钟内)
   const isNewSignal = React.useCallback((s: SignalDTO) => {
@@ -636,8 +688,463 @@ export function SignalCenter() {
           maxHeight="32rem"
           pageSize={30}
           rowClassName={rowClassName}
+          onRowClick={handleOpenDetail}
         />
       )}
+
+      {/* R7-A: 信号详情抽屉 */}
+      <SignalDetailSheet
+        open={detailOpen}
+        onOpenChange={setDetailOpen}
+        signal={detailSignal}
+        loading={detailLoading}
+        error={detailError}
+        strategies={strategies}
+        repushing={repushing.has(detailSignal?.id || '')}
+        onRepush={handleRepush}
+        onCopyJson={handleCopyJson}
+      />
+    </div>
+  )
+}
+
+// ============================================================================
+// R7-A: 信号详情抽屉
+// ============================================================================
+
+interface SignalDetailSheetProps {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  signal: SignalDTO | null
+  loading: boolean
+  error: string | null
+  strategies: StrategyDTO[]
+  repushing: boolean
+  onRepush: (signal: SignalDTO) => void
+  onCopyJson: () => void
+}
+
+function SignalDetailSheet({
+  open,
+  onOpenChange,
+  signal,
+  loading,
+  error,
+  strategies,
+  repushing,
+  onRepush,
+  onCopyJson,
+}: SignalDetailSheetProps) {
+  if (!signal) return null
+  const typeMeta = TYPE_META[signal.type] || TYPE_META.system
+  const TypeIcon = typeMeta.icon
+  const statusMeta = PUSH_STATUS_META[signal.push_status] || PUSH_STATUS_META.pending
+  const StatusIcon = statusMeta.icon
+
+  // 反查策略 emoji (若信号本身没带)
+  const strategy = strategies.find((x) => x.strategy_id === signal.strategy_id)
+  const strategyEmoji = signal.strategy_name ? strategy?.strategy_emoji || '📊' : ''
+  const severityLabel: Record<string, string> = {
+    info: '信息',
+    warn: '警告',
+    error: '错误',
+  }
+  const severityColor: Record<string, string> = {
+    info: 'var(--quant-flat)',
+    warn: 'var(--quant-primary)',
+    error: 'var(--quant-up)',
+  }
+  const severity = signal.severity || 'info'
+
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent
+        side="right"
+        className="w-full sm:max-w-lg bg-quant-card border-quant p-0 gap-0 overflow-y-auto quant-scroll"
+      >
+        {/* 顶部: 类型 + 时间 + 策略 */}
+        <SheetHeader className="p-4 border-b border-quant gap-2">
+          <div className="flex items-center gap-2">
+            <span
+              className="text-xs px-2 py-0.5 rounded inline-flex items-center gap-1 border"
+              style={{
+                color: typeMeta.color,
+                backgroundColor: `color-mix(in srgb, ${typeMeta.color} 10%, transparent)`,
+                borderColor: `color-mix(in srgb, ${typeMeta.color} 30%, transparent)`,
+              }}
+            >
+              <TypeIcon className="size-3" />
+              {typeMeta.label}
+            </span>
+            <SheetTitle className="text-sm font-mono text-muted-foreground">
+              {new Date(signal.time).toLocaleString('zh-CN', {
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+              })}
+            </SheetTitle>
+          </div>
+          <SheetDescription className="flex items-center gap-2 text-sm text-foreground/90">
+            {strategyEmoji && <span className="text-lg" aria-hidden>{strategyEmoji}</span>}
+            <span className="font-medium">
+              {signal.strategy_name || signal.strategy_id || '系统信号'}
+            </span>
+          </SheetDescription>
+        </SheetHeader>
+
+        {/* 加载中 */}
+        {loading && (
+          <div className="p-4 flex items-center justify-center text-muted-foreground text-sm border-b border-quant">
+            <Loader2 className="size-4 mr-2 animate-spin text-quant-primary" />
+            正在加载完整详情...
+          </div>
+        )}
+
+        {/* 错误提示 */}
+        {error && !loading && (
+          <div className="p-4 border-b border-quant bg-rose-500/5 text-rose-400 text-xs">
+            加载详情失败: {error} (显示行内已有信息)
+          </div>
+        )}
+
+        {/* 基本信息 */}
+        <section className="p-4 border-b border-quant space-y-2">
+          <div className="text-[11px] text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+            <Hash className="size-3" />
+            基本信息
+          </div>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <InfoCell label="信号 ID" value={signal.id} mono />
+            <InfoCell
+              label="股票代码"
+              value={signal.stock_code || '—'}
+              mono
+            />
+            <InfoCell
+              label="股票名称"
+              value={signal.stock_name || '—'}
+            />
+            <InfoCell
+              label="策略 ID"
+              value={signal.strategy_id || '—'}
+              mono
+            />
+            <InfoCell
+              label="推送状态"
+              value={
+                <span
+                  className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border"
+                  style={{
+                    color: statusMeta.color,
+                    backgroundColor: `color-mix(in srgb, ${statusMeta.color} 10%, transparent)`,
+                    borderColor: `color-mix(in srgb, ${statusMeta.color} 30%, transparent)`,
+                  }}
+                >
+                  <StatusIcon className="size-3" />
+                  {statusMeta.label}
+                </span>
+              }
+            />
+            <InfoCell
+              label="严重度"
+              value={
+                <span
+                  className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded border"
+                  style={{
+                    color: severityColor[severity] || 'var(--quant-flat)',
+                    backgroundColor: `color-mix(in srgb, ${severityColor[severity] || 'var(--quant-flat)'} 10%, transparent)`,
+                    borderColor: `color-mix(in srgb, ${severityColor[severity] || 'var(--quant-flat)'} 30%, transparent)`,
+                  }}
+                >
+                  {severityLabel[severity] || severity}
+                </span>
+              }
+            />
+          </div>
+        </section>
+
+        {/* 推送通道 */}
+        <section className="p-4 border-b border-quant space-y-2">
+          <div className="text-[11px] text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+            <Radio className="size-3" />
+            推送通道 ({signal.pushed_channels.length})
+          </div>
+          {signal.pushed_channels.length === 0 ? (
+            <div className="text-xs text-muted-foreground">—</div>
+          ) : (
+            <div className="flex flex-wrap gap-1.5">
+              {signal.pushed_channels.map((ch) => {
+                const meta = CHANNEL_BADGE_META[ch] || {
+                  color: 'var(--quant-flat)',
+                  label: ch,
+                }
+                return (
+                  <span
+                    key={ch}
+                    className="text-[11px] px-2 py-0.5 rounded border font-medium"
+                    style={{
+                      color: meta.color,
+                      backgroundColor: `color-mix(in srgb, ${meta.color} 10%, transparent)`,
+                      borderColor: `color-mix(in srgb, ${meta.color} 30%, transparent)`,
+                    }}
+                    title={ch}
+                  >
+                    {meta.label}
+                  </span>
+                )
+              })}
+            </div>
+          )}
+        </section>
+
+        {/* 信号内容 */}
+        <section className="p-4 border-b border-quant space-y-2">
+          <div className="text-[11px] text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+            <TypeIcon className="size-3" />
+            信号内容
+          </div>
+          <div className="rounded-md bg-quant-bg/50 border border-quant/60 p-3 text-xs leading-relaxed whitespace-pre-wrap break-words">
+            {signal.content || '(空)'}
+          </div>
+        </section>
+
+        {/* Snapshot JSON 树形展示 */}
+        <section className="p-4 border-b border-quant space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="text-[11px] text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+              <Braces className="size-3" />
+              Snapshot JSON
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-xs hover:bg-amber-500/10 hover:text-amber-400"
+              onClick={onCopyJson}
+              disabled={!signal.snapshot}
+              title="复制 JSON 到剪贴板"
+            >
+              <Copy className="size-3" />
+              复制 JSON
+            </Button>
+          </div>
+          {!signal.snapshot ? (
+            <div className="rounded-md bg-quant-bg/50 border border-quant/60 p-3 text-xs text-muted-foreground">
+              {loading ? '加载中...' : '该信号无 snapshot 数据'}
+            </div>
+          ) : (
+            <div className="rounded-md bg-quant-bg/80 border border-quant p-3 max-h-80 overflow-y-auto quant-scroll">
+              <pre className="text-[11px] font-mono leading-relaxed">
+                <JsonNode
+                  value={signal.snapshot}
+                  depth={0}
+                  isLast
+                />
+              </pre>
+            </div>
+          )}
+        </section>
+
+        {/* 底部操作 */}
+        <div className="p-4 border-t border-quant flex flex-wrap items-center gap-2 sticky bottom-0 bg-quant-card">
+          <Button
+            variant="default"
+            size="sm"
+            className="h-8 gap-1.5 bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25 hover:text-amber-300"
+            onClick={() => onRepush(signal)}
+            disabled={repushing}
+            title="重新推送到所有启用通道"
+          >
+            <RefreshCw className={cn('size-3.5', repushing && 'animate-spin')} />
+            {repushing ? '推送中...' : '重新推送'}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 gap-1.5 border-quant"
+            onClick={onCopyJson}
+            disabled={!signal.snapshot}
+            title="复制 JSON 到剪贴板"
+          >
+            <Copy className="size-3.5" />
+            <span className="hidden sm:inline">复制 JSON</span>
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-8 ml-auto text-muted-foreground hover:text-foreground"
+            onClick={() => onOpenChange(false)}
+          >
+            关闭
+          </Button>
+        </div>
+      </SheetContent>
+    </Sheet>
+  )
+}
+
+// ============================================================================
+// 工具: 信息单元 / JSON 树
+// ============================================================================
+
+function InfoCell({
+  label,
+  value,
+  mono,
+}: {
+  label: string
+  value: React.ReactNode
+  mono?: boolean
+}) {
+  return (
+    <div className="rounded-md bg-quant-bg/40 border border-quant/50 px-2 py-1.5">
+      <div className="text-[9px] text-muted-foreground uppercase tracking-wider">{label}</div>
+      <div
+        className={cn(
+          'text-xs truncate',
+          mono && 'font-mono tabular-nums'
+        )}
+        title={typeof value === 'string' ? value : undefined}
+      >
+        {value}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * JSON 树形节点 (递归渲染)
+ *
+ * - key: 琥珀色 var(--quant-primary)
+ * - string: 绿色 var(--quant-down)
+ * - number: 蓝色 #38bdf8
+ * - boolean: 紫色 #c084fc
+ * - null: 灰色 var(--quant-flat)
+ * - object/array: 递归, 缩进 2 空格
+ */
+function JsonNode({
+  value,
+  depth,
+  isLast,
+  keyName,
+}: {
+  value: unknown
+  depth: number
+  isLast: boolean
+  keyName?: string
+}) {
+  const indent = '  '.repeat(depth)
+  const comma = isLast ? '' : ','
+
+  if (value === null) {
+    return (
+      <div>
+        {keyName && <span style={{ color: 'var(--quant-primary)' }}>"{keyName}": </span>}
+        <span style={{ color: 'var(--quant-flat)' }}>null</span>
+        <span>{comma}</span>
+      </div>
+    )
+  }
+
+  if (typeof value === 'boolean') {
+    return (
+      <div>
+        {keyName && <span style={{ color: 'var(--quant-primary)' }}>"{keyName}": </span>}
+        <span style={{ color: '#c084fc' }}>{String(value)}</span>
+        <span>{comma}</span>
+      </div>
+    )
+  }
+
+  if (typeof value === 'number') {
+    return (
+      <div>
+        {keyName && <span style={{ color: 'var(--quant-primary)' }}>"{keyName}": </span>}
+        <span style={{ color: '#38bdf8' }}>{String(value)}</span>
+        <span>{comma}</span>
+      </div>
+    )
+  }
+
+  if (typeof value === 'string') {
+    // 尝试 display longer strings with quotes
+    const display = value.length > 200 ? value.slice(0, 200) + '…' : value
+    return (
+      <div>
+        {keyName && <span style={{ color: 'var(--quant-primary)' }}>"{keyName}": </span>}
+        <span style={{ color: 'var(--quant-down)' }}>"{display}"</span>
+        <span>{comma}</span>
+      </div>
+    )
+  }
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      return (
+        <div>
+          {keyName && <span style={{ color: 'var(--quant-primary)' }}>"{keyName}": </span>}
+          <span>[]</span>
+          <span>{comma}</span>
+        </div>
+      )
+    }
+    return (
+      <div>
+        {keyName && <span style={{ color: 'var(--quant-primary)' }}>"{keyName}": </span>}
+        <span>[</span>
+        {value.map((v, i) => (
+          <div key={i} style={{ paddingLeft: '1rem' }}>
+            <JsonNode
+              value={v}
+              depth={depth + 1}
+              isLast={i === value.length - 1}
+            />
+          </div>
+        ))}
+        <span>{indent}]</span>
+        <span>{comma}</span>
+      </div>
+    )
+  }
+
+  if (typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+    if (entries.length === 0) {
+      return (
+        <div>
+          {keyName && <span style={{ color: 'var(--quant-primary)' }}>"{keyName}": </span>}
+          <span>{'{}'}</span>
+          <span>{comma}</span>
+        </div>
+      )
+    }
+    return (
+      <div>
+        {keyName && <span style={{ color: 'var(--quant-primary)' }}>"{keyName}": </span>}
+        <span>{'{'}</span>
+        {entries.map(([k, v], i) => (
+          <div key={k} style={{ paddingLeft: '1rem' }}>
+            <JsonNode
+              value={v}
+              depth={depth + 1}
+              isLast={i === entries.length - 1}
+              keyName={k}
+            />
+          </div>
+        ))}
+        <span>{indent}{'}'}</span>
+        <span>{comma}</span>
+      </div>
+    )
+  }
+
+  // fallback (function / undefined / symbol)
+  return (
+    <div>
+      {keyName && <span style={{ color: 'var(--quant-primary)' }}>"{keyName}": </span>}
+      <span style={{ color: 'var(--quant-flat)' }}>{String(value)}</span>
+      <span>{comma}</span>
     </div>
   )
 }

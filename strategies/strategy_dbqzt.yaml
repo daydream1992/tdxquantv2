@@ -18,9 +18,9 @@ universe:
   - BJ
   exclude_codes: []
   include_only: []
-  next_day_confirm: "总分<35 跳过；否则按连板数 fLianB 分支:\n  fLianB>=3: 竞价不低开(>0%)+竞价量放大\n \
-    \ 涨停 & FCb>=0.2: 竞价涨幅>1.5%+不低开\n  涨停 & FCb>0: 竞价涨幅>2%+量比>1.5\n  涨停(其他): 竞价涨幅>2%+量比>1.5\n\
-    \  非涨停: 竞价涨幅>3%+量比>2+5分钟涨>2%\n  fLianB>=5 且 FCb<0.1: ⚠封板弱若低开放弃入场\n"
+  next_day_confirm: '总分<35 跳过；否则按连板数 fLianB 分支: fLianB>=3: 竞价不低开(>0%)+竞价量放大  涨停 &
+    FCb>=0.2: 竞价涨幅>1.5%+不低开 涨停 & FCb>0: 竞价涨幅>2%+量比>1.5 涨停(其他): 竞价涨幅>2%+量比>1.5   非涨停:
+    竞价涨幅>3%+量比>2+5分钟涨>2% fLianB>=5 且 FCb<0.1: ⚠封板弱若低开放弃入场 '
 pool:
   expression: is_limit_up or ZAF >= 7
   description: 涨停股 OR 当日涨幅≥7%

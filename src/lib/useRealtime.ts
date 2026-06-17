@@ -26,6 +26,8 @@ interface RealtimeState {
   status: MonitorStatusDTO | null
   signals: SignalDTO[]
   lastSignalAt: number | null
+  lastUpdated: number | null
+  refreshing: boolean
   mode: 'sse' | 'poll' | 'offline'
 }
 
@@ -37,6 +39,8 @@ export function useRealtimeQuotes(opts: { autoRefresh?: boolean } = {}) {
     status: null,
     signals: [],
     lastSignalAt: null,
+    lastUpdated: null,
+    refreshing: false,
     mode: 'offline',
   })
 
@@ -45,6 +49,7 @@ export function useRealtimeQuotes(opts: { autoRefresh?: boolean } = {}) {
   const firstLoadRef = React.useRef<boolean>(true)
 
   const tick = React.useCallback(async () => {
+    setState((prev) => ({ ...prev, refreshing: true }))
     try {
       const [s, sig, q] = await Promise.all([
         monitorAPI.getStatus(),
@@ -72,11 +77,17 @@ export function useRealtimeQuotes(opts: { autoRefresh?: boolean } = {}) {
         mode: 'poll',
         connected: true,
         lastSignalAt: newAt ?? prev.lastSignalAt,
+        lastUpdated: Date.now(),
+        refreshing: false,
       }))
     } catch {
-      setState((prev) => ({ ...prev, connected: false, mode: 'poll' }))
+      setState((prev) => ({ ...prev, connected: false, mode: 'poll', refreshing: false }))
     }
   }, [])
+
+  const refresh = React.useCallback(() => {
+    tick()
+  }, [tick])
 
   React.useEffect(() => {
     if (!autoRefresh) return
@@ -90,5 +101,5 @@ export function useRealtimeQuotes(opts: { autoRefresh?: boolean } = {}) {
     }
   }, [autoRefresh, tick])
 
-  return { ...state }
+  return { ...state, refresh }
 }

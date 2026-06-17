@@ -9,6 +9,7 @@ import { cn } from '@/lib/utils'
 import { useThemeMode } from '@/lib/theme'
 import { monitorAPI, configAPI, strategyAPI, channelAPI, type MonitorStatusDTO } from '@/lib/api'
 import { toast } from 'sonner'
+import { notifySuccess, notifyError, useNotificationStore } from '@/lib/notifications'
 import { Dashboard } from '@/components/quant/Dashboard'
 import { StrategyManager } from '@/components/quant/StrategyManager'
 import { SelectionResults } from '@/components/quant/SelectionResults'
@@ -16,6 +17,7 @@ import { SignalCenter } from '@/components/quant/SignalCenter'
 import { SectorManager } from '@/components/quant/SectorManager'
 import { ChannelSettingsDialog } from '@/components/quant/ChannelSettingsDialog'
 import { GlobalSearch, type GlobalSearchHandle } from '@/components/quant/GlobalSearch'
+import { NotificationCenter } from '@/components/quant/NotificationCenter'
 
 const TABS = [
   { value: 'dashboard', label: '实时大屏', icon: Activity },
@@ -79,11 +81,9 @@ export default function Home() {
     setReloadSpin(true)
     try {
       const r = await configAPI.reload()
-      toast.success('配置已热加载', {
-        description: `重载 ${r.reloaded.length} 项: ${r.reloaded.slice(0, 5).join(', ')}${r.reloaded.length > 5 ? '...' : ''}`,
-      })
+      notifySuccess('配置已热加载', `重载 ${r.reloaded.length} 项: ${r.reloaded.slice(0, 5).join(', ')}${r.reloaded.length > 5 ? '...' : ''}`)
     } catch (e) {
-      toast.error('配置加载失败', { description: (e as Error).message })
+      notifyError('配置加载失败', (e as Error).message)
     } finally {
       setTimeout(() => setReloadSpin(false), 500)
     }
@@ -100,16 +100,26 @@ export default function Home() {
       const total = r.results.reduce((s, x) => s + x.count, 0)
       const ok = r.results.filter((x) => x.ok).length
       const fail = r.results.length - ok
+      const desc = r.results.map((x) => `${x.id}: ${x.count}`).join(' · ')
+      // 更新 loading toast 为 success（保留 toastId 链路）
       toast.success(`批量运行完成：${ok}/${r.results.length} 成功 · 共选出 ${total} 只`, {
         id: toastId,
-        description: r.results.map((x) => `${x.id}: ${x.count}`).join(' · '),
+        description: desc,
       })
+      // 同步写入通知中心历史
+      useNotificationStore.getState().add(
+        'success',
+        `批量运行完成：${ok}/${r.results.length} 成功 · 共选出 ${total} 只${fail ? ` · 失败 ${fail}` : ''}`,
+        desc,
+      )
       // 触发 status 刷新
       setTimeout(() => {
         monitorAPI.getStatus().then(setStatus).catch(() => {})
       }, 500)
     } catch (e) {
-      toast.error('批量运行失败', { id: toastId, description: (e as Error).message })
+      const msg = (e as Error).message
+      toast.error('批量运行失败', { id: toastId, description: msg })
+      useNotificationStore.getState().add('error', '批量运行失败', msg)
     } finally {
       setRunningAll(false)
     }
@@ -187,6 +197,7 @@ export default function Home() {
               >
                 <Search className="size-4" />
               </Button>
+              <NotificationCenter />
               <Button
                 variant="default"
                 size="sm"

@@ -46,6 +46,10 @@ export interface SignalDTO {
   content: string
   pushed_channels: string[]
   push_status: 'success' | 'partial' | 'failed' | 'pending'
+  /** R7-A: 触发时行情快照 JSON */
+  snapshot?: Record<string, unknown> | null
+  /** R7-A: 信号严重度 (info / warn / error) */
+  severity?: string
 }
 
 export interface SectorDTO {
@@ -98,6 +102,24 @@ export interface QuoteDTO {
   volume: number
   amount: number
   ts: number
+  /** R7-A: 主力净流入 (万元) */
+  main_inflow?: number
+  /** R7-A: 大买占比 0~1 */
+  big_buy_ratio?: number
+  /** R7-A: 换手率% */
+  turnover_rate?: number
+}
+
+/** R7-A: 资金流向排行单条 */
+export interface FlowRankingItemDTO {
+  code: string
+  name: string
+  last: number
+  pct: number
+  main_inflow: number
+  big_buy_ratio: number
+  turnover_rate: number
+  amount: number
 }
 
 // ===== 通用请求 =====
@@ -230,6 +252,9 @@ export const signalAPI = {
     })
     return fetchAPI<SignalDTO[]>(`/api/signals?${sp.toString()}`)
   },
+  /** R7-A: 信号详情 (含 snapshot JSON) */
+  getDetail: (id: string) =>
+    fetchAPI<SignalDTO>(`/api/signals/${encodeURIComponent(id)}`),
 }
 
 export const sectorAPI = {
@@ -258,6 +283,11 @@ export const monitorAPI = {
   getStatus: () => fetchAPI<MonitorStatusDTO>('/api/monitor?action=status'),
   getQuotes: (count = 100) =>
     fetchAPI<QuoteDTO[]>(`/api/monitor?action=quotes&count=${count}`),
+  /** R7-A: 资金流向排行 (按 main_inflow / big_buy_ratio / turnover_rate 排序, Top 5) */
+  getFlowRanking: (count = 50, metric: 'main_inflow' | 'big_buy_ratio' | 'turnover_rate' = 'main_inflow') =>
+    fetchAPI<FlowRankingItemDTO[]>(
+      `/api/monitor/flow-ranking?count=${count}&metric=${metric}`
+    ),
 }
 
 export const themeAPI = {
@@ -285,6 +315,31 @@ export const configAPI = {
       method: 'PUT',
       body: JSON.stringify({ yaml_content, enabled }),
     }),
+  /** 创建/复制策略 YAML 文件 */
+  createStrategy: (strategy_id: string, yaml_content: string, overwrite = false) =>
+    fetchAPI<{
+      strategy_id: string
+      strategy_name: string
+      enabled: boolean
+      yaml_path: string
+      yaml_content: string
+    }>('/api/config/strategies', {
+      method: 'POST',
+      body: JSON.stringify({ strategy_id, yaml_content, overwrite }),
+    }),
+  /** 删除策略 YAML 文件（启用中的策略会返回 409） */
+  deleteStrategy: (id: string) =>
+    fetchAPI<{ ok: boolean; strategy_id: string; deleted: string; message: string }>(
+      `/api/config/strategies/${id}`,
+      { method: 'DELETE' }
+    ),
+}
+
+/** 创建策略请求体（前端 DTO，对齐后端 StrategyCreateRequest） */
+export interface StrategyCreateRequestDTO {
+  strategy_id: string
+  yaml_content: string
+  overwrite?: boolean
 }
 
 // ===== 推送通道 =====

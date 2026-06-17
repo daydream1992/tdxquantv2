@@ -1,6 +1,8 @@
 /**
- * PUT /api/config/strategies/[id] — 在线更新策略 YAML
- * body: { yaml_content: string, enabled?: boolean }
+ * PUT    /api/config/strategies/[id] — 在线更新策略 YAML
+ *   body: { yaml_content: string, enabled?: boolean }
+ *
+ * DELETE /api/config/strategies/[id] — 删除策略 YAML 文件
  */
 
 import { ok, err } from '@/lib/api-proxy'
@@ -41,6 +43,39 @@ export async function PUT(
       return ok(await r.json())
     }
     // FastAPI 返回错误（如 YAML 解析失败 / strategy_id 不一致）
+    let detail = `FastAPI ${r.status}`
+    try {
+      const data = await r.json()
+      detail = data.detail || detail
+    } catch {
+      /* noop */
+    }
+    return err(detail, r.status)
+  } catch (e) {
+    return err(`FastAPI 不可达: ${(e as Error).message}`, 503)
+  }
+}
+
+export async function DELETE(
+  _req: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params
+  const url = `http://127.0.0.1:${FASTAPI_PORT}/api/config/strategies/${id}`
+  try {
+    const controller = new AbortController()
+    const t = setTimeout(() => controller.abort(), FASTAPI_TIMEOUT_MS)
+    const r = await fetch(url, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      cache: 'no-store',
+    })
+    clearTimeout(t)
+
+    if (r.ok) {
+      return ok(await r.json())
+    }
     let detail = `FastAPI ${r.status}`
     try {
       const data = await r.json()

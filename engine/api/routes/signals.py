@@ -1,7 +1,8 @@
 """``/api/signals`` 路由 - 信号事件查询与统计。
 
-- ``GET /api/signals``        - 信号列表（支持 type/strategy_id/date 筛选）
-- ``GET /api/signals/stats``  - 信号统计
+- ``GET /api/signals``             - 信号列表（支持 type/strategy_id/date 筛选）
+- ``GET /api/signals/stats``       - 信号统计
+- ``GET /api/signals/{signal_id}`` - 信号详情 (含 snapshot JSON)
 """
 
 from __future__ import annotations
@@ -9,7 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from engine.api.deps import get_config, get_state, get_storage
 from engine.api.schemas import (
@@ -60,6 +61,41 @@ async def get_signal_stats(
 
 
 @router.get(
+    "/{signal_id}",
+    response_model=SignalEventResponse,
+    summary="信号详情",
+)
+async def get_signal_detail(
+    signal_id: str,
+    storage: Any = Depends(get_storage),
+    cfg: Any = Depends(get_config),
+) -> SignalEventResponse:
+    """返回单条信号完整详情 (含 snapshot JSON)。
+
+    用途: 信号中心行点击 → 抽屉展示完整快照与 severity。
+    """
+    if not _table_exists(storage, "signal_events"):
+        raise HTTPException(status_code=404, detail=f"信号 {signal_id} 不存在")
+
+    sql = (
+        "SELECT event_id, strategy_id, stock_code, stock_name, "
+        "       alert_type, condition_expr, severity, snapshot, channels_fired, triggered_at "
+        "FROM signal_events WHERE event_id = ? LIMIT 1"
+    )
+    try:
+        df = storage.query(sql, (signal_id,))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("查询 signal_events 详情失败: %s", exc)
+        raise HTTPException(status_code=500, detail=f"查询失败: {exc}") from exc
+
+    if df.empty:
+        raise HTTPException(status_code=404, detail=f"信号 {signal_id} 不存在")
+
+    smap = _build_strategy_map(cfg)
+    return _row_to_signal(df.iloc[0], smap)
+
+
+@router.get(
     "",
     response_model=list[SignalEventResponse],
     summary="信号列表",
@@ -96,7 +132,7 @@ async def list_signals(
 
     sql = (
         "SELECT event_id, strategy_id, stock_code, stock_name, "
-        "       alert_type, condition_expr, severity, channels_fired, triggered_at "
+        "       alert_type, condition_expr, severity, snapshot, channels_fired, triggered_at "
         f"FROM signal_events{where_clause} "
         "ORDER BY triggered_at DESC LIMIT ?"
     )
@@ -161,6 +197,19 @@ def _row_to_signal(row: Any, smap: dict[str, dict[str, str]] | None = None) -> S
     except (TypeError, ValueError, json.JSONDecodeError):
         channels = []
 
+    # snapshot 列: VARCHAR 存储 JSON 字符串, 解析失败返回 None
+    snapshot_raw = row.get("snapshot")
+    snapshot: dict[str, Any] | None = None
+    if snapshot_raw:
+        try:
+            parsed = json.loads(str(snapshot_raw))
+            if isinstance(parsed, dict):
+                snapshot = parsed
+            elif isinstance(parsed, list):
+                snapshot = {"_list": parsed}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            snapshot = None
+
     # 前端 type 字段：把 alert_type 直接透传（limit_up/drop_alert/breakout/selection/system）
     # 后端若写 'limit_up'/'drop_alert' 等则与前端一致；其它视为 'system'
     frontend_type = alert_type if alert_type in (
@@ -196,6 +245,8 @@ def _row_to_signal(row: Any, smap: dict[str, dict[str, str]] | None = None) -> S
         content=str(row.get("condition_expr", "")) or alert_type,
         pushed_channels=channels if isinstance(channels, list) else [],
         push_status=push_status,
+        snapshot=snapshot,
+        severity=severity,
     )
 
 

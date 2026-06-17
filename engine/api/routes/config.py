@@ -1,18 +1,22 @@
 """``/api/config`` 路由 - 配置热加载与策略 YAML 在线编辑。
 
-- ``POST /api/config/reload``           - 触发 ``ConfigLoader.reload()``
-- ``GET  /api/config/strategies``       - 列出策略 YAML 文件（含原文）
-- ``PUT  /api/config/strategies/{id}``  - 在线更新策略 YAML
+- ``POST   /api/config/reload``           - 触发 ``ConfigLoader.reload()``
+- ``GET    /api/config/strategies``       - 列出策略 YAML 文件（含原文）
+- ``POST   /api/config/strategies``       - 创建/复制策略 YAML 文件
+- ``PUT    /api/config/strategies/{id}``  - 在线更新策略 YAML
+- ``DELETE /api/config/strategies/{id}``  - 删除策略 YAML 文件
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
 import yaml
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from engine.api.deps import get_config
 from engine.api.schemas import (
@@ -24,6 +28,27 @@ from engine.api.schemas import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["config"])
+
+
+# ----------------------------------------------------------------------------
+# 创建策略请求（仅本路由使用，故定义在此）
+# ----------------------------------------------------------------------------
+
+
+_STRATEGY_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
+
+
+class StrategyCreateRequest(BaseModel):
+    """创建/复制策略请求。"""
+
+    strategy_id: str = Field(
+        ...,
+        min_length=2,
+        max_length=30,
+        description="新策略 ID（英文字母数字下划线，2-30 字符）",
+    )
+    yaml_content: str = Field(..., description="完整 YAML 内容")
+    overwrite: bool = Field(False, description="是否覆盖已存在的文件")
 
 
 @router.post(
@@ -160,6 +185,154 @@ async def update_strategy_config(
         yaml_path=str(target),
         yaml_content=new_text,
     )
+
+
+@router.post(
+    "/strategies",
+    response_model=StrategyConfigFileItem,
+    summary="创建/复制策略",
+)
+async def create_strategy(
+    req: StrategyCreateRequest,
+    cfg: Any = Depends(get_config),
+) -> StrategyConfigFileItem:
+    """根据 YAML 内容创建新策略文件。
+
+    - ``strategy_id`` 必须是合法文件名（英文字母数字下划线，2-30 字符）
+    - 文件路径: ``strategies/strategy_{strategy_id}.yaml``
+    - ``overwrite=False`` 时，文件已存在则返回 409
+    - 写入后调用 ``cfg.reload()`` 热加载
+    """
+    # 1. 校验 strategy_id 格式
+    sid = (req.strategy_id or "").strip()
+    if not sid or not _STRATEGY_ID_PATTERN.match(sid):
+        raise HTTPException(
+            status_code=400,
+            detail="strategy_id 只能包含英文字母、数字与下划线",
+        )
+    if len(sid) < 2 or len(sid) > 30:
+        raise HTTPException(
+            status_code=400,
+            detail="strategy_id 长度必须在 2-30 字符之间",
+        )
+    # 禁止使用模板名
+    if sid.startswith("_template"):
+        raise HTTPException(
+            status_code=400,
+            detail="strategy_id 不能以 _template 开头",
+        )
+
+    # 2. 校验 YAML 合法
+    try:
+        doc = yaml.safe_load(req.yaml_content) or {}
+    except yaml.YAMLError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"YAML 解析失败: {exc}"
+        ) from exc
+    if not isinstance(doc, dict):
+        raise HTTPException(
+            status_code=400, detail="YAML 顶层必须是 mapping"
+        )
+
+    # 3. 文件路径与冲突检测
+    strategies_dir = _resolve_strategies_dir(cfg)
+    try:
+        strategies_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500, detail=f"创建策略目录失败: {exc}"
+        ) from exc
+
+    target = strategies_dir / f"strategy_{sid}.yaml"
+    if target.exists() and not req.overwrite:
+        raise HTTPException(
+            status_code=409,
+            detail=f"策略文件已存在: {target.name}（可设置 overwrite=true 覆盖）",
+        )
+
+    # 4. 写入文件
+    try:
+        target.write_text(req.yaml_content, encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500, detail=f"写入文件失败: {exc}"
+        ) from exc
+
+    # 5. 热加载
+    try:
+        cfg.reload()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("创建策略后重载失败: %s", exc)
+
+    return StrategyConfigFileItem(
+        strategy_id=sid,
+        strategy_name=str(doc.get("strategy_name", "")),
+        enabled=bool(doc.get("enabled", True)),
+        yaml_path=str(target),
+        yaml_content=req.yaml_content,
+    )
+
+
+@router.delete(
+    "/strategies/{strategy_id}",
+    summary="删除策略",
+)
+async def delete_strategy(
+    strategy_id: str,
+    cfg: Any = Depends(get_config),
+) -> dict:
+    """删除策略 YAML 文件。
+
+    - 不允许删除正在启用的策略（返回 409）
+    - 删除后 ``cfg.reload()``
+    """
+    sid = (strategy_id or "").strip()
+    if not sid or not _STRATEGY_ID_PATTERN.match(sid):
+        raise HTTPException(
+            status_code=400,
+            detail="strategy_id 只能包含英文字母、数字与下划线",
+        )
+
+    strategies_dir = _resolve_strategies_dir(cfg)
+    target = strategies_dir / f"strategy_{sid}.yaml"
+    if not target.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"策略 YAML 不存在: {target.name}",
+        )
+
+    # 不允许删除正在启用的策略
+    try:
+        sc = cfg.strategy(sid)
+        if sc is not None and bool(getattr(sc, "enabled", False)):
+            raise HTTPException(
+                status_code=409,
+                detail=f"策略 {sid} 正在启用中，请先禁用再删除",
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("检查策略启用状态失败 %s: %s", sid, exc)
+
+    # 删除文件
+    try:
+        target.unlink()
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500, detail=f"删除文件失败: {exc}"
+        ) from exc
+
+    try:
+        cfg.reload()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("删除策略后重载失败: %s", exc)
+
+    return {
+        "ok": True,
+        "strategy_id": sid,
+        "deleted": target.name,
+        "message": f"策略 {sid} 已删除",
+    }
 
 
 # ----------------------------------------------------------------------------

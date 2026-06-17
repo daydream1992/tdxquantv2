@@ -10,7 +10,7 @@ import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
-import { Play, Eye, Clock, Hash, History } from 'lucide-react'
+import { Play, Eye, Clock, Hash, History, Copy, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { StrategyDTO } from '@/lib/api'
 
@@ -20,6 +20,8 @@ export interface StrategyCardProps {
   onRun?: (id: string) => void
   onViewConfig?: (id: string) => void
   onViewHistory?: (id: string) => void
+  onCopy?: (id: string) => void
+  onDelete?: (id: string) => void
   className?: string
 }
 
@@ -29,6 +31,8 @@ export function StrategyCard({
   onRun,
   onViewConfig,
   onViewHistory,
+  onCopy,
+  onDelete,
   className,
 }: StrategyCardProps) {
   return (
@@ -111,6 +115,24 @@ export function StrategyCard({
             title="运行历史"
           >
             <History className="size-3.5" />
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => onCopy?.(strategy.strategy_id)}
+            className="h-8 px-2 text-muted-foreground hover:text-[var(--quant-primary)]"
+            title="复制策略"
+          >
+            <Copy className="size-3.5" />
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => onDelete?.(strategy.strategy_id)}
+            className="h-8 px-2 text-muted-foreground hover:text-red-400 hover:bg-red-500/10"
+            title="删除策略"
+          >
+            <Trash2 className="size-3.5" />
           </Button>
           <Button
             size="sm"

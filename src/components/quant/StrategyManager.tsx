@@ -3,20 +3,25 @@
 /**
  * 策略管理
  * - 5 策略卡片列表
- * - 启用/禁用开关 + 运行按钮 + 查看/编辑配置
+ * - 启用/禁用开关 + 运行按钮 + 查看/编辑配置 + 复制 + 删除
  * - 顶部批量操作（全部启用/全部禁用/批量运行）+ 刷新配置
  * - 配置编辑：Dialog 展示 YAML + 在线编辑保存（PUT /api/config/strategies/[id]）
+ * - 复制策略：Dialog 输入新 ID/名/emoji + YAML 预览（POST /api/config/strategies）
+ * - 删除策略：确认 Dialog 输入策略 ID 二次确认（DELETE /api/config/strategies/[id]）
  */
 
 import * as React from 'react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogDescription,
+  DialogFooter,
 } from '@/components/ui/dialog'
 import {
   Sheet,
@@ -26,11 +31,81 @@ import {
   SheetDescription,
 } from '@/components/ui/sheet'
 import { Badge } from '@/components/ui/badge'
-import { Play, Power, PowerOff, RefreshCw, FileCode, CheckCircle2, Save, Pencil, RotateCcw, AlertCircle, History, Clock, CheckCircle, XCircle } from 'lucide-react'
+import { Play, Power, PowerOff, RefreshCw, FileCode, CheckCircle2, Save, Pencil, RotateCcw, AlertCircle, History, Clock, CheckCircle, XCircle, Copy, Trash2, AlertTriangle } from 'lucide-react'
 import { StrategyCard } from './StrategyCard'
 import { LoadingState } from './LoadingState'
 import { toast } from 'sonner'
+import { notifySuccess, notifyError, notifyWarning } from '@/lib/notifications'
 import { strategyAPI, configAPI, type StrategyDTO, type StrategyRunRecord } from '@/lib/api'
+import { cn } from '@/lib/utils'
+
+// ----------------------------------------------------------------------------
+// YAML 复制辅助：行级替换 strategy_id / strategy_name / strategy_emoji / sector.code / sector.name
+// ----------------------------------------------------------------------------
+
+interface YamlTransformOpts {
+  newId: string
+  newName: string
+  newEmoji: string
+}
+
+function transformStrategyYaml(yaml: string, opts: YamlTransformOpts): string {
+  const lines = yaml.split('\n')
+  let inSector = false
+  let sectorIndent = 0
+  const out: string[] = []
+  for (const line of lines) {
+    const trimmed = line.replace(/^\s+/, '')
+    // 进入 sector: 块
+    if (!inSector && /^sector:\s*$/.test(line)) {
+      inSector = true
+      sectorIndent = 0
+      out.push(line)
+      continue
+    }
+    if (inSector) {
+      // 空行/注释行直接保留
+      if (line.trim() === '' || line.trim().startsWith('#')) {
+        out.push(line)
+        continue
+      }
+      const indent = line.length - trimmed.length
+      // 缩进回到 <= sectorIndent 表示出了 sector 块
+      if (indent <= sectorIndent) {
+        inSector = false
+      } else {
+        // 在 sector 块内
+        if (/^code:\s/.test(trimmed)) {
+          out.push(`${' '.repeat(indent)}code: ZD_${opts.newId.toUpperCase()}01`)
+          continue
+        }
+        if (/^name:\s/.test(trimmed)) {
+          out.push(`${' '.repeat(indent)}name: ${opts.newName}选股`)
+          continue
+        }
+        out.push(line)
+        continue
+      }
+    }
+    // 顶层 key（column 0）
+    if (/^strategy_id:\s/.test(line)) {
+      out.push(`strategy_id: ${opts.newId}`)
+      continue
+    }
+    if (/^strategy_name:\s/.test(line)) {
+      out.push(`strategy_name: ${opts.newName}`)
+      continue
+    }
+    if (/^strategy_emoji:\s/.test(line)) {
+      out.push(`strategy_emoji: ${opts.newEmoji}`)
+      continue
+    }
+    out.push(line)
+  }
+  return out.join('\n')
+}
+
+const ID_REGEX = /^[a-zA-Z0-9_]{2,30}$/
 
 export function StrategyManager() {
   const [strategies, setStrategies] = React.useState<StrategyDTO[]>([])
@@ -46,6 +121,16 @@ export function StrategyManager() {
   const [historyOpen, setHistoryOpen] = React.useState<StrategyDTO | null>(null)
   const [runs, setRuns] = React.useState<StrategyRunRecord[]>([])
   const [runsLoading, setRunsLoading] = React.useState(false)
+  // 复制策略 Dialog
+  const [copyOpen, setCopyOpen] = React.useState<StrategyDTO | null>(null)
+  const [copyId, setCopyId] = React.useState('')
+  const [copyName, setCopyName] = React.useState('')
+  const [copyEmoji, setCopyEmoji] = React.useState('📋')
+  const [copySaving, setCopySaving] = React.useState(false)
+  // 删除策略 Dialog
+  const [deleteOpen, setDeleteOpen] = React.useState<StrategyDTO | null>(null)
+  const [deleteConfirmId, setDeleteConfirmId] = React.useState('')
+  const [deleteSaving, setDeleteSaving] = React.useState(false)
 
   const load = React.useCallback(async () => {
     setLoading(true)
@@ -125,6 +210,100 @@ export function StrategyManager() {
       await load()
     } catch (e) {
       toast.error('配置加载失败', { description: (e as Error).message })
+    }
+  }
+
+  // ===== 复制策略 =====
+  const handleOpenCopy = (id: string) => {
+    const target = strategies.find((x) => x.strategy_id === id)
+    if (!target) return
+    setCopyOpen(target)
+    setCopyId(`${id}_copy`)
+    setCopyName(`${target.strategy_name} 副本`)
+    setCopyEmoji('📋')
+  }
+
+  const copyYamlPreview = React.useMemo(() => {
+    if (!copyOpen) return ''
+    return transformStrategyYaml(copyOpen.yaml_content || '', {
+      newId: copyId.trim(),
+      newName: copyName.trim() || `${copyOpen.strategy_name} 副本`,
+      newEmoji: copyEmoji.trim() || '📋',
+    })
+  }, [copyOpen, copyId, copyName, copyEmoji])
+
+  const copyIdError = React.useMemo(() => {
+    const v = copyId.trim()
+    if (!v) return '不能为空'
+    if (!ID_REGEX.test(v)) return '只能包含英文字母、数字、下划线，2-30 字符'
+    if (strategies.some((s) => s.strategy_id === v)) return 'ID 已存在，请换一个'
+    return ''
+  }, [copyId, strategies])
+
+  const handleConfirmCopy = async () => {
+    if (!copyOpen) return
+    const id = copyId.trim()
+    if (!ID_REGEX.test(id)) {
+      notifyError('策略 ID 不合法', '只能包含英文字母、数字、下划线，2-30 字符')
+      return
+    }
+    if (strategies.some((s) => s.strategy_id === id)) {
+      notifyError('ID 已存在', `策略 ${id} 已存在，请更换 ID`)
+      return
+    }
+    setCopySaving(true)
+    try {
+      await configAPI.createStrategy(id, copyYamlPreview, false)
+      notifySuccess('策略已复制', `${copyOpen.strategy_name} → ${id}（已可编辑/运行）`)
+      setCopyOpen(null)
+      await load()
+    } catch (e) {
+      const msg = (e as Error).message || ''
+      if (msg.includes('409') || msg.includes('已存在')) {
+        notifyError('ID 冲突', `策略 ${id} 已存在，请换一个 ID`)
+      } else if (msg.includes('YAML') || msg.includes('解析')) {
+        notifyError('YAML 解析失败', msg)
+      } else {
+        notifyError('复制失败', msg)
+      }
+    } finally {
+      setCopySaving(false)
+    }
+  }
+
+  // ===== 删除策略 =====
+  const handleOpenDelete = (id: string) => {
+    const target = strategies.find((x) => x.strategy_id === id)
+    if (!target) return
+    setDeleteOpen(target)
+    setDeleteConfirmId('')
+  }
+
+  const deleteIdMatch = deleteOpen !== null && deleteConfirmId.trim() === deleteOpen.strategy_id
+
+  const handleConfirmDelete = async () => {
+    if (!deleteOpen) return
+    if (!deleteIdMatch) {
+      notifyWarning('未确认', '请输入策略 ID 以确认删除')
+      return
+    }
+    setDeleteSaving(true)
+    try {
+      const r = await configAPI.deleteStrategy(deleteOpen.strategy_id)
+      notifySuccess('策略已删除', r.message || `策略 ${deleteOpen.strategy_id} 已删除`)
+      setDeleteOpen(null)
+      await load()
+    } catch (e) {
+      const msg = (e as Error).message || ''
+      if (msg.includes('409') || msg.includes('启用')) {
+        notifyError('无法删除', '策略正在启用中，请先禁用再删除')
+      } else if (msg.includes('404') || msg.includes('不存在')) {
+        notifyError('策略不存在', msg)
+      } else {
+        notifyError('删除失败', msg)
+      }
+    } finally {
+      setDeleteSaving(false)
     }
   }
 
@@ -224,6 +403,8 @@ export function StrategyManager() {
                   setRunsLoading(false)
                 }
               }}
+              onCopy={handleOpenCopy}
+              onDelete={handleOpenDelete}
             />
           ))}
         </div>
@@ -510,6 +691,209 @@ export function StrategyManager() {
           </div>
         </SheetContent>
       </Sheet>
+
+      {/* ===== 复制策略 Dialog ===== */}
+      <Dialog
+        open={!!copyOpen}
+        onOpenChange={(v) => {
+          if (!v) {
+            if (copySaving) return
+            setCopyOpen(null)
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-2xl max-h-[90vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Copy className="size-5 text-quant-primary" />
+              复制策略
+            </DialogTitle>
+            <DialogDescription>
+              源策略：{copyOpen?.strategy_emoji} {copyOpen?.strategy_name}
+              <Badge variant="outline" className="ml-2 font-mono text-xs border-quant">
+                {copyOpen?.strategy_id}
+              </Badge>
+              · 修改 ID/名/emoji 后 YAML 自动更新预览
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_5rem] gap-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="copy-id" className="text-xs">
+                新策略 ID
+              </Label>
+              <Input
+                id="copy-id"
+                value={copyId}
+                onChange={(e) => setCopyId(e.target.value)}
+                placeholder="如 dbqzt_v2"
+                className={cn(
+                  'h-9 font-mono text-sm focus-visible:border-[var(--quant-primary)] focus-visible:ring-[var(--quant-primary)]/30',
+                  copyIdError && 'border-red-500/60 focus-visible:ring-red-500/20'
+                )}
+                spellCheck={false}
+                autoComplete="off"
+              />
+              <div className={cn('text-[11px]', copyIdError ? 'text-red-400' : 'text-muted-foreground')}>
+                {copyIdError || '英文字母/数字/下划线，2-30 字符'}
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="copy-name" className="text-xs">
+                新策略名
+              </Label>
+              <Input
+                id="copy-name"
+                value={copyName}
+                onChange={(e) => setCopyName(e.target.value)}
+                placeholder="如 打板求涨停 副本"
+                className="h-9 text-sm focus-visible:border-[var(--quant-primary)] focus-visible:ring-[var(--quant-primary)]/30"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="copy-emoji" className="text-xs">
+                Emoji
+              </Label>
+              <Input
+                id="copy-emoji"
+                value={copyEmoji}
+                onChange={(e) => setCopyEmoji(e.target.value)}
+                placeholder="📋"
+                className="h-9 text-center text-base focus-visible:border-[var(--quant-primary)] focus-visible:ring-[var(--quant-primary)]/30"
+                maxLength={4}
+              />
+            </div>
+          </div>
+
+          {/* YAML 预览 */}
+          <div className="flex-1 min-h-0 flex flex-col">
+            <div className="flex items-center justify-between mb-1.5">
+              <Label className="text-xs flex items-center gap-1.5">
+                <FileCode className="size-3.5 text-quant-primary" />
+                YAML 预览（已替换 strategy_id / name / emoji / sector.code / sector.name）
+              </Label>
+              <Badge variant="outline" className="text-[10px] font-mono border-quant">
+                {copyYamlPreview.split('\n').length} 行
+              </Badge>
+            </div>
+            <div className="flex-1 overflow-auto quant-scroll rounded-md border border-quant bg-[#0d0d0d] min-h-[260px] max-h-[40vh]">
+              <pre className="text-xs leading-relaxed p-3 text-foreground/90 font-mono whitespace-pre-wrap">
+                {copyYamlPreview || '# YAML 预览'}
+              </pre>
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2 sm:gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-9"
+              onClick={() => setCopyOpen(null)}
+              disabled={copySaving}
+            >
+              取消
+            </Button>
+            <Button
+              size="sm"
+              className="h-9 bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25 hover:text-amber-300"
+              onClick={handleConfirmCopy}
+              disabled={copySaving || !!copyIdError || !copyId.trim()}
+            >
+              {copySaving ? (
+                <RefreshCw className="size-3.5 animate-spin" />
+              ) : (
+                <Copy className="size-3.5" />
+              )}
+              {copySaving ? '复制中...' : '确认复制'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ===== 删除策略 Dialog ===== */}
+      <Dialog
+        open={!!deleteOpen}
+        onOpenChange={(v) => {
+          if (!v) {
+            if (deleteSaving) return
+            setDeleteOpen(null)
+            setDeleteConfirmId('')
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-400">
+              <AlertTriangle className="size-5" />
+              确认删除策略
+            </DialogTitle>
+            <DialogDescription>
+              即将删除：{deleteOpen?.strategy_emoji} {deleteOpen?.strategy_name}
+              <Badge variant="outline" className="ml-2 font-mono text-xs border-quant">
+                {deleteOpen?.strategy_id}
+              </Badge>
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex items-start gap-2 text-xs text-red-400/90 bg-red-500/5 border border-red-500/25 rounded-md p-3">
+            <AlertTriangle className="size-3.5 mt-0.5 shrink-0" />
+            <div>
+              <div className="font-medium">此操作不可恢复</div>
+              <div className="mt-1 text-red-400/70">
+                将删除 YAML 文件 <code className="font-mono">strategies/strategy_{deleteOpen?.strategy_id}.yaml</code>。
+                启用中的策略无法删除，请先禁用。
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="delete-confirm" className="text-xs">
+              请输入策略 ID <code className="font-mono text-red-400">{deleteOpen?.strategy_id}</code> 以确认
+            </Label>
+            <Input
+              id="delete-confirm"
+              value={deleteConfirmId}
+              onChange={(e) => setDeleteConfirmId(e.target.value)}
+              placeholder={deleteOpen?.strategy_id}
+              className={cn(
+                'h-9 font-mono text-sm',
+                deleteConfirmId.trim() && !deleteIdMatch && 'border-red-500/60',
+                deleteIdMatch && 'border-[var(--quant-up)]/60 focus-visible:ring-[var(--quant-up)]/20'
+              )}
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </div>
+
+          <DialogFooter className="gap-2 sm:gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-9"
+              onClick={() => {
+                setDeleteOpen(null)
+                setDeleteConfirmId('')
+              }}
+              disabled={deleteSaving}
+            >
+              取消
+            </Button>
+            <Button
+              size="sm"
+              className="h-9 bg-red-500/15 text-red-400 border border-red-500/40 hover:bg-red-500/25 hover:text-red-300"
+              onClick={handleConfirmDelete}
+              disabled={deleteSaving || !deleteIdMatch}
+            >
+              {deleteSaving ? (
+                <RefreshCw className="size-3.5 animate-spin" />
+              ) : (
+                <Trash2 className="size-3.5" />
+              )}
+              {deleteSaving ? '删除中...' : '确认删除'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

@@ -216,7 +216,15 @@ class MonitorStatusResponse(BaseModel):
 
 
 class QuoteSnapshot(BaseModel):
-    """``GET /api/monitor/quotes`` 单条快照。"""
+    """``GET /api/monitor/quotes`` 单条快照。
+
+    新增资金流字段 (R7-A):
+    - ``main_inflow``: 主力净流入 (万元, 来自 ``Zjl``)
+    - ``big_buy_ratio``: 大买占比 (0~1, ``TotalBVol / (TotalBVol+TotalSVol)``)
+    - ``turnover_rate``: 换手率% (来自 ``fHSL``)
+
+    所有新字段默认 0.0, 兼容旧调用方。
+    """
 
     code: str
     name: str = ""
@@ -226,6 +234,26 @@ class QuoteSnapshot(BaseModel):
     volume: float = 0.0
     amount: float = 0.0
     ts: int = 0
+    main_inflow: float = 0.0
+    big_buy_ratio: float = 0.0
+    turnover_rate: float = 0.0
+
+
+class FlowRankingItem(BaseModel):
+    """``GET /api/monitor/flow-ranking`` 单条 (资金流向排行)。
+
+    复用 :class:`QuoteSnapshot` 的字段子集 + 资金流指标,
+    便于前端按 ``main_inflow`` / ``big_buy_ratio`` / ``turnover_rate`` 排序。
+    """
+
+    code: str
+    name: str = ""
+    last: float = 0.0
+    pct: float = 0.0
+    main_inflow: float = 0.0
+    big_buy_ratio: float = 0.0
+    turnover_rate: float = 0.0
+    amount: float = 0.0
 
 
 class MonitorSubscriptionItem(BaseModel):
@@ -281,7 +309,12 @@ class SectorRefreshResponse(BaseModel):
 
 
 class SignalEventResponse(BaseModel):
-    """``GET /api/signals`` 单条信号。"""
+    """``GET /api/signals`` 单条信号。
+
+    R7-A 增强:
+    - ``snapshot``: 触发时行情快照 JSON (来自 signal_events.snapshot 列)
+    - ``severity``: 信号严重度 (info / warn / error)
+    """
 
     id: str
     time: str
@@ -293,6 +326,8 @@ class SignalEventResponse(BaseModel):
     content: str = ""
     pushed_channels: list[str] = Field(default_factory=list)
     push_status: str = "pending"  # success | partial | failed | pending
+    snapshot: dict[str, Any] | None = None
+    severity: str = "info"
 
 
 class SignalStatsItem(BaseModel):
