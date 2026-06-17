@@ -57,7 +57,15 @@ class FilterSortStep(PipelineStep):
         if top_n is not None and isinstance(top_n, int) and top_n > 0:
             df = df.head(top_n)
 
-        # 4. 重置索引 + 添加排名列
+        # 4. 合并 cleaned_df 的 code/name/stock_name 等展示字段（scores 可能只有因子列）
+        cleaned_df = context.data.get("cleaned")
+        if cleaned_df is not None and not cleaned_df.empty and "code" in cleaned_df.columns:
+            # scores 的 index 与 cleaned_df 对齐
+            for name_col in ("code", "name", "stock_name", "股票名称"):
+                if name_col in cleaned_df.columns and name_col not in df.columns:
+                    df[name_col] = cleaned_df.loc[df.index, name_col].values
+
+        # 5. 重置索引 + 添加排名列
         df = df.reset_index(drop=True)
         if "rank" not in df.columns:
             df.insert(0, "rank", range(1, len(df) + 1))

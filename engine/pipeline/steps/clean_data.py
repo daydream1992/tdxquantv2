@@ -127,6 +127,12 @@ class CleanDataStep(PipelineStep):
         if old_filter_cfg.get("enabled", False):
             df = self._apply_old_filter(df, old_filter_cfg, context)
 
+        # 4.5 应用策略 pool 表达式（如 dbqzt: is_limit_up or ZAF >= 7）
+        pool_cfg = self.config.get("pool", {}) or {}
+        pool_expr = pool_cfg.get("expression")
+        if pool_expr:
+            df = self._apply_pool(df, pool_expr, context)
+
         # 5. 合并 K 线技术指标（如可用）
         kline_df = context.data.get("kline")
         if kline_df is not None and not kline_df.empty:
@@ -304,6 +310,38 @@ class CleanDataStep(PipelineStep):
         df = df[~mask].copy()
         self.logger.info("老登过滤剔除 %d 只", mask.sum())
         return df
+
+    # ---- 策略 pool 表达式过滤 ----
+    def _apply_pool(self, df: pd.DataFrame, expr: str, context: PipelineContext) -> pd.DataFrame:
+        """应用策略 pool 表达式（如 ``is_limit_up or ZAF >= 7``）。
+
+        用 pandas.eval 求值，支持 and/or/not/比较/算术。
+        表达式引用 df 列名。求值结果为布尔 Series，True 保留。
+
+        V8 兼容: pool 是策略专属的"进入选股池"条件，在 universe 基础上进一步过滤。
+        """
+        if not expr or df.empty:
+            return df
+        try:
+            # 把 is_limit_up / 是否涨停 等布尔列确保为 bool
+            for bool_col in ("is_limit_up", "是否涨停", "是否ST", "is_st"):
+                if bool_col in df.columns:
+                    df[bool_col] = df[bool_col].astype(bool)
+            # 用 pandas eval 求值（支持 and/or/not/比较）
+            mask = df.eval(expr)
+            # 处理可能的全 NaN（列不存在时）
+            if mask.isna().all():
+                self.logger.warning("pool 表达式 %s 求值全 NaN（列可能缺失），跳过 pool", expr)
+                context.add_warning(self.step_id, f"pool 表达式 {expr} 求值全 NaN")
+                return df
+            n_before = len(df)
+            df = df[mask.fillna(False)].copy()
+            self.logger.info("pool 过滤 [%s]: %d -> %d 只", expr, n_before, len(df))
+            return df
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("pool 表达式 %s 求值失败，跳过: %s", expr, exc)
+            context.add_warning(self.step_id, f"pool 表达式 {expr} 求值失败: {exc}")
+            return df
 
     # ---- K 线技术指标合并 ----
     def _merge_kline_indicators(self, df: pd.DataFrame, kline_df: pd.DataFrame) -> pd.DataFrame:

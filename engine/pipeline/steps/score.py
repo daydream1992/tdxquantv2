@@ -47,6 +47,27 @@ from engine.pipeline.base import PipelineContext, PipelineStep
 logger = logging.getLogger(__name__)
 
 
+def _pd_clip(value: Any, lo: Any, hi: Any) -> Any:
+    """pandas/numpy 兼容的 clip 函数，供评分公式 eval 环境使用。
+
+    支持 pd.Series / np.ndarray / 标量。
+    """
+    try:
+        import pandas as pd
+        if isinstance(value, pd.Series):
+            return value.clip(lower=lo, upper=hi)
+        import numpy as np
+        if isinstance(value, np.ndarray):
+            return np.clip(value, lo, hi)
+    except ImportError:
+        pass
+    if value < lo:
+        return lo
+    if value > hi:
+        return hi
+    return value
+
+
 class ScoreStep(PipelineStep):
     """评分步骤。"""
 
@@ -82,17 +103,56 @@ class ScoreStep(PipelineStep):
         formula = scoring_cfg.get("formula")
         if formula:
             try:
-                # P1-3 真实 ExpressionEvaluator 不接受 safe 参数
-                try:
-                    evaluator = ExpressionEvaluator()
-                except TypeError:
-                    evaluator = ExpressionEvaluator(safe=True)
-                # P1-3 真实接口: evaluate(formula, variables_dict)
-                variables = {col: scores[col] for col in scores.columns if col != "formula_score"}
-                formula_result = evaluator.evaluate(formula, variables)
-                if isinstance(formula_result, pd.Series):
-                    scores["formula_score"] = formula_result
-                    scores["base_score"] = formula_result  # 公式覆盖
+                # 评分公式涉及 Series 运算 + clip + and/or + 嵌套
+                # 方案：用 ast 模块解析公式，把 and/or 转成 sand/sor 函数调用，
+                # 然后用 Python eval + pandas Series 命名空间求值
+                import ast
+                import numpy as np
+                eval_df = cleaned_df.copy() if not cleaned_df.empty else pd.DataFrame(index=scores.index)
+                for col in scores.columns:
+                    eval_df[col] = scores[col]
+                # 解析 AST
+                tree = ast.parse(formula, mode='eval')
+                # 重写 BoolOp(and) → Call(sand(*values)), BoolOp(or) → Call(sor(*values))
+                class BoolOpRewriter(ast.NodeTransformer):
+                    def visit_BoolOp(self, node):
+                        self.generic_visit(node)
+                        if isinstance(node.op, ast.And):
+                            func = ast.Name(id='sand', ctx=ast.Load())
+                        elif isinstance(node.op, ast.Or):
+                            func = ast.Name(id='sor', ctx=ast.Load())
+                        else:
+                            return node
+                        # 多个值链式: a and b and c → sand(a, b, c)
+                        return ast.Call(func=func, args=node.values, keywords=[])
+                new_tree = BoolOpRewriter().visit(tree)
+                ast.fix_missing_locations(new_tree)
+                formula_eval = compile(new_tree, '<formula>', 'eval')
+                # 构造求值环境
+                eval_env = {col: eval_df[col] for col in eval_df.columns}
+                eval_env["np"] = np
+                eval_env["clip"] = _pd_clip
+                # sand/sor 支持多参数（链式 and/or）
+                def _sand(*args):
+                    result = pd.Series(True, index=eval_df.index)
+                    for a in args:
+                        s = pd.Series(a, index=eval_df.index).astype(bool)
+                        result = result & s
+                    return result
+                def _sor(*args):
+                    result = pd.Series(False, index=eval_df.index)
+                    for a in args:
+                        s = pd.Series(a, index=eval_df.index).astype(bool)
+                        result = result | s
+                    return result
+                eval_env["sand"] = _sand
+                eval_env["sor"] = _sor
+                # Python eval
+                formula_result = eval(formula_eval, {"__builtins__": {}}, eval_env)
+                if isinstance(formula_result, (pd.Series, np.ndarray)):
+                    scores["formula_score"] = pd.Series(formula_result, index=scores.index)
+                    scores["base_score"] = pd.Series(formula_result, index=scores.index)
+                self.logger.info("评分公式求值成功: %d 只", len(scores))
             except Exception as exc:  # noqa: BLE001
                 self.logger.warning("评分公式 %s 求值失败，仅用加权求和: %s", formula, exc)
                 context.add_warning(self.step_id, f"评分公式求值失败: {exc}")

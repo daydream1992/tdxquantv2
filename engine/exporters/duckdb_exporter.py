@@ -87,7 +87,12 @@ class DuckDBExporter(DataExporter):
             stock_code = (
                 row.get("code") or row.get("stock_code") or ""
             )
-            stock_name = row.get("stock_name") or row.get("股票名称") or ""
+            stock_name = (
+                row.get("stock_name")
+                or row.get("股票名称")
+                or row.get("name")
+                or ""
+            )
             total_score = row.get("total_score")
             if pd.isna(total_score):
                 total_score = None
@@ -102,14 +107,13 @@ class DuckDBExporter(DataExporter):
             records.append({
                 "run_id": context.run_id,
                 "strategy_id": context.strategy_id,
-                "trade_date": trade_date,
+                "run_date": datetime.now().strftime("%Y-%m-%d"),
                 "stock_code": str(stock_code),
                 "stock_name": str(stock_name),
                 "total_score": total_score,
                 "factor_scores": json.dumps(factor_scores, ensure_ascii=False),
                 "rank": rank,
-                "created_at": datetime.now().isoformat(),
-                "metadata": json.dumps({
+                "extra_data": json.dumps({
                     "started_at": context.started_at.isoformat(),
                     "duration_sec": context.duration_sec,
                 }, ensure_ascii=False),
@@ -123,18 +127,19 @@ class DuckDBExporter(DataExporter):
         TODO(P1-3): 待 DuckDBStore 提供 ensure_schema 或 migrations 后对接。
         保守起见，本方法尝试 CREATE TABLE IF NOT EXISTS，若 storage 不支持则忽略。
         """
-        ddl = f"""
-        CREATE TABLE IF NOT EXISTS {self.TABLE_NAME} (
-            run_id VARCHAR,
-            strategy_id VARCHAR,
-            trade_date VARCHAR,
-            stock_code VARCHAR,
-            stock_name VARCHAR,
-            total_score DOUBLE,
-            factor_scores VARCHAR,
-            rank INTEGER,
-            created_at VARCHAR,
-            metadata VARCHAR
+        ddl = """
+        CREATE TABLE IF NOT EXISTS selection_results (
+            id BIGINT PRIMARY KEY,
+            run_id VARCHAR NOT NULL,
+            strategy_id VARCHAR NOT NULL,
+            run_date DATE NOT NULL,
+            stock_code VARCHAR NOT NULL,
+            stock_name VARCHAR DEFAULT '',
+            total_score DOUBLE DEFAULT 0.0,
+            factor_scores VARCHAR DEFAULT '{}',
+            rank INTEGER DEFAULT 0,
+            extra_data VARCHAR DEFAULT '{}',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """
         try:

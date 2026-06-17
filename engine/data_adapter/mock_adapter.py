@@ -96,6 +96,26 @@ class MockAdapter(BaseDataAdapter):
             # 规范化 code 列
             if "code" in self._snapshot_df.columns:
                 self._snapshot_df["code"] = self._snapshot_df["code"].str.upper()
+            # 派生 is_limit_up / 是否涨停 列（基于 FCAmo > 0 或 ZAF >= 9.5）
+            # V8 兼容: 涨停判断 FCAmo>0 涨停，<0 跌停
+            for col in ("FCAmo", "ZAF", "FCb"):
+                if col in self._snapshot_df.columns:
+                    self._snapshot_df[col] = pd.to_numeric(self._snapshot_df[col], errors="coerce")
+            fcamo = self._snapshot_df.get("FCAmo", pd.Series(dtype=float))
+            zaf = self._snapshot_df.get("ZAF", pd.Series(dtype=float))
+            limit_mask = (fcamo.fillna(0) > 0) | (zaf.fillna(0) >= 9.5)
+            self._snapshot_df["is_limit_up"] = limit_mask
+            self._snapshot_df["是否涨停"] = limit_mask
+            # 派生 name 列（若缺）从 stock_name_mapping
+            if "name" not in self._snapshot_df.columns:
+                try:
+                    nm = self._load_name_map()
+                    if "name" in nm.columns:
+                        self._snapshot_df = self._snapshot_df.merge(
+                            nm[["code", "name"]], on="code", how="left"
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
         return self._snapshot_df
 
     def _load_kline(self) -> pd.DataFrame:
@@ -179,6 +199,25 @@ class MockAdapter(BaseDataAdapter):
         result.setdefault("ErrorId", "0")
         result.setdefault("code", ncode)
         return result
+
+    def get_market_snapshot_all(self) -> "pd.DataFrame":
+        """返回全市场快照 DataFrame（批量接口，供 pipeline.load_data 使用）。
+
+        列包含 CSV 全部字段 + 派生的 is_limit_up / 是否涨停 / name。
+        """
+        return self._load_snapshot().copy()
+
+    def get_snapshot_batch(self) -> "pd.DataFrame":
+        """``get_market_snapshot_all`` 别名，兼容 pipeline 不同方法名探测。"""
+        return self.get_market_snapshot_all()
+
+    def get_all_snapshots(self) -> "pd.DataFrame":
+        """``get_market_snapshot_all`` 别名。"""
+        return self.get_market_snapshot_all()
+
+    def get_snapshot(self) -> "pd.DataFrame":
+        """``get_market_snapshot_all`` 别名（pipeline 旧式批量接口）。"""
+        return self.get_market_snapshot_all()
 
     def get_pricevol(self, stock_list: StockList) -> dict:
         """批量价量（从快照 CSV 提取 LastClose/Now/Volume 等关键字段）。"""

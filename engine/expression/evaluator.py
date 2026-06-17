@@ -42,6 +42,28 @@ logger = logging.getLogger(__name__)
 # 默认允许的内置函数（白名单）
 # simpleeval 自带的安全运算符（基于 AST 节点类型）已包含算术/比较/逻辑全部，
 # 无需在 ``SimpleEval(operators=...)`` 中显式覆盖；覆盖反而会丢失默认运算符。
+def _clip(value: Any, lo: Any, hi: Any) -> Any:
+    """将 value 限制在 [lo, hi] 区间。
+
+    策略评分公式常用: ``clip(score, 0, 40)``。
+    支持 pandas Series（逐元素 clip）和标量。
+    """
+    try:
+        import pandas as pd
+        if isinstance(value, pd.Series):
+            return value.clip(lower=lo, upper=hi)
+        import numpy as np
+        if isinstance(value, np.ndarray):
+            return np.clip(value, lo, hi)
+    except ImportError:
+        pass
+    if value < lo:
+        return lo
+    if value > hi:
+        return hi
+    return value
+
+
 _DEFAULT_FUNCTIONS: dict[str, Callable[..., Any]] = {
     "abs": abs,
     "min": min,
@@ -56,6 +78,7 @@ _DEFAULT_FUNCTIONS: dict[str, Callable[..., Any]] = {
     "any": any,
     "all": all,
     "sorted": sorted,
+    "clip": _clip,  # 策略评分公式必需
 }
 
 

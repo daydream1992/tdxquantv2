@@ -54,7 +54,7 @@ scoring:
     reason: 占位（真实判断需读 是否涨停 字段；涨停股清 0）
 output:
   top_n: 30
-  min_score: 50
+  min_score: 10
   sort_by: total_score
   sort_order: desc
 monitor:

@@ -14,7 +14,11 @@ export async function tryFastAPI(
   path: string,
   options: RequestInit = {}
 ): Promise<Response | null> {
-  const url = `/${path.replace(/^\//, '')}?XTransformPort=${FASTAPI_PORT}`
+  // 服务端直接用绝对地址访问 FastAPI；浏览器端用相对路径 + XTransformPort
+  const isServer = typeof window === 'undefined'
+  const url = isServer
+    ? `http://127.0.0.1:${FASTAPI_PORT}${path.startsWith('/') ? path : '/' + path}`
+    : `/${path.replace(/^\//, '')}?XTransformPort=${FASTAPI_PORT}`
   try {
     const controller = new AbortController()
     const t = setTimeout(() => controller.abort(), FASTAPI_TIMEOUT_MS)

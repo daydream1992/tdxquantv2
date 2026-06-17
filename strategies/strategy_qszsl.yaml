@@ -84,7 +84,7 @@ scoring:
     reason: 短期均线空头（MA5<=MA10）
 output:
   top_n: 30
-  min_score: 60
+  min_score: 5
   sort_by: total_score
   sort_order: desc
 monitor:

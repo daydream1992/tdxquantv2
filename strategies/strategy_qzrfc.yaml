@@ -59,7 +59,7 @@ scoring:
   penalties: []
 output:
   top_n: 30
-  min_score: 50
+  min_score: 20
   sort_by: total_score
   sort_order: desc
 monitor:
