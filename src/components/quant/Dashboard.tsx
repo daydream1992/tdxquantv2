@@ -26,13 +26,19 @@ import { StatCard } from './StatCard'
 import { StockPrice, PctBadge } from './StockPrice'
 import { SignalToast } from './SignalToast'
 import { StrategyCard } from './StrategyCard'
+import { StrategyLeaderboard } from './StrategyLeaderboard'
 import { LoadingState } from './LoadingState'
 import { EmptyState } from './EmptyState'
 import { Button } from '@/components/ui/button'
 import { strategyAPI, type StrategyDTO } from '@/lib/api'
 import { useRealtimeQuotes } from '@/lib/useRealtime'
 
-export function Dashboard() {
+export interface DashboardProps {
+  /** 跳转到选股结果 Tab 的回测视图 */
+  onNavigateToBacktest?: () => void
+}
+
+export function Dashboard({ onNavigateToBacktest }: DashboardProps) {
   // 实时 WS 数据
   const rt = useRealtimeQuotes({ autoRefresh: true })
 
@@ -285,6 +291,9 @@ export function Dashboard() {
           )}
         </div>
       </div>
+
+      {/* 策略胜率排行 */}
+      <StrategyLeaderboard onViewAll={onNavigateToBacktest} />
     </div>
   )
 }

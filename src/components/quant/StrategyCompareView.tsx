@@ -11,22 +11,44 @@
  *   - 空单元格: 灰色"—" (该策略未选这只股票)
  *
  * 顶部统计:
- *   - 策略重叠数 Top5 (被多策略选中的股票)
+ *   - 策略重叠数 Top5 (被多策略选中的股票) + "重叠 Top5 详细" Dialog (因子分解)
  *   - 每策略选股数对比 (柱状)
+ *
+ * 操作:
+ *   - 导出对比 (CSV): 当前矩阵的扁平化 CSV
  */
 
 import * as React from 'react'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { Columns3, Trophy, TrendingUp } from 'lucide-react'
-import type { StrategyDTO } from '@/lib/api'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from '@/components/ui/dialog'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { Columns3, Trophy, TrendingUp, Download, FileText, Layers, X } from 'lucide-react'
+import type { StrategyDTO, SelectionRowDTO } from '@/lib/api'
 import type { StockAggRow } from './types'
 import { cn } from '@/lib/utils'
+import { toast } from 'sonner'
 
 interface Props {
   topStocks: StockAggRow[]
   strategyCols: StrategyDTO[]
   matrix: Map<string, Map<string, number>>
+  /** 原始选股结果行 (用于 Top5 详细 Dialog 显示因子分解) */
+  rows?: SelectionRowDTO[]
 }
 
 // 得分→背景色 (热力图)
@@ -44,7 +66,19 @@ function scoreColor(score: number): string {
   return 'var(--quant-down)'
 }
 
-export function StrategyCompareView({ topStocks, strategyCols, matrix }: Props) {
+// CSV cell escape
+function csvCell(v: string | number | undefined | null): string {
+  const s = v === undefined || v === null ? '' : String(v)
+  if (/[",\n\r]/.test(s)) {
+    return `"${s.replace(/"/g, '""')}"`
+  }
+  return s
+}
+
+export function StrategyCompareView({ topStocks, strategyCols, matrix, rows }: Props) {
+  const [top5DetailOpen, setTop5DetailOpen] = React.useState(false)
+  const [exporting, setExporting] = React.useState<'csv' | null>(null)
+
   if (topStocks.length === 0) {
     return (
       <Card className="bg-quant-card border-quant p-6">
@@ -68,6 +102,68 @@ export function StrategyCompareView({ topStocks, strategyCols, matrix }: Props) 
   // 重叠 Top5
   const overlapTop5 = topStocks.slice(0, 5)
 
+  // CSV 导出: 当前矩阵的扁平化 (含表头)
+  const handleExportCSV = async () => {
+    setExporting('csv')
+    try {
+      // 表头: 股票代码,股票名称,最高分,被选次数,<各策略名>
+      const header = [
+        '股票代码',
+        '股票名称',
+        '最高分',
+        '被选次数',
+        ...strategyCols.map((s) => `${s.strategy_emoji || ''}${s.strategy_name}`),
+      ]
+      const lines: string[] = [header.map(csvCell).join(',')]
+      // 按 best_score 降序
+      const sorted = [...topStocks].sort((a, b) => b.best_score - a.best_score)
+      for (const stock of sorted) {
+        const rowMap = matrix.get(stock.stock_code)
+        const cells: (string | number)[] = [
+          stock.stock_code,
+          stock.stock_name || '',
+          stock.best_score.toFixed(2),
+          stock.strategy_count,
+        ]
+        for (const s of strategyCols) {
+          const v = rowMap?.get(s.strategy_id)
+          cells.push(v !== undefined ? v.toFixed(2) : '')
+        }
+        lines.push(cells.map(csvCell).join(','))
+      }
+      const csv = '\ufeff' + lines.join('\n')
+      const blob = new Blob([csv], { type: 'text/csv; charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+      a.download = `strategy_compare_${dateStr}.csv`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+      toast.success(`已导出 ${sorted.length} 只 × ${strategyCols.length} 策略 对比矩阵 (CSV)`)
+    } catch (e) {
+      toast.error('导出失败', { description: (e as Error).message })
+    } finally {
+      setExporting(null)
+    }
+  }
+
+  // 构建 Top5 详细 Dialog 数据 (按 stock × strategy 展开因子)
+  const top5Detail = overlapTop5.map((stock) => {
+    const items = strategyCols
+      .map((s) => {
+        const r =
+          rows?.find(
+            (x) => x.stock_code === stock.stock_code && x.strategy_id === s.strategy_id
+          ) || null
+        return { strategy: s, score: matrix.get(stock.stock_code)?.get(s.strategy_id), row: r }
+      })
+      .filter((x) => x.row || x.score !== undefined)
+    return { stock, items }
+  })
+
   return (
     <div className="space-y-3">
       {/* 顶部统计区 */}
@@ -77,7 +173,18 @@ export function StrategyCompareView({ topStocks, strategyCols, matrix }: Props) 
           <div className="flex items-center gap-2 mb-2">
             <Trophy className="size-4 text-amber-400" />
             <span className="font-semibold text-sm">多策略重叠 Top 5</span>
-            <Badge variant="outline" className="ml-auto text-[10px] border-quant">
+            <Button
+              size="sm"
+              variant="ghost"
+              className="ml-auto h-6 px-2 text-[10px] hover:bg-amber-500/10 hover:text-amber-400"
+              onClick={() => setTop5DetailOpen(true)}
+              disabled={top5Detail.every((d) => d.items.length === 0)}
+              title="查看 Top5 各策略因子得分分解"
+            >
+              <Layers className="size-3" />
+              重叠 Top5 详细
+            </Button>
+            <Badge variant="outline" className="text-[10px] border-quant">
               强信号
             </Badge>
           </div>
@@ -165,9 +272,42 @@ export function StrategyCompareView({ topStocks, strategyCols, matrix }: Props) 
               {topStocks.length} 只 × {strategyCols.length} 策略
             </Badge>
           </div>
-          <span className="text-[10px] text-muted-foreground">
-            颜色越深 = 得分越高
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="hidden sm:inline text-[10px] text-muted-foreground">
+              颜色越深 = 得分越高
+            </span>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 px-2 text-xs border-quant hover:border-[var(--quant-primary)]/40 hover:bg-amber-500/10 hover:text-amber-400"
+                  disabled={!!exporting}
+                >
+                  <Download className={`size-3 ${exporting ? 'animate-pulse' : ''}`} />
+                  {exporting ? '导出中' : '导出对比'}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-44">
+                <DropdownMenuLabel className="text-xs text-muted-foreground">
+                  选择导出格式
+                </DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  className="cursor-pointer"
+                  onClick={handleExportCSV}
+                >
+                  <FileText className="size-4 text-amber-400" />
+                  <div className="flex flex-col">
+                    <span className="text-sm">CSV</span>
+                    <span className="text-[10px] text-muted-foreground">
+                      矩阵扁平化 (按最高分降序)
+                    </span>
+                  </div>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         </div>
 
         <div className="overflow-x-auto quant-scroll max-h-[36rem] overflow-y-auto">
@@ -279,6 +419,138 @@ export function StrategyCompareView({ topStocks, strategyCols, matrix }: Props) 
           <span className="ml-4">— : 该策略未选这只股票</span>
         </div>
       </Card>
+
+      {/* Top5 详细因子分解 Dialog */}
+      <Dialog open={top5DetailOpen} onOpenChange={setTop5DetailOpen}>
+        <DialogContent className="sm:max-w-4xl max-h-[88vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Layers className="size-5 text-amber-400" />
+              重叠 Top5 详细因子分解
+              <Button
+                variant="ghost"
+                size="icon"
+                className="ml-auto size-7"
+                onClick={() => setTop5DetailOpen(false)}
+              >
+                <X className="size-4" />
+              </Button>
+            </DialogTitle>
+            <DialogDescription>
+              每只 Top5 股票在各策略下的因子得分明细 · 数据来自最近一次选股结果
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex-1 overflow-y-auto space-y-3 quant-scroll pr-1">
+            {top5Detail.length === 0 ? (
+              <div className="text-center text-sm text-muted-foreground py-8">
+                暂无因子分解数据
+              </div>
+            ) : (
+              top5Detail.map(({ stock, items }, idx) => (
+                <Card key={stock.stock_code} className="p-3 gap-2 bg-quant-card/60 border-quant">
+                  <div className="flex items-center gap-2">
+                    <div
+                      className={cn(
+                        'flex items-center justify-center size-6 rounded-full text-[10px] font-bold tabular-nums shrink-0',
+                        idx === 0
+                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                          : idx === 1
+                          ? 'bg-slate-400/20 text-slate-300 border border-slate-400/30'
+                          : idx === 2
+                          ? 'bg-orange-700/20 text-orange-400 border border-orange-700/30'
+                          : 'bg-muted text-muted-foreground'
+                      )}
+                    >
+                      {idx + 1}
+                    </div>
+                    <span className="font-mono text-xs">{stock.stock_code}</span>
+                    <span className="text-sm font-medium">{stock.stock_name}</span>
+                    <Badge
+                      variant="outline"
+                      className="ml-auto text-[10px] font-mono border-amber-500/30 bg-amber-500/10 text-amber-400"
+                    >
+                      {stock.strategy_count} 策略 · 最高 {stock.best_score.toFixed(1)}
+                    </Badge>
+                  </div>
+
+                  {items.length === 0 ? (
+                    <div className="text-xs text-muted-foreground py-2 text-center">
+                      该股票无详细因子数据 (可能来自历史快照)
+                    </div>
+                  ) : (
+                    items.map(({ strategy, score, row }) => (
+                      <div
+                        key={strategy.strategy_id}
+                        className="rounded-md border border-quant/60 bg-background/40 p-2"
+                      >
+                        <div className="flex items-center gap-2 mb-1.5">
+                          <span className="text-sm">{strategy.strategy_emoji}</span>
+                          <span className="text-xs font-medium">{strategy.strategy_name}</span>
+                          {score !== undefined && (
+                            <Badge
+                              variant="outline"
+                              className="text-[10px] font-mono ml-auto"
+                              style={{
+                                color: scoreColor(score),
+                                borderColor: `color-mix(in srgb, ${scoreColor(score)} 30%, transparent)`,
+                                backgroundColor: `color-mix(in srgb, ${scoreColor(score)} 10%, transparent)`,
+                              }}
+                            >
+                              得分 {score.toFixed(2)}
+                            </Badge>
+                          )}
+                          {row && (
+                            <Badge variant="outline" className="text-[10px] font-mono border-quant">
+                              排名 #{row.rank}
+                            </Badge>
+                          )}
+                        </div>
+                        {row && row.factors.length > 0 ? (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-1.5">
+                            {row.factors.map((f) => {
+                              const v = f.value
+                              const tone =
+                                v >= 70
+                                  ? 'var(--quant-up)'
+                                  : v >= 40
+                                  ? '#f59e0b'
+                                  : 'var(--quant-down)'
+                              return (
+                                <div
+                                  key={f.factor_id}
+                                  className="flex items-center gap-1.5 px-1.5 py-1 rounded border border-quant/40 bg-background/60 text-[11px]"
+                                >
+                                  <span className="font-mono text-muted-foreground truncate flex-1">
+                                    {f.factor_id}
+                                  </span>
+                                  <span className="text-[9px] text-muted-foreground tabular-nums">
+                                    w{f.weight.toFixed(2)}
+                                  </span>
+                                  <span
+                                    className="font-mono tabular-nums font-semibold"
+                                    style={{ color: tone }}
+                                  >
+                                    {f.value.toFixed(2)}
+                                  </span>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        ) : (
+                          <div className="text-[11px] text-muted-foreground py-1 text-center">
+                            无因子得分明细
+                          </div>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </Card>
+              ))
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

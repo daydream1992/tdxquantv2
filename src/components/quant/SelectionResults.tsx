@@ -121,6 +121,23 @@ export function SelectionResults() {
     strategyAPI.list().then(setStrategies).catch(() => {})
   }, [])
 
+  // 监听全局事件 'tdxquant:show-backtest' (Dashboard 排行榜"查看全部" / GlobalSearch 触发)
+  React.useEffect(() => {
+    const handler = (e: Event) => {
+      const ce = e as CustomEvent<{ source?: string }>
+      if (ce.detail?.source !== 'globalsearch') {
+        // 来自 Dashboard 排行榜或其它入口, 都切到回测视图
+        setViewMode('backtest')
+      } else {
+        // 来自 GlobalSearch 的"切到回测"操作
+        setViewMode('backtest')
+      }
+    }
+    window.addEventListener('tdxquant:show-backtest', handler as EventListener)
+    return () =>
+      window.removeEventListener('tdxquant:show-backtest', handler as EventListener)
+  }, [])
+
   const load = React.useCallback(async () => {
     setLoading(true)
     try {
@@ -436,6 +453,7 @@ export function SelectionResults() {
           topStocks={compareMatrix.topStocks}
           strategyCols={compareMatrix.strategyCols}
           matrix={compareMatrix.matrix}
+          rows={rows}
         />
       ) : viewMode === 'agg' ? (
         /* 汇总视图：按股票聚合，显示被多少策略选中 */

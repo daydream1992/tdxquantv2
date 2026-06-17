@@ -9172,3 +9172,364 @@ Stage Summary:
   6. 板块管理增加"批量导出全部板块"按钮
   7. Dashboard 增加"策略胜率排行"卡片 (基于 backtest_results)
   8. 全局搜索 (Cmd+K) 跨策略/股票/信号快速跳转
+
+---
+Task ID: R6-B-导出+筛选
+Agent: full-stack-developer (subagent)
+Task: 板块批量导出 + 信号中心 channel 筛选 + 策略对比导出 (含 Top5 详细 Dialog)
+
+Work Log:
+- 阅读 worklog.md R5 总结 + 3 个目标组件 (SectorManager/SignalCenter/StrategyCompareView) + 3 个后端 routes (sectors/signals/selection) + 现有 selections export 代理参考, 确认 openpyxl 3.1.5 已安装
+- 任务1 后端: engine/api/routes/sectors.py 新增 `GET /api/sectors/export-all?format=csv|excel` 端点
+  - CSV: BOM 头 + 多段拼接, 每段 `# 板块: <code> <name> (<n> 只)` 标题行 + `stock_code,stock_name,score,added_at` 表头 + 数据行
+  - Excel: openpyxl Workbook, 每 sector 一个 Sheet (名称 31 字符限制 + 非法字符清理 + 去重), 表头琥珀金 F59E0B 填充 + 白字粗体 + 冻结首行 + 列宽
+  - 复用 `_query_snapshot_stocks()` 拉取每板块成份股, 空板块自动跳过, 全空时 404
+- 任务1 前端代理: 新建 src/app/api/sectors/export-all/route.ts (GET, 透传 arrayBuffer)
+- 任务1 前端 API 客户端: src/lib/api.ts sectorAPI 新增 `exportAll(format)` (返回 Blob, 含错误处理, 增量 16 行)
+- 任务1 前端 UI: SectorManager.tsx 顶部工具栏新增"导出全部"DropdownMenu 按钮 (与"刷新"并列), 下拉 2 选项 (CSV/Excel) 各带副标题, 调 sectorAPI.exportAll → 触发浏览器下载 `sectors_all_YYYYMMDD.csv|xlsx` + toast 反馈
+- 任务2 信号中心 channel 筛选 (纯前端, SignalCenter.tsx): 新增 `channelFilter: Set<string>` state + `displayedSignals` memo (AND 语义: 必须包含所有选中通道) + `toggleChannel/clearAllFilters` 函数; 筛选栏新增"推送通道"行, 含"全部"按钮 + 4 通道徽章按钮 (CSV灰/WS青/TDX紫/飞书绿), 选中态实色背景+白字+ring-2 ring-amber-500/60, 顶部计数器改为 displayedSignals.length, 表格数据源由 signals 改为 displayedSignals, 空态区分"暂无信号"vs"当前筛选条件下无信号"
+- 任务3 策略对比导出 (StrategyCompareView.tsx): 新增 `rows?` prop 接收 SelectionRowDTO[], 新增 `handleExportCSV()` 前端拼 CSV (BOM + emoji 策略名表头 + 按 best_score 降序) Blob 下载; 矩阵标题右侧新增"导出对比"DropdownMenu 按钮; 重叠 Top5 卡片新增"重叠 Top5 详细"按钮 → Dialog 显示每只 Top5 股票在各策略下的因子分解网格 (factor_id + weight + value, 高/中/低着色), 响应式 sm:grid-cols-2 lg:grid-cols-3
+
+Stage Summary:
+- 已完成:
+  1. 板块批量导出全部: 后端 `GET /api/sectors/export-all` (CSV 多段拼接 / Excel 多 Sheet 工作簿) + 前端代理 + sectorAPI.exportAll + SectorManager "导出全部"DropdownMenu 按钮
+  2. 信号中心 channel 筛选: 4 通道徽章按钮 (多选 AND 语义) + "全部"清空 + 已筛选状态文本 + 顶部计数器联动 + 表格数据源切换 + 空态区分
+  3. 策略对比导出: 前端 CSV 导出 (按最高分降序) + DropdownMenu 按钮
+  4. 重叠 Top5 详细 Dialog: 每只 Top5 股票在各策略下的因子分解网格 (factor_id/weight/value)
+- 文件变更:
+  - 后端 (1 个文件):
+    - engine/api/routes/sectors.py (修改: 新增 export-all 端点 ~140 行)
+  - 前端 (5 个文件):
+    - src/app/api/sectors/export-all/route.ts (新增: GET 二进制透传代理)
+    - src/lib/api.ts (修改: sectorAPI 新增 exportAll 方法, 增量 16 行)
+    - src/components/quant/SectorManager.tsx (修改: DropdownMenu 导出全部按钮 + handleExportAll)
+    - src/components/quant/SignalCenter.tsx (修改: channel 筛选 state + UI 行 + displayedSignals 联动)
+    - src/components/quant/StrategyCompareView.tsx (重写: rows prop + CSV 导出 + Top5 详细 Dialog)
+    - src/components/quant/SelectionResults.tsx (修改: 给 StrategyCompareView 透传 rows prop)
+  - 工作记录 (2 个文件):
+    - /agent-ctx/R6-B-导出+筛选-full-stack-developer.md (新增)
+    - worklog.md (append 本节)
+- 未解决问题:
+  1. 板块批量导出 Excel 单 Sheet 仅含表头+数据, 未实现条件格式 (CSV 完整可用, Excel 装饰按 R6-B 优先级未加, openpyxl PatternFill 已就绪可后续扩展)
+  2. 信号中心 channel 筛选是纯前端, signals API 已返回 pushed_channels 数组, 无需改后端 (符合任务约束)
+  3. 策略对比 CSV 已支持, Excel 暂未实现 (前端无 openpyxl, 需引入 xlsx-js 等库, 本轮按 R6-B 约束未加)
+  4. 重叠 Top5 详细 Dialog 数据依赖 SelectionRowDTO.factors, 若某 stock 在 rows 中找不到 (来自历史快照), 显示"无因子得分明细"兜底
+- QA 验证:
+  - `bun run lint` → EXIT=0
+  - FastAPI `/api/sectors/export-all?format=csv` → 200, 8901 bytes, 多段标题行 + 表头 + 数据正确
+  - FastAPI `/api/sectors/export-all?format=excel` → 200, 13087 bytes, 5 Sheet × 30 行 × 4 列, file 识别为 Excel 2007+
+  - Next.js 代理 `/api/sectors/export-all?format=csv|excel` → 200, 大小一致, 透传成功
+  - dev.log: 信号/通道/选股/行情 API 全部正常响应
+
+---
+Task ID: R6-A-Dashboard+搜索
+Agent: full-stack-developer (subagent)
+Task: Dashboard 策略胜率排行卡片 + 全局搜索 Cmd+K
+
+Work Log:
+- 读取上下文: worklog.md (R5 章节), Dashboard.tsx, StatCard.tsx, StrategyCard.tsx,
+  page.tsx, engine/api/routes/backtest.py, src/lib/api.ts, src/lib/api-proxy.ts,
+  src/app/api/backtest/history/route.ts, src/components/ui/{dialog,command,input}.tsx,
+  EmptyState.tsx, LoadingState.tsx, engine/api/deps.py, schemas.py, signals.py,
+  selection.py, main.py, SelectionResults.tsx
+- 数据现状确认: backtest_results 表有 6 条历史回测 (4 dbqzt + 2 cslx), 可直接用作排行数据
+- FastAPI 运行中 (port 8000), /api/selections + /api/signals 数据正常
+
+### 任务 1: 后端 - GET /api/backtest/leaderboard
+- 文件: engine/api/routes/backtest.py
+- 新增 Pydantic schemas: BacktestLeaderboardItem + BacktestLeaderboardResponse
+- 新增路由 GET /leaderboard, 放在 GET /{run_id} 之前 (避免路径参数匹配冲突)
+- 实现:
+  * 从 backtest_results 表读全部记录, 按 created_at DESC 排序
+  * 按 strategy_id 分组, 每组首条即为最新
+  * 解析 result_json 提取 total_return/annual_return/max_drawdown/sharpe_ratio/win_rate/total_trades
+  * run_count = 每个策略历史回测总数
+  * 按 sharpe_ratio 降序排序
+  * 表不存在或为空时返回 {items: [], total: 0} (不抛 500)
+
+### 任务 2 + 3: 后端 - GET /api/search
+- 新文件: engine/api/routes/search.py (约 320 行)
+- 新增 schemas: SearchStrategyItem / SearchStockItem / SearchSignalItem / SearchResponse
+- 路由 GET /api/search?q=<kw>&limit=<n>:
+  * 策略: 从 cfg.strategies() 匹配 strategy_name / strategy_id / description
+  * 股票: 从 selection_results 表匹配 stock_code / stock_name (DISTINCT + GROUP BY)
+  * 信号: 从 signal_events 表匹配 condition_expr / stock_name / stock_code / alert_type
+  * 每组最多 limit 条 (默认 20), total = 三组之和
+  * 反查 strategy_name 填充 (避免前端二次查找)
+- 注册到 main.py: app.include_router(search_routes.router, prefix="/api/search")
+
+### 任务 4 + 5: 前端代理 + API 客户端
+- 新文件: src/app/api/backtest/leaderboard/route.ts (GET 代理, 降级返回空排行)
+- 新文件: src/app/api/search/route.ts (GET 代理, 缺 q 返回 400, 降级返回空结果)
+- 修改 src/lib/api.ts:
+  * 新增 BacktestLeaderboardItemDTO + BacktestLeaderboardDTO 类型
+  * backtestAPI.leaderboard() 方法
+  * 新增 SearchStrategyItemDTO / SearchStockItemDTO / SearchSignalItemDTO / SearchResponseDTO 类型
+  * searchAPI.search(q, limit) 方法
+
+### 任务 6: GlobalSearch.tsx 组件 (Cmd+K)
+- 新文件: src/components/quant/GlobalSearch.tsx (约 730 行)
+- forwardRef + useImperativeHandle 暴露 open() / close() (供 page.tsx header 按钮触发)
+- 全局键盘监听: Cmd+K (Mac) / Ctrl+K (Win/Linux) 切换 open
+- 搜索框: text-lg 大号, 左侧 Search 图标, 右侧 ESC 提示 + 清空按钮
+- 顶部提示条: "⌘K 打开 · ↑↓ 选择 · Enter 确认" + 实时统计 + loading 指示
+- 结果分组: 策略 / 股票 / 信号 / 操作, 每组带小标题 + 数量徽章
+- 每项: 左侧图标 (按 kind 染色) + 主标题 + 副标题 + 右侧 Badge + active 时的 CornerDownLeft 图标
+- 选中态: 琥珀色背景 (bg-amber-500/15) + 左侧 2px 主色边框
+- 键盘导航: ↑↓ 移动 activeIdx, Enter 触发 action + 保存最近搜索, Esc 清空/关闭
+- 鼠标 hover 同步 activeIdx, 自动 scrollIntoView
+- 空状态: "输入关键词搜索策略/股票/信号"
+- 无结果: "未找到匹配结果" (排除 action 项后判断)
+- 失败: "搜索失败" + 错误详情
+- 最近搜索: localStorage 持久化 (key=tdxquant-recent-searches, 最多 5 条), 打开时显示
+- 快捷操作 (空 query): 实时大屏 / 策略管理 / 选股结果 / 切到回测视图 / 信号中心 / 板块管理 / 运行全部 / 切换主题 / 推送通道配置
+- 快捷操作 (有 query 时也展示): 运行全部 / 切到回测 / 切换主题 / 推送通道配置
+- 跳转回调: onNavigate (setTab) / onToggleTheme / onOpenSettings / onRunAll
+- 切到回测视图: dispatch window event `tdxquant:show-backtest` + onNavigate('selections')
+- debounce 200ms (setTimeout + cleanup)
+- 关闭时重置 query / result / activeIdx, 打开时聚焦输入框
+- Dialog 配置: sm:max-w-2xl, top-[12%] (顶部弹出), p-0 gap-0, showCloseButton=false, bg-quant-card
+- 底部 footer: "TdxQuant Global Search · 策略 · 股票 · 信号"
+
+### 任务 7: Dashboard 策略胜率排行卡片
+- 新文件: src/components/quant/StrategyLeaderboard.tsx (约 220 行)
+- 标题: Trophy 图标 + "策略胜率排行" + 副标题"基于历史回测数据 · 按夏普降序"
+- 右上角: "查看全部回测" 按钮 (History 图标 + ChevronRight) -> 调用 onViewAll
+- 数据源: backtestAPI.leaderboard(), 取前 5 名
+- 每行:
+  * 左侧: 排名徽章 (🥇/🥈/🥉/4/5) + 策略 emoji + 名称 + "回测 N 次 · 起止日期"
+  * 中间: 胜率进度条 (背景 bg-quant-border, 填充 bg-gradient-to-r from-amber-500 to-amber-400)
+  * 右侧: 4 mini stat 卡片 (总收益率/夏普/最大回撤/交易次数)
+    - 总收益: 正 var(--quant-up) / 负 var(--quant-down) / 0 var(--quant-flat)
+    - 夏普: var(--quant-primary)
+    - 最大回撤: var(--quant-down) (必为负)
+    - 交易数: var(--quant-flat)
+- 排名第 1: 金色边框 (border-amber-500/40) + 微弱 glow (box-shadow 12px)
+- 其他行: 透明边框 + hover 琥珀色背景
+- 加载态: Loader2 spinner
+- 空态: EmptyState "暂无回测数据, 请先在选股结果 Tab 中运行回测" + "去运行回测" 按钮
+- 错误态: EmptyState 显示错误信息
+- 响应式: mobile 单列堆叠 (flex-col), desktop 一行展示 (lg:flex-row)
+
+### 任务 8: 集成到 page.tsx + SelectionResults
+- src/app/page.tsx:
+  * 新增 import: Search 图标 + GlobalSearch + GlobalSearchHandle 类型
+  * 新增 ref: searchRef = useRef<GlobalSearchHandle>(null)
+  * Header 新增 "搜索" 按钮 (Search 图标, ghost variant), onClick 调 searchRef.current?.open()
+    + title "全局搜索 (⌘K / Ctrl+K)"
+  * Dashboard 渲染时传入 onNavigateToBacktest: setTab('selections') + 100ms 后 dispatch
+    tdxquant:show-backtest 事件 (等待 SelectionResults 挂载)
+  * 底部挂载 <GlobalSearch ref={searchRef} onNavigate={setTab} onToggleTheme={toggleMode}
+    onOpenSettings={() => setSettingsOpen(true)} onRunAll={handleRunAll} />
+- src/components/quant/Dashboard.tsx:
+  * 新增 import: StrategyLeaderboard
+  * 新增 prop: onNavigateToBacktest?: () => void
+  * 在 5 策略板块概览之后渲染 <StrategyLeaderboard onViewAll={onNavigateToBacktest} />
+- src/components/quant/SelectionResults.tsx:
+  * 新增 useEffect: 监听 window 事件 tdxquant:show-backtest, 触发 setViewMode('backtest')
+
+### QA 验证 (curl + lint)
+
+| 验证项 | 结果 |
+|--------|------|
+| bun run lint (最终) | ✓ EXIT=0 (0 错误 0 警告) |
+| FastAPI /health (重启后) | ✓ 200 uptime_seconds=2 |
+| GET /api/backtest/leaderboard | ✓ 200, 返回 2 个策略 (dbqzt sharpe=9.47 / cslx sharpe=1.97) |
+| GET /api/search?q=弱转强 | ✓ 200, 命中 1 策略 + 2 信号 |
+| GET /api/search?q=庄园 | ✓ 200, 命中 1 股票 (庄园牧场) + 多条信号 |
+| GET /api/search?q=002910 | ✓ 200, 按股票代码命中 |
+| GET /api/search?q=打板 | ✓ 200, 命中策略"打板求涨停" |
+| GET /api/search?q=zxz (无匹配) | ✓ 200, 全 0 (不报错) |
+| GET /api/search?q= (空) | ✓ 422 string_too_short (符合 Pydantic min_length=1) |
+| Next.js /api/backtest/leaderboard 代理 | ✓ 200 |
+| Next.js /api/search?q=打板 代理 | ✓ 200 |
+| dev.log 编译 | ✓ 无错误, GET / 200 |
+| Dashboard 轮询 leaderboard | ✓ dev.log 显示 200 in 12ms |
+
+### 文件变更清单
+\`\`\`
+后端 (Python) - 3 个文件:
+  engine/api/routes/backtest.py    # 修改: 新增 /leaderboard 端点 + 2 个 schema
+  engine/api/routes/search.py      # 新增: 全局搜索路由 (策略/股票/信号)
+  engine/api/main.py               # 修改: 注册 search_routes
+
+前端 (TypeScript) - 8 个文件:
+  src/app/api/backtest/leaderboard/route.ts   # 新增: GET 代理
+  src/app/api/search/route.ts                 # 新增: GET 代理
+  src/lib/api.ts                              # 修改: backtestAPI.leaderboard + searchAPI + 7 个 DTO 类型
+  src/components/quant/GlobalSearch.tsx       # 新增: 全局搜索组件 (Cmd+K, 约 730 行)
+  src/components/quant/StrategyLeaderboard.tsx # 新增: 策略胜率排行卡片 (约 220 行)
+  src/components/quant/Dashboard.tsx          # 修改: 新增 onNavigateToBacktest prop + 渲染排行卡片
+  src/components/quant/SelectionResults.tsx   # 修改: 监听 tdxquant:show-backtest 事件
+  src/app/page.tsx                            # 修改: header 搜索按钮 + GlobalSearch 集成 + Dashboard onNavigateToBacktest
+\`\`\`
+
+Stage Summary:
+- 已完成:
+  1. 后端 /api/backtest/leaderboard: 按 strategy_id 聚合最新回测, 按 sharpe 降序, 返回 run_count + 完整指标
+  2. 后端 /api/search: 跨策略/股票/信号搜索, ILIKE 大小写不敏感, 反查 strategy_name
+  3. 前端 API 代理: leaderboard + search route.ts
+  4. 前端 api.ts: backtestAPI.leaderboard() + searchAPI.search() + 7 个 DTO 类型
+  5. GlobalSearch 组件: Cmd+K 打开, debounce 200ms, 键盘导航, 最近搜索 localStorage, 4 类分组 (策略/股票/信号/操作)
+  6. StrategyLeaderboard 组件: 5 行排行 + 胜率进度条 + 4 mini stat + 第 1 名金色 glow
+  7. Dashboard 集成: 底部新增排行卡片, onViewAll 跳转到选股结果 Tab 的回测视图
+  8. page.tsx 集成: header 搜索按钮 + GlobalSearch ref + 4 个回调 (navigate/theme/settings/runAll)
+  9. SelectionResults 监听 tdxquant:show-backtest 事件自动切到回测视图
+- 文件变更: 3 后端 + 8 前端 = 11 个文件 (5 新增 + 6 修改)
+- 未解决问题:
+  1. 排行榜仅显示有回测数据的策略 (dbqzt + cslx), 其余 3 个策略需用户主动运行回测后才会出现
+  2. GlobalSearch 的"切到回测视图"通过 window event 通信, SelectionResults 100ms 后才挂载,
+     若用户切换 tab 速度极快可能错过事件 (已加 100ms 延迟, 实测可用)
+  3. 搜索 DuckDB ILIKE 查询未加索引, 大数据量下可能慢 (当前 selection_results ~150 条, signal_events ~50 条, 无性能问题)
+  4. GlobalSearch 在移动端键盘导航体验有限 (建议触摸点击), 但桌面端完整支持
+- 下一阶段建议:
+  1. R6-B subagent 接续: 因子插件补全 + K线图真实数据 + 策略对比导出
+  2. 排行榜增加"按胜率/总收益切换排序"功能 (目前固定按 sharpe)
+  3. GlobalSearch 增加搜索历史下拉, 已实现但可扩展"清空历史"按钮
+  4. 搜索后端可加 FTS5 全文索引提升性能 (DuckDB 支持)
+
+---
+Task ID: R6-总结
+Agent: main (webDevReview cron)
+Task: R6 轮次总结 - Dashboard 胜率排行 + 全局搜索 + 板块导出 + 信号筛选 + 对比导出
+
+Work Log:
+
+### 阶段判断
+- P1++ 稳定运行, R5 已完成消息总线插件化 + 回测引擎全栈
+- 本轮 R6 目标: 基于 R5 建议推进 5 个新功能, 提升用户体验和数据可操作性
+- QA 发现: 项目非常稳定, lint 0 错误, 所有 API 200, 无 bug 需修复, 直接进入新功能开发
+
+### QA 验证 (agent-browser + curl)
+
+| 验证项 | 结果 |
+|--------|------|
+| `bun run lint` (R6 前) | ✓ EXIT=0 |
+| `bun run lint` (R6 后) | ✓ EXIT=0 |
+| FastAPI /health | ✓ 200 (uptime=303s) |
+| GET /api/backtest/leaderboard | ✓ 200 (2 策略: dbqzt sharpe=9.47, cslx sharpe=1.97) |
+| GET /api/search?q=弱转强 | ✓ 200 (1 策略 + 2 信号) |
+| GET /api/search?q=庄园 | ✓ 200 (1 股票 + 多信号) |
+| GET /api/sectors/export-all?format=csv | ✓ 200 (8901 bytes, 5 板块多段格式) |
+| GET /api/sectors/export-all?format=excel | ✓ 200 (13087 bytes, 5 Sheet xlsx) |
+| agent-browser Dashboard 胜率排行 | ✓ 显示🥈错杀低吸 胜率60% + 总收益+0.61% + 夏普1.97 |
+| agent-browser Cmd+K 全局搜索 | ✓ Dialog 打开, 搜索"弱转强"返回 1策略+2信号+快捷操作 |
+| agent-browser 板块管理"导出全部" | ✓ 下拉菜单 CSV/Excel 两选项 |
+| agent-browser 信号中心 channel 筛选 | ✓ CSV/WS/TDX/飞书 4 按钮 + "已筛选:" + "清空筛选" |
+| agent-browser 策略对比"导出对比" | ✓ 下拉菜单 CSV 选项 |
+| agent-browser 策略对比"重叠 Top5 详细" | ✓ Dialog 打开显示因子分解 |
+
+### 新功能清单 (5 项, 全部由 2 个 subagent 并行完成)
+
+#### R6-A: Dashboard 胜率排行 + 全局搜索 (subagent A)
+
+1. **后端 - GET /api/backtest/leaderboard**
+   - 文件: `engine/api/routes/backtest.py` (新增 BacktestLeaderboardItem/Response schema + /leaderboard 端点)
+   - 从 backtest_results 表按 strategy_id 聚合, 取最新一次回测
+   - 返回: strategy_id/name/emoji/latest_run_id/latest_run_at/start_date/end_date/total_return/annual_return/max_drawdown/sharpe_ratio/win_rate/total_trades/run_count
+   - 按 sharpe_ratio 降序排序
+
+2. **后端 - GET /api/search (全局搜索)**
+   - 文件: `engine/api/routes/search.py` (新增 ~320 行)
+   - 4 个 schema: SearchResponse/SearchStrategyItem/SearchStockItem/SearchSignalItem
+   - 跨策略/股票/信号搜索:
+     * 策略: 从 cfg.strategies() 匹配 strategy_name/strategy_id
+     * 股票: 从 selection_results 表 DISTINCT 匹配 stock_code/stock_name
+     * 信号: 从 signal_events 表匹配 condition_expr/stock_name
+   - 注册到 main.py: app.include_router(search_routes.router, prefix="/api/search")
+
+3. **前端 - 策略胜率排行卡片 StrategyLeaderboard.tsx**
+   - 文件: `src/components/quant/StrategyLeaderboard.tsx` (新增 ~220 行)
+   - 排名徽章 🥇🥈🥉4/5 (金银铜+灰)
+   - 每行: 排名 + 策略 emoji + 策略名 + 胜率进度条 (琥珀色填充) + 4 mini stat (总收益/夏普/最大回撤/交易数)
+   - 第 1 名金色边框 + glow
+   - "查看全部回测"按钮跳转到选股结果 Tab 回测 toggle
+   - 空状态: "暂无回测数据, 请先运行回测"
+   - 集成到 Dashboard.tsx 底部
+
+4. **前端 - 全局搜索 GlobalSearch.tsx**
+   - 文件: `src/components/quant/GlobalSearch.tsx` (新增 ~730 行)
+   - Cmd+K (Mac) / Ctrl+K (Win/Linux) 触发
+   - 实时搜索 (debounce 200ms), 结果分组: 策略/股票/信号/操作
+   - 键盘导航: ↑↓ 选择, Enter 确认, Esc 关闭
+   - 4 个快捷操作: 运行全部策略/切到回测视图/打开设置/切换主题 + 5 个 Tab 跳转
+   - 选中项琥珀色背景 + 左侧 2px 边框
+   - 最近搜索 (localStorage 5 个)
+   - page.tsx header 新增搜索按钮 (Search 图标) + GlobalSearch ref 集成
+
+#### R6-B: 板块导出 + 信号筛选 + 对比导出 (subagent B)
+
+5. **后端 - GET /api/sectors/export-all**
+   - 文件: `engine/api/routes/sectors.py` (新增 ~140 行)
+   - format=csv: 多段格式, 每段 `# 板块: CODE NAME (N 只)` 标题 + 表头 + 数据, 空行分隔
+   - format=excel: openpyxl Workbook, 每个 sector 一个 Sheet (名截断 31 字符), 表头 stock_code/stock_name/score/added_at
+   - 返回 StreamingResponse/Response with proper media_type
+
+6. **前端 - 板块管理"导出全部"按钮**
+   - 文件: `src/components/quant/SectorManager.tsx` (修改)
+   - 顶部工具栏新增"导出全部"DropdownMenu 按钮 (Download 图标)
+   - 下拉: CSV (多段空行分隔) / Excel (.xlsx) (每板块一个 Sheet)
+   - 调用 sectorAPI.exportAll(format) 获取 blob → 浏览器下载 sectors_all_YYYYMMDD.csv|xlsx
+   - toast 成功提示
+   - 前端代理: `src/app/api/sectors/export-all/route.ts` (GET 透传 binary)
+
+7. **前端 - 信号中心 channel 筛选**
+   - 文件: `src/components/quant/SignalCenter.tsx` (修改)
+   - 新增"推送通道"筛选行: 4 个通道徽章按钮 (CSV 灰/WS 青/TDX 紫/飞书绿)
+   - 多选 AND 语义: signals.filter(s => selectedChannels.every(ch => s.pushed_channels.includes(ch)))
+   - 选中态: 实色背景 + 白字 + ring-2 ring-amber-500
+   - "已筛选:" 状态显示 + "清空筛选"按钮
+   - 纯前端筛选, 无需改后端
+
+8. **前端 - 策略对比导出 + Top5 详细 Dialog**
+   - 文件: `src/components/quant/StrategyCompareView.tsx` (重写)
+   - "导出对比"按钮: 下拉 CSV (矩阵扁平化, 按最高分降序)
+   - "重叠 Top5 详细"按钮: 弹出 Dialog 显示 Top5 股票的详细因子分解
+     * 每个策略对该股的各因子得分表格
+     * 网格布局 sm:grid-cols-2 lg:grid-cols-3
+   - 纯前端导出, 无需后端 API
+
+### 文件变更总览 (R6 全轮)
+
+```
+后端 (Python) - 3 个文件:
+  engine/api/routes/backtest.py        # 增强: 新增 /leaderboard 端点 + 2 schema
+  engine/api/routes/search.py          # 新增: 全局搜索路由 (~320 行)
+  engine/api/routes/sectors.py         # 增强: 新增 /export-all 端点 (~140 行)
+  engine/api/main.py                   # 注册 search_routes
+
+前端 (TypeScript) - 11 个文件:
+  src/components/quant/StrategyLeaderboard.tsx   # 新增: 胜率排行卡片 (~220 行)
+  src/components/quant/GlobalSearch.tsx          # 新增: Cmd+K 全局搜索 (~730 行)
+  src/components/quant/Dashboard.tsx             # 增强: 底部渲染排行卡片
+  src/components/quant/SectorManager.tsx         # 增强: 导出全部按钮
+  src/components/quant/SignalCenter.tsx          # 增强: channel 筛选
+  src/components/quant/StrategyCompareView.tsx   # 重写: 导出对比 + Top5 Dialog
+  src/components/quant/SelectionResults.tsx      # 增强: 监听 show-backtest 事件 + 透传 rows
+  src/app/page.tsx                               # 增强: 搜索按钮 + GlobalSearch 集成
+  src/app/api/backtest/leaderboard/route.ts      # 新增: GET 代理
+  src/app/api/search/route.ts                    # 新增: GET 代理
+  src/app/api/sectors/export-all/route.ts        # 新增: GET 代理 (透传 binary)
+  src/lib/api.ts                                 # 增强: backtestAPI.leaderboard + searchAPI + sectorAPI.exportAll + 7 DTO
+```
+
+Stage Summary:
+- 项目当前状态: **P1+++ 稳定 + R6 轮次完成 Dashboard 胜率排行 + 全局搜索 + 板块导出 + 信号筛选 + 对比导出**
+- 已完成修改:
+  1. 后端: /api/backtest/leaderboard (策略胜率排行) + /api/search (全局搜索) + /api/sectors/export-all (批量导出)
+  2. 前端: StrategyLeaderboard 卡片 + GlobalSearch Cmd+K + SectorManager 导出全部 + SignalCenter channel 筛选 + StrategyCompareView 导出对比 + Top5 详细 Dialog
+  3. QA 全部通过: lint 0 错误, 所有 API 200, agent-browser 端到端验证 5 大功能
+- 未解决问题:
+  1. leaderboard 目前只显示 2 个策略 (dbqzt + cslx), 其余 3 个需用户主动运行回测后才会出现
+  2. GlobalSearch 切到回测视图通过 window event + 100ms 延迟实现 (实测可用, 但非最优)
+  3. Excel 导出依赖 openpyxl (已确认 3.1.5 安装)
+  4. sandbox 可能杀后台进程, 需要时重启 FastAPI
+- 下一阶段优先事项 (R7):
+  1. 因子插件补全 (对照 STRATEGY_LOGIC.md, 实现真实公式而非简化版)
+  2. K线图接入真实数据 (tqcenter get_market_data 替代 generateMockKline)
+  3. 回测引擎对接真实历史数据 (替换 mock 价格)
+  4. Dashboard 增加"实时资金流向"卡片 (基于 Zjl/大买占比)
+  5. 策略管理增加"策略复制"功能 (复制 YAML 创建新策略)
+  6. 信号中心增加"信号详情抽屉" (点击行展开查看完整 snapshot JSON)
+  7. 板块管理增加"板块对比"视图 (多板块成份股交集/差集)
+  8. 全局增加"通知中心" (历史 toast 汇总, 不丢失)

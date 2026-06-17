@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { Activity, BarChart3, Cpu, Layers, Bell, Sun, Moon, RefreshCw, Settings, Play, Loader2 } from 'lucide-react'
+import { Activity, BarChart3, Cpu, Layers, Bell, Sun, Moon, RefreshCw, Settings, Play, Loader2, Search } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
@@ -15,6 +15,7 @@ import { SelectionResults } from '@/components/quant/SelectionResults'
 import { SignalCenter } from '@/components/quant/SignalCenter'
 import { SectorManager } from '@/components/quant/SectorManager'
 import { ChannelSettingsDialog } from '@/components/quant/ChannelSettingsDialog'
+import { GlobalSearch, type GlobalSearchHandle } from '@/components/quant/GlobalSearch'
 
 const TABS = [
   { value: 'dashboard', label: '实时大屏', icon: Activity },
@@ -32,6 +33,7 @@ export default function Home() {
   const [runningAll, setRunningAll] = React.useState(false)
   const [settingsOpen, setSettingsOpen] = React.useState(false)
   const [channelErrors, setChannelErrors] = React.useState(0)
+  const searchRef = React.useRef<GlobalSearchHandle>(null)
 
   // 拉取监控状态用于顶部状态指示
   React.useEffect(() => {
@@ -177,6 +179,15 @@ export default function Home() {
             {/* Actions */}
             <div className="flex items-center gap-1">
               <Button
+                variant="ghost"
+                size="icon"
+                className="size-9 hover:bg-amber-500/10"
+                onClick={() => searchRef.current?.open()}
+                title="全局搜索 (⌘K / Ctrl+K)"
+              >
+                <Search className="size-4" />
+              </Button>
+              <Button
                 variant="default"
                 size="sm"
                 className="h-9 gap-1.5 bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25 hover:text-amber-300"
@@ -254,7 +265,25 @@ export default function Home() {
 
       {/* ===== Main ===== */}
       <main className="flex-1 container mx-auto max-w-[1600px] px-4 py-4 w-full">
-        {tab === 'dashboard' && <Dashboard />}
+        {tab === 'dashboard' && (
+          <Dashboard
+            onNavigateToBacktest={() => {
+              setTab('selections')
+              // 等待 SelectionResults 挂载后 dispatch 事件
+              setTimeout(() => {
+                try {
+                  window.dispatchEvent(
+                    new CustomEvent('tdxquant:show-backtest', {
+                      detail: { source: 'dashboard' },
+                    })
+                  )
+                } catch {
+                  /* noop */
+                }
+              }, 100)
+            }}
+          />
+        )}
         {tab === 'strategies' && <StrategyManager />}
         {tab === 'selections' && <SelectionResults />}
         {tab === 'signals' && <SignalCenter />}
@@ -293,6 +322,15 @@ export default function Home() {
       <ChannelSettingsDialog
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
+      />
+
+      {/* ===== 全局搜索 (Cmd+K / Ctrl+K) ===== */}
+      <GlobalSearch
+        ref={searchRef}
+        onNavigate={setTab}
+        onToggleTheme={toggleMode}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onRunAll={handleRunAll}
       />
     </div>
   )

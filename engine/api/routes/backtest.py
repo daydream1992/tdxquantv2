@@ -123,6 +123,32 @@ class BacktestHistoryItem(BaseModel):
     created_at: str
 
 
+class BacktestLeaderboardItem(BaseModel):
+    """策略胜率排行榜单条 (按 strategy_id 聚合, 取最新一次回测)。"""
+
+    strategy_id: str
+    strategy_name: str
+    strategy_emoji: str
+    latest_run_id: str
+    latest_run_at: str
+    start_date: str
+    end_date: str
+    total_return: float
+    annual_return: float
+    max_drawdown: float
+    sharpe_ratio: float
+    win_rate: float
+    total_trades: int
+    run_count: int
+
+
+class BacktestLeaderboardResponse(BaseModel):
+    """策略胜率排行响应。"""
+
+    items: list[BacktestLeaderboardItem] = Field(default_factory=list)
+    total: int = 0
+
+
 # ============================================================================
 # 路由
 # ============================================================================
@@ -224,6 +250,86 @@ async def list_backtests(
             )
         )
     return out
+
+
+@router.get(
+    "/leaderboard",
+    response_model=BacktestLeaderboardResponse,
+    summary="策略胜率排行 (按 sharpe_ratio 降序)",
+)
+async def get_leaderboard(storage: Any = Depends(get_storage)) -> BacktestLeaderboardResponse:
+    """聚合 backtest_results, 按 strategy_id 分组返回最新一次回测的关键指标。
+
+    - 每个策略取 ``created_at`` 最新的一条作为 latest
+    - ``run_count`` = 该策略历史回测总数
+    - 解析 ``result_json`` 提取 ``total_return`` / ``sharpe_ratio`` / ``win_rate`` 等
+    - 按 ``sharpe_ratio`` 降序排序
+    - 表不存在或为空时返回空列表 (不抛 500)
+    """
+    if not _table_exists(storage, "backtest_results"):
+        return BacktestLeaderboardResponse(items=[], total=0)
+    sql = (
+        "SELECT run_id, strategy_id, strategy_name, strategy_emoji, "
+        "       start_date, end_date, result_json, created_at "
+        "FROM backtest_results ORDER BY created_at DESC"
+    )
+    try:
+        df = storage.query(sql)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("查询 backtest_results 排行失败: %s", exc)
+        return BacktestLeaderboardResponse(items=[], total=0)
+    if df.empty:
+        return BacktestLeaderboardResponse(items=[], total=0)
+
+    # 按 strategy_id 分组, 每组首条即为最新 (已按 created_at DESC 排序)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for _, row in df.iterrows():
+        sid = str(row.get("strategy_id") or "")
+        if not sid:
+            continue
+        grouped.setdefault(sid, []).append(
+            {
+                "run_id": str(row.get("run_id", "")),
+                "strategy_name": str(row.get("strategy_name", "") or sid),
+                "strategy_emoji": str(row.get("strategy_emoji", "") or ""),
+                "start_date": _to_str(row.get("start_date")) or "",
+                "end_date": _to_str(row.get("end_date")) or "",
+                "result_json": row.get("result_json", "{}"),
+                "created_at": _to_str(row.get("created_at")) or "",
+            }
+        )
+
+    items: list[BacktestLeaderboardItem] = []
+    for sid, runs in grouped.items():
+        latest = runs[0]
+        run_count = len(runs)
+        # 解析 result_json 拿指标 (兼容老数据)
+        try:
+            payload = json.loads(str(latest["result_json"])) if latest["result_json"] else {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = {}
+        items.append(
+            BacktestLeaderboardItem(
+                strategy_id=sid,
+                strategy_name=latest["strategy_name"],
+                strategy_emoji=latest["strategy_emoji"],
+                latest_run_id=latest["run_id"],
+                latest_run_at=latest["created_at"],
+                start_date=str(payload.get("start_date", "") or latest["start_date"]),
+                end_date=str(payload.get("end_date", "") or latest["end_date"]),
+                total_return=float(payload.get("total_return", 0.0) or 0.0),
+                annual_return=float(payload.get("annual_return", 0.0) or 0.0),
+                max_drawdown=float(payload.get("max_drawdown", 0.0) or 0.0),
+                sharpe_ratio=float(payload.get("sharpe_ratio", 0.0) or 0.0),
+                win_rate=float(payload.get("win_rate", 0.0) or 0.0),
+                total_trades=int(payload.get("total_trades", 0) or 0),
+                run_count=run_count,
+            )
+        )
+
+    # 按 sharpe_ratio 降序
+    items.sort(key=lambda x: x.sharpe_ratio, reverse=True)
+    return BacktestLeaderboardResponse(items=items, total=len(items))
 
 
 @router.get(

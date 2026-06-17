@@ -34,6 +34,8 @@ import {
   XCircle,
   Clock,
   RefreshCw,
+  X,
+  Radio,
 } from 'lucide-react'
 import { StockTable, type Column } from './StockTable'
 import { LoadingState } from './LoadingState'
@@ -79,6 +81,9 @@ const CHANNEL_BADGE_META: Record<string, { color: string; label: string }> = {
   email: { color: '#f59e0b', label: '邮件' },
 }
 
+// 可筛选的通道列表 (固定顺序)
+const CHANNEL_FILTER_ORDER: string[] = ['csv_log', 'websocket', 'tdx_warn', 'feishu']
+
 // 新信号判定阈值 (1 分钟)
 const NEW_SIGNAL_THRESHOLD_MS = 60 * 1000
 
@@ -90,6 +95,8 @@ export function SignalCenter() {
   const [strategyFilter, setStrategyFilter] = React.useState<string>('all')
   const [startDate, setStartDate] = React.useState<string>('')
   const [endDate, setEndDate] = React.useState<string>('')
+  // 推送通道筛选 (多选, "同时包含所有选中通道"语义)
+  const [channelFilter, setChannelFilter] = React.useState<Set<string>>(new Set())
   // 正在重推的 signal id 集合
   const [repushing, setRepushing] = React.useState<Set<string>>(new Set())
   // 用于刷新新信号判定
@@ -135,6 +142,46 @@ export function SignalCenter() {
     })
     return m
   }, [signals])
+
+  // 应用 channel 筛选后的信号 (AND 语义: 必须包含所有选中通道)
+  const displayedSignals = React.useMemo(() => {
+    if (channelFilter.size === 0) return signals
+    return signals.filter((s) => {
+      for (const ch of channelFilter) {
+        if (!s.pushed_channels.includes(ch)) return false
+      }
+      return true
+    })
+  }, [signals, channelFilter])
+
+  // 通道切换
+  const toggleChannel = (ch: string) => {
+    setChannelFilter((prev) => {
+      const next = new Set(prev)
+      if (next.has(ch)) {
+        next.delete(ch)
+      } else {
+        next.add(ch)
+      }
+      return next
+    })
+  }
+
+  // 清空所有筛选 (类型 / 策略 / 日期 / 通道)
+  const clearAllFilters = () => {
+    setTypeFilter('all')
+    setStrategyFilter('all')
+    setStartDate('')
+    setEndDate('')
+    setChannelFilter(new Set())
+  }
+
+  const hasAnyFilter =
+    typeFilter !== 'all' ||
+    strategyFilter !== 'all' ||
+    !!startDate ||
+    !!endDate ||
+    channelFilter.size > 0
 
   // 重推信号
   const handleRepush = React.useCallback(async (signal: SignalDTO) => {
@@ -475,9 +522,86 @@ export function SignalCenter() {
               className="h-8 w-36 border-quant"
             />
           </div>
+          {hasAnyFilter && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-8 text-xs text-muted-foreground hover:text-amber-400 hover:bg-amber-500/10"
+              onClick={clearAllFilters}
+              title="清空所有筛选"
+            >
+              <X className="size-3" />
+              清空筛选
+            </Button>
+          )}
           <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
             <Filter className="size-3" />
-            <span>共 {signals.length} 条</span>
+            <span>
+              共 <span className="text-quant-primary font-semibold tabular-nums">{displayedSignals.length}</span>
+              {channelFilter.size > 0 && signals.length !== displayedSignals.length && (
+                <span className="text-muted-foreground/70"> / {signals.length}</span>
+              )} 条
+            </span>
+          </div>
+        </div>
+
+        {/* 推送通道筛选行 */}
+        <div className="mt-3 pt-3 border-t border-quant/60">
+          <div className="flex flex-wrap items-center gap-2">
+            <Label className="text-xs text-muted-foreground inline-flex items-center gap-1">
+              <Radio className="size-3" />
+              推送通道
+            </Label>
+            <button
+              type="button"
+              onClick={() => setChannelFilter(new Set())}
+              className={cn(
+                'text-[11px] px-2.5 py-1 rounded-md border transition-all',
+                channelFilter.size === 0
+                  ? 'bg-amber-500/15 text-amber-400 border-amber-500/40 font-semibold ring-2 ring-amber-500/30'
+                  : 'text-muted-foreground border-quant hover:bg-amber-500/10 hover:text-amber-400 hover:border-amber-500/30'
+              )}
+            >
+              全部
+            </button>
+            {CHANNEL_FILTER_ORDER.map((ch) => {
+              const meta = CHANNEL_BADGE_META[ch]
+              const active = channelFilter.has(ch)
+              return (
+                <button
+                  key={ch}
+                  type="button"
+                  onClick={() => toggleChannel(ch)}
+                  className={cn(
+                    'text-[11px] px-2.5 py-1 rounded-md border font-medium transition-all',
+                    active && 'ring-2 ring-amber-500/60 ring-offset-1 ring-offset-background'
+                  )}
+                  style={{
+                    color: active ? '#ffffff' : meta.color,
+                    backgroundColor: active
+                      ? meta.color
+                      : `color-mix(in srgb, ${meta.color} 8%, transparent)`,
+                    borderColor: active
+                      ? meta.color
+                      : `color-mix(in srgb, ${meta.color} 30%, transparent)`,
+                  }}
+                  title={`筛选推送通道: ${meta.label} (${ch})`}
+                >
+                  {meta.label}
+                </button>
+              )
+            })}
+            {channelFilter.size > 0 && (
+              <span className="ml-auto text-[11px] text-amber-400 inline-flex items-center gap-1">
+                <Filter className="size-3" />
+                已筛选: {CHANNEL_FILTER_ORDER.filter((ch) => channelFilter.has(ch))
+                  .map((ch) => CHANNEL_BADGE_META[ch].label)
+                  .join(' + ')}
+                <span className="text-muted-foreground">
+                  (共 {displayedSignals.length} 条)
+                </span>
+              </span>
+            )}
           </div>
         </div>
       </Card>
@@ -497,14 +621,17 @@ export function SignalCenter() {
       {/* 表格 */}
       {loading ? (
         <LoadingState rows={10} />
-      ) : signals.length === 0 ? (
+      ) : displayedSignals.length === 0 ? (
         <Card className="bg-quant-card border-quant">
-          <EmptyState text="暂无信号" description="调整筛选条件或稍后再试" />
+          <EmptyState
+            text={signals.length === 0 ? '暂无信号' : '当前筛选条件下无信号'}
+            description={signals.length === 0 ? '调整筛选条件或稍后再试' : `已过滤 ${signals.length} 条信号, 尝试调整通道筛选`}
+          />
         </Card>
       ) : (
         <StockTable
           columns={columns}
-          data={signals}
+          data={displayedSignals}
           rowKey={(s) => s.id}
           maxHeight="32rem"
           pageSize={30}

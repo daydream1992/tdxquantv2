@@ -237,6 +237,21 @@ export const sectorAPI = {
   getStocks: (code: string) => fetchAPI<SectorStockDTO[]>(`/api/sectors/${code}/stocks`),
   refresh: (code: string) =>
     fetchAPI<{ ok: boolean; count: number }>(`/api/sectors/${code}/refresh`, { method: 'POST' }),
+  /** 导出全部板块成份股, 返回 Blob (供浏览器下载) */
+  exportAll: async (format: 'csv' | 'excel'): Promise<Blob> => {
+    const res = await fetch(`/api/sectors/export-all?format=${format}`, { cache: 'no-store' })
+    if (!res.ok) {
+      let msg = `导出失败 ${res.status}`
+      try {
+        const data = await res.json()
+        msg = data.error || data.message || msg
+      } catch {
+        /* noop */
+      }
+      throw new APIError(msg, res.status)
+    }
+    return await res.blob()
+  },
 }
 
 export const monitorAPI = {
@@ -388,6 +403,28 @@ export interface BacktestHistoryItemDTO {
   created_at: string
 }
 
+export interface BacktestLeaderboardItemDTO {
+  strategy_id: string
+  strategy_name: string
+  strategy_emoji: string
+  latest_run_id: string
+  latest_run_at: string
+  start_date: string
+  end_date: string
+  total_return: number
+  annual_return: number
+  max_drawdown: number
+  sharpe_ratio: number
+  win_rate: number
+  total_trades: number
+  run_count: number
+}
+
+export interface BacktestLeaderboardDTO {
+  items: BacktestLeaderboardItemDTO[]
+  total: number
+}
+
 export const backtestAPI = {
   run: (params: BacktestParamsDTO) =>
     fetchAPI<BacktestResultDTO>('/api/backtest/run', {
@@ -397,4 +434,53 @@ export const backtestAPI = {
   history: () => fetchAPI<BacktestHistoryItemDTO[]>('/api/backtest/history'),
   get: (runId: string) =>
     fetchAPI<BacktestResultDTO>(`/api/backtest/${encodeURIComponent(runId)}`),
+  leaderboard: () => fetchAPI<BacktestLeaderboardDTO>('/api/backtest/leaderboard'),
+}
+
+// ===== 全局搜索 =====
+
+export interface SearchStrategyItemDTO {
+  strategy_id: string
+  strategy_name: string
+  strategy_emoji: string
+  description: string
+  sector_code: string
+  enabled: boolean
+}
+
+export interface SearchStockItemDTO {
+  stock_code: string
+  stock_name: string
+  strategy_id: string
+  strategy_name: string
+  score: number
+  run_date: string
+}
+
+export interface SearchSignalItemDTO {
+  id: string
+  time: string
+  type: 'limit_up' | 'drop_alert' | 'breakout' | 'selection' | 'system'
+  strategy_id: string | null
+  strategy_name: string | null
+  stock_code: string | null
+  stock_name: string | null
+  content: string
+}
+
+export interface SearchResponseDTO {
+  q: string
+  strategies: SearchStrategyItemDTO[]
+  stocks: SearchStockItemDTO[]
+  signals: SearchSignalItemDTO[]
+  total: number
+}
+
+export const searchAPI = {
+  search: (q: string, limit = 20) => {
+    const sp = new URLSearchParams()
+    sp.set('q', q)
+    sp.set('limit', String(limit))
+    return fetchAPI<SearchResponseDTO>(`/api/search?${sp.toString()}`)
+  },
 }

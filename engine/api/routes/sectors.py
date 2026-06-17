@@ -1,6 +1,7 @@
 """``/api/sectors`` 路由 - 板块管理。
 
 - ``GET  /api/sectors``                       - 列出所有板块（从策略 YAML sector 段 + tqcenter 查询）
+- ``GET  /api/sectors/export-all``            - 导出全部板块成份股（CSV / Excel）
 - ``GET  /api/sectors/{code}/stocks``         - 获取板块成份股
 - ``POST /api/sectors/{code}/refresh``        - 刷新板块（重新执行选股并回写）
 - ``POST /api/sectors``                       - 占位（创建/更新板块，未实现具体逻辑）
@@ -8,10 +9,12 @@
 
 from __future__ import annotations
 
+import io
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 
 from engine.api.deps import get_config, get_runner, get_sector_manager, get_storage
 from engine.api.schemas import (
@@ -83,6 +86,149 @@ async def create_or_update_sector(
     实际创建需指定 code/name/stocks，本端点保留接口形态返回 ``{ok:true}``。
     """
     return OkResponse(ok=True, message="板块批量创建请走 /api/sectors/{code}/refresh")
+
+
+@router.get(
+    "/export-all",
+    summary="导出全部板块成份股（CSV / Excel）",
+    responses={
+        200: {
+            "content": {
+                "text/csv": {},
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {},
+            },
+        },
+    },
+)
+async def export_all_sectors(
+    format: str = Query("csv", pattern="^(csv|excel)$"),
+    cfg: Any = Depends(get_config),
+    storage: Any = Depends(get_storage),
+) -> Response:
+    """导出所有板块的成份股到一个文件。
+
+    - ``format=csv``: 多个板块用空行分隔, 每段含 ``# 板块: <code> <name> (<n> 只)`` 标题行
+      列: ``stock_code, stock_name, score, added_at``
+    - ``format=excel``: 多 Sheet 工作簿, 每个 Sheet 一个板块 (Sheet 名取板块 name 前 31 字符)
+    """
+    sectors: list[tuple[str, str]] = []  # (code, name)
+    strategies = cfg.strategies() or {}
+    seen: set[str] = set()
+    for sid, sc in strategies.items():
+        sector_obj = getattr(sc, "sector", None)
+        if sector_obj is None:
+            continue
+        code = getattr(sector_obj, "code", "")
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        name = getattr(sector_obj, "name", "") or code
+        sectors.append((code, name))
+    sectors.sort(key=lambda x: x[0])
+
+    # 收集每个板块的成份股
+    sector_stocks: list[tuple[str, str, list[SectorStockResponse]]] = []
+    for code, name in sectors:
+        stocks = _query_snapshot_stocks(storage, code)
+        if not stocks:
+            # 兜底: 跳过空板块 (不写入空段, 避免污染导出)
+            continue
+        sector_stocks.append((code, name, stocks))
+
+    if not sector_stocks:
+        raise HTTPException(status_code=404, detail="暂无板块数据可导出")
+
+    # CSV
+    if format == "csv":
+        out = io.StringIO()
+        out.write("\ufeff")  # BOM (Excel 兼容 UTF-8)
+        for idx, (code, name, stocks) in enumerate(sector_stocks):
+            if idx > 0:
+                out.write("\n")
+            out.write(f"# 板块: {code} {name} ({len(stocks)} 只)\n")
+            out.write("stock_code,stock_name,score,added_at\n")
+            for s in stocks:
+                stock_name = (s.stock_name or "").replace(",", "_")
+                added_at = (s.added_at or "").replace(",", " ")
+                out.write(
+                    f"{s.stock_code},{stock_name},{s.score:.3f},{added_at}\n"
+                )
+        content = out.getvalue().encode("utf-8")
+        return Response(
+            content=content,
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": 'attachment; filename="sectors_all.csv"',
+            },
+        )
+
+    # Excel (openpyxl)
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="openpyxl 未安装，无法导出 Excel",
+        ) from exc
+
+    wb = Workbook()
+    # 删除默认 Sheet
+    default_ws = wb.active
+    wb.remove(default_ws)
+
+    header_fill = PatternFill(start_color="F59E0B", end_color="F59E0B", fill_type="solid")
+    header_font = Font(name="微软雅黑", size=10, bold=True, color="FFFFFF")
+    center = Alignment(horizontal="center", vertical="center")
+    headers = ["stock_code", "stock_name", "score", "added_at"]
+
+    # 处理 Sheet 名重复 (openpyxl 不允许重名)
+    used_names: set[str] = set()
+
+    def _unique_sheet_name(raw: str) -> str:
+        # Excel Sheet 名限制: 31 字符, 不能含 \ / ? * [ ]
+        cleaned = "".join(c for c in raw if c not in "\\/?*[]:") or "Sheet"
+        base = cleaned[:28] if len(cleaned) > 28 else cleaned
+        candidate = base
+        idx = 1
+        while candidate in used_names:
+            suffix = f"_{idx}"
+            candidate = base[: 31 - len(suffix)] + suffix
+            idx += 1
+        used_names.add(candidate)
+        return candidate
+
+    for code, name, stocks in sector_stocks:
+        ws = wb.create_sheet(title=_unique_sheet_name(name or code))
+        # 表头
+        for j, col in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=j, value=col)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = center
+        # 数据
+        for i, s in enumerate(stocks, start=2):
+            ws.cell(row=i, column=1, value=s.stock_code)
+            ws.cell(row=i, column=2, value=s.stock_name or "")
+            score_cell = ws.cell(row=i, column=3, value=round(float(s.score), 3))
+            score_cell.alignment = center
+            ws.cell(row=i, column=4, value=s.added_at or "")
+        # 列宽
+        ws.column_dimensions["A"].width = 14
+        ws.column_dimensions["B"].width = 18
+        ws.column_dimensions["C"].width = 10
+        ws.column_dimensions["D"].width = 22
+        ws.freeze_panes = "A2"
+
+    bio = io.BytesIO()
+    wb.save(bio)
+    return Response(
+        content=bio.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": 'attachment; filename="sectors_all.xlsx"',
+        },
+    )
 
 
 @router.get(

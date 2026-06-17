@@ -12,13 +12,21 @@ import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogDescription,
 } from '@/components/ui/dialog'
-import { RefreshCw, Eye, Layers, Link2, Calendar, TrendingUp, TrendingDown, Activity, CandlestickChart, X } from 'lucide-react'
+import { RefreshCw, Eye, Layers, Link2, Calendar, TrendingUp, TrendingDown, Activity, CandlestickChart, X, Download, FileSpreadsheet, FileText } from 'lucide-react'
 import { StockTable, type Column } from './StockTable'
 import { ScoreBadge } from './ScoreBadge'
 import { LoadingState } from './LoadingState'
@@ -46,6 +54,8 @@ export function SectorManager() {
   const [klineDays, setKlineDays] = React.useState<30 | 60 | 120>(30)
   // 缓存 mock kline 数据 (避免每次重新生成)
   const klineCache = React.useRef<Map<string, ReturnType<typeof generateMockKline>>>(new Map())
+  // 导出全部: loading 状态
+  const [exporting, setExporting] = React.useState<'csv' | 'excel' | null>(null)
 
   const getKline = (code: string, days: number) => {
     const key = `${code}:${days}`
@@ -106,6 +116,39 @@ export function SectorManager() {
       toast.error('加载股票失败', { description: (e as Error).message })
     } finally {
       setStocksLoading(false)
+    }
+  }
+
+  // 导出全部板块
+  const handleExportAll = async (format: 'csv' | 'excel') => {
+    if (sectors.length === 0) {
+      toast.warning('暂无板块数据可导出')
+      return
+    }
+    setExporting(format)
+    const toastId = toast.loading(`正在导出全部板块 (${format.toUpperCase()})...`)
+    try {
+      const blob = await sectorAPI.exportAll(format)
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+      a.download = `sectors_all_${dateStr}.${format === 'csv' ? 'csv' : 'xlsx'}`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+      toast.success(`已导出 ${sectors.length} 个板块 (${format.toUpperCase()})`, {
+        id: toastId,
+        description: `文件已下载到本地`,
+      })
+    } catch (e) {
+      toast.error('导出失败', {
+        id: toastId,
+        description: (e as Error).message,
+      })
+    } finally {
+      setExporting(null)
     }
   }
 
@@ -245,10 +288,52 @@ export function SectorManager() {
               {sectors.length} 个板块
             </Badge>
           </div>
-          <Button size="sm" variant="ghost" className="h-8" onClick={load} disabled={loading}>
-            <RefreshCw className={`size-3.5 ${loading ? 'animate-spin' : ''}`} />
-            刷新
-          </Button>
+          <div className="flex items-center gap-1.5">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 border-quant hover:border-[var(--quant-primary)]/40 hover:bg-amber-500/10 hover:text-amber-400"
+                  disabled={!!exporting || loading || sectors.length === 0}
+                  title="导出全部板块成份股"
+                >
+                  <Download className={`size-3.5 ${exporting ? 'animate-pulse' : ''}`} />
+                  <span className="hidden sm:inline">{exporting ? `导出中(${exporting.toUpperCase()})` : '导出全部'}</span>
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-44">
+                <DropdownMenuLabel className="text-xs text-muted-foreground">
+                  选择导出格式
+                </DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  className="cursor-pointer"
+                  onClick={() => handleExportAll('csv')}
+                >
+                  <FileText className="size-4 text-amber-400" />
+                  <div className="flex flex-col">
+                    <span className="text-sm">CSV</span>
+                    <span className="text-[10px] text-muted-foreground">多段空行分隔</span>
+                  </div>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className="cursor-pointer"
+                  onClick={() => handleExportAll('excel')}
+                >
+                  <FileSpreadsheet className="size-4 text-emerald-400" />
+                  <div className="flex flex-col">
+                    <span className="text-sm">Excel (.xlsx)</span>
+                    <span className="text-[10px] text-muted-foreground">每板块一个 Sheet</span>
+                  </div>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <Button size="sm" variant="ghost" className="h-8" onClick={load} disabled={loading}>
+              <RefreshCw className={`size-3.5 ${loading ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">刷新</span>
+            </Button>
+          </div>
         </div>
         <div className="text-xs text-muted-foreground mt-1.5">
           板块 Code 命名规则：<span className="font-mono">ZD_&lt;策略拼音大写&gt;01</span>

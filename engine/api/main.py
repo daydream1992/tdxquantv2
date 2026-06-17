@@ -33,6 +33,7 @@ from engine.api.routes import (
     config as config_routes,
     monitor as monitor_routes,
     sectors as sectors_routes,
+    search as search_routes,
     selection as selection_routes,
     signals as signals_routes,
     strategies as strategies_routes,
@@ -214,6 +215,7 @@ def create_app() -> FastAPI:
     app.include_router(theme_routes.router, prefix="/api/theme")
     app.include_router(channels_routes.router, prefix="/api/channels")
     app.include_router(backtest_routes.router, prefix="/api/backtest")
+    app.include_router(search_routes.router, prefix="/api/search")
 
     return app
 
