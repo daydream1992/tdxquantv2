@@ -21,7 +21,7 @@ import {
 } from '@/components/ui/select'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Download, Filter, ChevronDown, ChevronUp, List, Layers3 } from 'lucide-react'
+import { Download, Filter, ChevronDown, ChevronUp, List, Layers3, Columns3 } from 'lucide-react'
 import { StockTable, type Column } from './StockTable'
 import { ScoreBadge } from './ScoreBadge'
 import { LoadingState } from './LoadingState'
@@ -34,19 +34,11 @@ import {
   type StrategyDTO,
 } from '@/lib/api'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { StrategyCompareView } from './StrategyCompareView'
+import type { StockAggRow } from './types'
 
-// 按股票聚合的视图类型
-interface StockAggRow {
-  stock_code: string
-  stock_name: string
-  strategy_count: number
-  strategy_ids: string[]
-  strategy_names: string[]
-  best_score: number
-  best_rank: number
-  avg_score: number
-  runs: Array<{ strategy_id: string; strategy_name: string; score: number; rank: number }>
-}
+// 按股票聚合的视图类型 (从 ./types 导入, 避免循环依赖)
+export type { StockAggRow }
 
 export function SelectionResults() {
   const [strategies, setStrategies] = React.useState<StrategyDTO[]>([])
@@ -57,8 +49,8 @@ export function SelectionResults() {
   const [startDate, setStartDate] = React.useState<string>('')
   const [endDate, setEndDate] = React.useState<string>('')
   const [expandedKey, setExpandedKey] = React.useState<string | null>(null)
-  // 视图切换: 'detail' (明细) | 'agg' (按股票汇总)
-  const [viewMode, setViewMode] = React.useState<'detail' | 'agg'>('detail')
+  // 视图切换: 'detail' (明细) | 'agg' (按股票汇总) | 'compare' (策略横向对比)
+  const [viewMode, setViewMode] = React.useState<'detail' | 'agg' | 'compare'>('detail')
 
   // 按股票聚合：同一只股票被多少策略选中
   const aggRows = React.useMemo<StockAggRow[]>(() => {
@@ -101,6 +93,27 @@ export function SelectionResults() {
     list.sort((a, b) => b.strategy_count - a.strategy_count || b.best_score - a.best_score)
     return list
   }, [rows])
+
+  // 策略横向对比矩阵
+  // 行 = 股票 (按被选次数排序前 30), 列 = 策略, 单元格 = 得分
+  const compareMatrix = React.useMemo(() => {
+    // 仅取被多策略选中的股票
+    const topStocks = aggRows.filter((r) => r.strategy_count >= 2).slice(0, 30)
+    const strategyCols = strategies.filter((s) => s.enabled)
+    // 矩阵数据: Map<stock_code, Map<strategy_id, score>>
+    const matrix = new Map<string, Map<string, number>>()
+    for (const r of topStocks) {
+      const m = new Map<string, number>()
+      // 从 rows 中找这只股票所有策略的得分
+      for (const row of rows) {
+        if (row.stock_code === r.stock_code) {
+          m.set(row.strategy_id, row.score)
+        }
+      }
+      matrix.set(r.stock_code, m)
+    }
+    return { topStocks, strategyCols, matrix }
+  }, [aggRows, strategies, rows])
 
   // 加载策略列表
   React.useEffect(() => {
@@ -333,7 +346,7 @@ export function SelectionResults() {
             <ToggleGroup
               type="single"
               value={viewMode}
-              onValueChange={(v) => v && setViewMode(v as 'detail' | 'agg')}
+              onValueChange={(v) => v && setViewMode(v as 'detail' | 'agg' | 'compare')}
               className="rounded-md border border-quant bg-transparent h-8"
             >
               <ToggleGroupItem
@@ -351,6 +364,14 @@ export function SelectionResults() {
               >
                 <Layers3 className="size-3.5" />
                 汇总
+              </ToggleGroupItem>
+              <ToggleGroupItem
+                value="compare"
+                className="h-7 px-2 text-xs data-[state=on]:bg-amber-500/15 data-[state=on]:text-amber-400"
+                title="对比视图：多策略横向对比，发现重叠机会"
+              >
+                <Columns3 className="size-3.5" />
+                对比
               </ToggleGroupItem>
             </ToggleGroup>
             <Button
@@ -397,6 +418,13 @@ export function SelectionResults() {
             description="尝试调整筛选条件，或在策略管理页运行策略"
           />
         </Card>
+      ) : viewMode === 'compare' ? (
+        /* 对比视图：策略横向对比矩阵 */
+        <StrategyCompareView
+          topStocks={compareMatrix.topStocks}
+          strategyCols={compareMatrix.strategyCols}
+          matrix={compareMatrix.matrix}
+        />
       ) : viewMode === 'agg' ? (
         /* 汇总视图：按股票聚合，显示被多少策略选中 */
         <StockTable

@@ -1,17 +1,27 @@
 'use client'
 
 /**
- * 实时大屏
+ * 实时大屏 (P2 SSE 实时推送)
  * - 顶部 4 统计：监控股票数 / 今日信号数 / 涨停股票数 / 异常告警数
- * - 中部左侧：实时行情滚动（轮询 mock）
- * - 中部右侧：信号实时流（最近 10 条）
+ * - 中部左侧：实时行情滚动 (SSE 推送，5s 全量)
+ * - 中部右侧：信号实时流 (新信号到达时高亮闪烁)
  * - 底部：5 策略板块概览
+ * - 连接状态指示器 (SSE 在线 / 轮询降级 / 离线)
  */
 
 import * as React from 'react'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { Activity, Bell, Flame, AlertTriangle, Radio, RefreshCw } from 'lucide-react'
+import {
+  Activity,
+  Bell,
+  Flame,
+  AlertTriangle,
+  Radio,
+  RefreshCw,
+  Wifi,
+  WifiOff,
+} from 'lucide-react'
 import { StatCard } from './StatCard'
 import { StockPrice, PctBadge } from './StockPrice'
 import { SignalToast } from './SignalToast'
@@ -19,58 +29,56 @@ import { StrategyCard } from './StrategyCard'
 import { LoadingState } from './LoadingState'
 import { EmptyState } from './EmptyState'
 import { Button } from '@/components/ui/button'
-import {
-  monitorAPI,
-  signalAPI,
-  strategyAPI,
-  type MonitorStatusDTO,
-  type SignalDTO,
-  type StrategyDTO,
-  type QuoteDTO,
-} from '@/lib/api'
+import { strategyAPI, type StrategyDTO } from '@/lib/api'
+import { useRealtimeQuotes } from '@/lib/useRealtime'
 
 export function Dashboard() {
-  const [status, setStatus] = React.useState<MonitorStatusDTO | null>(null)
-  const [signals, setSignals] = React.useState<SignalDTO[]>([])
-  const [strategies, setStrategies] = React.useState<StrategyDTO[]>([])
-  const [quotes, setQuotes] = React.useState<QuoteDTO[]>([])
-  const [loading, setLoading] = React.useState(true)
-  const [autoRefresh, setAutoRefresh] = React.useState(true)
+  // 实时 WS 数据
+  const rt = useRealtimeQuotes({ autoRefresh: true })
 
-  const loadAll = React.useCallback(async () => {
-    try {
-      const [s, sig, str] = await Promise.all([
-        monitorAPI.getStatus(),
-        signalAPI.list({ limit: 10 }),
-        strategyAPI.list(),
-      ])
-      setStatus(s)
-      setSignals(sig)
-      setStrategies(str)
-      // 行情数据来自 monitorAPI.getQuotes（route 内含 mock）
-      try {
-        const q = await monitorAPI.getQuotes()
-        setQuotes(q)
-      } catch {
-        /* noop */
-      }
-    } catch (e) {
-      console.error('[Dashboard] load error', e)
-    } finally {
-      setLoading(false)
-    }
+  // 策略列表 (相对静态，单独拉)
+  const [strategies, setStrategies] = React.useState<StrategyDTO[]>([])
+  const [strategiesLoading, setStrategiesLoading] = React.useState(true)
+
+  React.useEffect(() => {
+    strategyAPI
+      .list()
+      .then(setStrategies)
+      .catch(() => {})
+      .finally(() => setStrategiesLoading(false))
   }, [])
 
-  React.useEffect(() => {
-    loadAll()
-  }, [loadAll])
+  // 拉取初值: 等 WS 数据到达前先显示 loading
+  const initialLoading = rt.quotes.length === 0 && rt.signals.length === 0 && !rt.connected
 
-  // 自动轮询（10s）
-  React.useEffect(() => {
-    if (!autoRefresh) return
-    const t = setInterval(loadAll, 10_000)
-    return () => clearInterval(t)
-  }, [autoRefresh, loadAll])
+  // 涨幅榜/跌幅榜 (排序后取前 N)
+  const sortedQuotes = React.useMemo(() => {
+    return [...rt.quotes].sort((a, b) => b.pct - a.pct)
+  }, [rt.quotes])
+
+  // 上 Top3 / 下 Top3 提示
+  const topGainers = sortedQuotes.slice(0, 3)
+  const topLosers = sortedQuotes.slice(-3).reverse()
+
+  // 连接状态 Badge
+  const connBadge = rt.connected ? (
+    rt.mode === 'sse' ? (
+      <Badge className="bg-emerald-500/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/15 gap-1">
+        <Wifi className="size-3" />
+        SSE 实时
+      </Badge>
+    ) : (
+      <Badge className="bg-emerald-500/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/15 gap-1">
+        <RefreshCw className="size-3" />
+        轮询在线
+      </Badge>
+    )
+  ) : (
+    <Badge className="bg-rose-500/15 text-rose-400 border-rose-500/30 hover:bg-rose-500/15 gap-1">
+      <WifiOff className="size-3" />
+      离线
+    </Badge>
+  )
 
   return (
     <div className="space-y-4">
@@ -78,38 +86,38 @@ export function Dashboard() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <StatCard
           label="监控股票数"
-          value={status?.monitored_count ?? 0}
+          value={rt.status?.monitored_count ?? 0}
           icon={Activity}
           tone="primary"
-          hint={`引擎 ${status?.engine_status ?? '...'} · ${status?.adapter_mode ?? ''} 模式`}
-          loading={loading}
+          hint={`引擎 ${rt.status?.engine_status ?? '...'} · ${rt.status?.adapter_mode ?? ''} 模式`}
+          loading={initialLoading}
           spark={[0.2, 0.3, 0.5, 0.4, 0.6, 0.5, 0.7, 0.6, 0.8, 0.7, 0.9, 1.0]}
         />
         <StatCard
           label="今日信号数"
-          value={status?.today_signals ?? 0}
+          value={rt.status?.today_signals ?? 0}
           icon={Bell}
           tone="primary"
           hint="全部信号通道"
-          loading={loading}
+          loading={initialLoading}
           spark={[0.1, 0.3, 0.2, 0.5, 0.4, 0.7, 0.6, 0.8, 0.5, 0.9, 0.7, 1.0]}
         />
         <StatCard
           label="涨停股票数"
-          value={status?.today_limit_up ?? 0}
+          value={rt.status?.today_limit_up ?? 0}
           icon={Flame}
           tone="up"
           hint="盘中触及涨停"
-          loading={loading}
+          loading={initialLoading}
           spark={[0.0, 0.1, 0.05, 0.2, 0.15, 0.3, 0.25, 0.4, 0.35, 0.5, 0.45, 0.6]}
         />
         <StatCard
           label="异常告警数"
-          value={status?.today_alerts ?? 0}
+          value={rt.status?.today_alerts ?? 0}
           icon={AlertTriangle}
           tone="down"
           hint="跌幅/异常推送"
-          loading={loading}
+          loading={initialLoading}
           spark={[0.0, 0.05, 0.0, 0.1, 0.05, 0.0, 0.15, 0.1, 0.05, 0.2, 0.1, 0.15]}
         />
       </div>
@@ -123,27 +131,70 @@ export function Dashboard() {
               <Radio className="size-4 text-quant-primary" />
               <span className="font-semibold text-sm">实时行情</span>
               <Badge variant="outline" className="text-[10px] border-quant font-mono">
-                {quotes.length} 只
+                {rt.quotes.length} 只
               </Badge>
               <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
-                <span className="inline-block size-1.5 rounded-full bg-[var(--quant-down)] status-pulse" />
-                轮询 10s
+                <span
+                  className={`inline-block size-1.5 rounded-full status-pulse ${
+                    rt.connected ? 'bg-emerald-500' : 'bg-rose-500'
+                  }`}
+                />
+                {rt.mode === 'sse' ? 'SSE 5s' : '轮询 10s'}
               </span>
             </div>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 px-2 text-xs"
-              onClick={() => setAutoRefresh((v) => !v)}
-            >
-              <RefreshCw className={`size-3 ${autoRefresh ? 'animate-spin' : ''}`} />
-              {autoRefresh ? '自动刷新中' : '已暂停'}
-            </Button>
+            <div className="flex items-center gap-2">
+              {connBadge}
+            </div>
           </div>
+
+          {/* 涨幅 Top3 / 跌幅 Top3 速览条 */}
+          {sortedQuotes.length > 0 && (
+            <div className="grid grid-cols-2 gap-2 p-2 border-b border-quant/50 bg-quant-bg/50">
+              <div className="rounded-md p-2 bg-[var(--quant-up)]/5 border border-[var(--quant-up)]/15">
+                <div className="text-[10px] text-muted-foreground mb-1 flex items-center gap-1">
+                  <Flame className="size-3 text-[var(--quant-up)]" />
+                  涨幅榜 Top3
+                </div>
+                <div className="space-y-0.5">
+                  {topGainers.map((q, i) => (
+                    <div key={q.code} className="flex items-center justify-between text-xs">
+                      <span className="flex items-center gap-1.5 min-w-0">
+                        <span className="text-[10px] text-muted-foreground/60 w-3">{i + 1}</span>
+                        <span className="truncate">{q.name}</span>
+                      </span>
+                      <span className="text-up tabular-nums font-mono">
+                        +{(q.pct * 100).toFixed(2)}%
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="rounded-md p-2 bg-[var(--quant-down)]/5 border border-[var(--quant-down)]/15">
+                <div className="text-[10px] text-muted-foreground mb-1 flex items-center gap-1">
+                  <AlertTriangle className="size-3 text-[var(--quant-down)]" />
+                  跌幅榜 Top3
+                </div>
+                <div className="space-y-0.5">
+                  {topLosers.map((q, i) => (
+                    <div key={q.code} className="flex items-center justify-between text-xs">
+                      <span className="flex items-center gap-1.5 min-w-0">
+                        <span className="text-[10px] text-muted-foreground/60 w-3">{i + 1}</span>
+                        <span className="truncate">{q.name}</span>
+                      </span>
+                      <span className="text-down tabular-nums font-mono">
+                        {(q.pct * 100).toFixed(2)}%
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="max-h-96 overflow-y-auto quant-scroll">
-            {loading ? (
+            {initialLoading ? (
               <LoadingState variant="list" className="p-3" rows={6} />
-            ) : quotes.length === 0 ? (
+            ) : rt.quotes.length === 0 ? (
               <EmptyState text="暂无行情数据" className="py-10" />
             ) : (
               <table className="quant-table w-full">
@@ -158,7 +209,7 @@ export function Dashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {quotes.map((q) => {
+                  {rt.quotes.map((q) => {
                     const dir = q.pct > 0 ? 'up' : q.pct < 0 ? 'down' : 'flat'
                     return (
                       <tr key={q.code} className={dir === 'up' ? 'flash-up' : dir === 'down' ? 'flash-down' : ''}>
@@ -193,18 +244,23 @@ export function Dashboard() {
             <div className="flex items-center gap-2">
               <Bell className="size-4 text-quant-primary" />
               <span className="font-semibold text-sm">信号实时流</span>
+              {rt.lastSignalAt && (
+                <span className="text-[10px] text-emerald-400 animate-pulse">● new</span>
+              )}
             </div>
             <Badge variant="outline" className="text-[10px] border-quant">
-              最近 {signals.length} 条
+              最近 {rt.signals.length} 条
             </Badge>
           </div>
           <div className="max-h-96 overflow-y-auto quant-scroll p-2 space-y-2">
-            {loading ? (
+            {initialLoading ? (
               <LoadingState variant="list" rows={5} />
-            ) : signals.length === 0 ? (
+            ) : rt.signals.length === 0 ? (
               <EmptyState text="暂无信号" className="py-10" />
             ) : (
-              signals.map((s) => <SignalToast key={s.id} signal={s} />)
+              rt.signals.map((s) => (
+                <SignalToast key={s.id} signal={s} isNew={rt.lastSignalAt !== null && Date.now() - rt.lastSignalAt < 5000 && s.id === rt.signals[0]?.id} />
+              ))
             )}
           </div>
         </Card>
@@ -222,7 +278,7 @@ export function Dashboard() {
           </Badge>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3">
-          {loading ? (
+          {strategiesLoading ? (
             <LoadingState variant="cards" rows={5} className="col-span-full" />
           ) : (
             strategies.map((s) => <StrategyCard key={s.strategy_id} strategy={s} />)

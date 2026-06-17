@@ -18,11 +18,12 @@ import {
   DialogTitle,
   DialogDescription,
 } from '@/components/ui/dialog'
-import { RefreshCw, Eye, Layers, Link2, Calendar, TrendingUp, TrendingDown, Activity } from 'lucide-react'
+import { RefreshCw, Eye, Layers, Link2, Calendar, TrendingUp, TrendingDown, Activity, CandlestickChart, X } from 'lucide-react'
 import { StockTable, type Column } from './StockTable'
 import { ScoreBadge } from './ScoreBadge'
 import { LoadingState } from './LoadingState'
 import { EmptyState } from './EmptyState'
+import { MiniKline, generateMockKline } from './MiniKline'
 import { toast } from 'sonner'
 import {
   sectorAPI,
@@ -40,6 +41,19 @@ export function SectorManager() {
   const [stocks, setStocks] = React.useState<SectorStockDTO[]>([])
   const [stocksLoading, setStocksLoading] = React.useState(false)
   const [quotes, setQuotes] = React.useState<Record<string, QuoteDTO>>({})
+  // K线图弹窗
+  const [klineStock, setKlineStock] = React.useState<SectorStockDTO | null>(null)
+  const [klineDays, setKlineDays] = React.useState<30 | 60 | 120>(30)
+  // 缓存 mock kline 数据 (避免每次重新生成)
+  const klineCache = React.useRef<Map<string, ReturnType<typeof generateMockKline>>>(new Map())
+
+  const getKline = (code: string, days: number) => {
+    const key = `${code}:${days}`
+    if (!klineCache.current.has(key)) {
+      klineCache.current.set(key, generateMockKline(code, days))
+    }
+    return klineCache.current.get(key)!
+  }
 
   const load = React.useCallback(async () => {
     setLoading(true)
@@ -194,6 +208,27 @@ export function SectorManager() {
               })
             : '—'}
         </span>
+      ),
+    },
+    {
+      key: 'action',
+      header: '',
+      align: 'right',
+      width: '4rem',
+      render: (r) => (
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-7 px-2 text-xs hover:bg-amber-500/10 hover:text-amber-400"
+          onClick={(e) => {
+            e.stopPropagation()
+            setKlineStock(r)
+          }}
+          title="查看K线图"
+        >
+          <CandlestickChart className="size-3.5" />
+          K线
+        </Button>
       ),
     },
   ]
@@ -405,6 +440,125 @@ export function SectorManager() {
               />
             )}
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* K线图弹窗 */}
+      <Dialog open={!!klineStock} onOpenChange={(v) => !v && setKlineStock(null)}>
+        <DialogContent className="sm:max-w-3xl max-h-[90vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 flex-wrap">
+              <CandlestickChart className="size-5 text-amber-400" />
+              <span className="font-mono">{klineStock?.stock_code}</span>
+              <span>{klineStock?.stock_name || '—'}</span>
+              {quotes[klineStock?.stock_code ?? ''] && (
+                <Badge variant="outline" className="ml-2 font-mono text-xs border-quant">
+                  <span style={{ color: quotes[klineStock!.stock_code].pct >= 0 ? 'var(--quant-up)' : 'var(--quant-down)' }}>
+                    现价 {quotes[klineStock!.stock_code].last.toFixed(2)}
+                  </span>
+                </Badge>
+              )}
+              {klineStock && (
+                <Badge variant="outline" className="font-mono text-xs border-quant">
+                  得分 {klineStock.score.toFixed(1)}
+                </Badge>
+              )}
+              <Button
+                variant="ghost"
+                size="icon"
+                className="ml-auto size-7"
+                onClick={() => setKlineStock(null)}
+              >
+                <X className="size-4" />
+              </Button>
+            </DialogTitle>
+            <DialogDescription>
+              模拟 K线图（30 / 60 / 120 日）· 实盘模式将从 tqcenter 拉取真实数据
+            </DialogDescription>
+          </DialogHeader>
+
+          {/* 周期切换 */}
+          <div className="flex items-center gap-1.5">
+            {([30, 60, 120] as const).map((d) => (
+              <Button
+                key={d}
+                size="sm"
+                variant={klineDays === d ? 'default' : 'outline'}
+                className={
+                  klineDays === d
+                    ? 'h-7 bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25'
+                    : 'h-7 border-quant text-xs'
+                }
+                onClick={() => setKlineDays(d)}
+              >
+                {d}日
+              </Button>
+            ))}
+            <span className="ml-auto text-[10px] text-muted-foreground">
+              数据源: mock · 刷新即重新生成
+            </span>
+          </div>
+
+          {/* K线主体 */}
+          {klineStock && (
+            <div className="rounded-md border border-quant bg-quant-card/30 p-3">
+              <MiniKline
+                bars={getKline(klineStock.stock_code, klineDays)}
+                width={720}
+                height={280}
+                title={`${klineStock.stock_name || klineStock.stock_code} · 日K`}
+              />
+            </div>
+          )}
+
+          {/* 关键统计 */}
+          {klineStock && (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+              {(() => {
+                const bars = getKline(klineStock.stock_code, klineDays)
+                if (bars.length === 0) return null
+                const last = bars[bars.length - 1]
+                const first = bars[0]
+                const high = Math.max(...bars.map((b) => b.high))
+                const low = Math.min(...bars.map((b) => b.low))
+                const totalVol = bars.reduce((s, b) => s + b.volume, 0)
+                const changePct = ((last.close - first.open) / first.open) * 100
+                const isUp = changePct >= 0
+                return (
+                  <>
+                    <div className="rounded-md p-2 border border-quant bg-background/40">
+                      <div className="text-[10px] text-muted-foreground">区间涨跌</div>
+                      <div
+                        className="font-mono font-semibold tabular-nums"
+                        style={{ color: isUp ? 'var(--quant-up)' : 'var(--quant-down)' }}
+                      >
+                        {isUp ? '+' : ''}
+                        {changePct.toFixed(2)}%
+                      </div>
+                    </div>
+                    <div className="rounded-md p-2 border border-quant bg-background/40">
+                      <div className="text-[10px] text-muted-foreground">最高价</div>
+                      <div className="font-mono font-semibold tabular-nums text-up">
+                        {high.toFixed(2)}
+                      </div>
+                    </div>
+                    <div className="rounded-md p-2 border border-quant bg-background/40">
+                      <div className="text-[10px] text-muted-foreground">最低价</div>
+                      <div className="font-mono font-semibold tabular-nums text-down">
+                        {low.toFixed(2)}
+                      </div>
+                    </div>
+                    <div className="rounded-md p-2 border border-quant bg-background/40">
+                      <div className="text-[10px] text-muted-foreground">总成交</div>
+                      <div className="font-mono font-semibold tabular-nums text-foreground/80">
+                        {(totalVol / 100000000).toFixed(2)}亿
+                      </div>
+                    </div>
+                  </>
+                )
+              })()}
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>

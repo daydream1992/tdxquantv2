@@ -32,18 +32,25 @@ const STATUS_COLOR: Record<SignalDTO['push_status'], string> = {
 export interface SignalToastProps {
   signal: SignalDTO
   className?: string
+  isNew?: boolean
 }
 
-export function SignalToast({ signal, className }: SignalToastProps) {
+export function SignalToast({ signal, className, isNew }: SignalToastProps) {
   const meta = TYPE_META[signal.type]
   const Icon = meta.icon
   return (
     <Card
       className={cn(
-        'p-3 gap-0 bg-quant-card border-quant slide-in hover:border-[var(--quant-primary)]/30 transition-colors',
+        'p-3 gap-0 bg-quant-card border-quant slide-in hover:border-[var(--quant-primary)]/30 transition-colors relative overflow-hidden',
+        isNew && 'ring-1 ring-emerald-500/40 bg-emerald-500/5',
         className
       )}
     >
+      {isNew && (
+        <span className="absolute top-0 right-0 px-1.5 py-0.5 text-[9px] font-bold bg-emerald-500 text-white rounded-bl-md animate-pulse">
+          NEW
+        </span>
+      )}
       <div className="flex items-start gap-3">
         <div
           className={cn(
