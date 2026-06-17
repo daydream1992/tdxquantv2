@@ -9946,3 +9946,56 @@ Stage Summary:
   6. 策略管理增加"导入 YAML 文件"功能
   7. 板块管理增加"板块对比"视图 (交集/差集)
   8. Dashboard 增加"市场情绪指数"卡片 (基于涨跌家数/涨停数)
+
+---
+Task ID: R8-文档
+Agent: main
+Task: 编写项目维护文档 / 移交文档 / 用户使用说明三件套
+
+Work Log:
+- 读取 worklog.md 最后 400 行了解 R5–R7 轮次进展（资金流向 / 信号抽屉 / 策略复制 / 通知中心）
+- 委派 Explore subagent 全面扫描项目结构：
+  * 后端 engine/ 10 路由模块 + 4 通道 + 26 因子 + 5 策略
+  * 前端 src/ 24 量化组件 + lib/ 8 文件 + app/api/ 代理层
+  * config/ 8 YAML + strategies/ 6 YAML + Caddyfile + prisma
+  * scripts/ 7 运维脚本 + data/ DuckDB+CSV+Excel
+  * docs/ maintenance + tdx-quant + v8-data
+- 读取 config/app.yaml + channels.yaml + Caddyfile + _template.yaml 确认配置细节
+- 读取 dev.log + ps 确认 FastAPI(:8000) + Next.js(:3000) 双进程健康运行
+- 编写 docs/PROJECT_MAINTENANCE.md（~520 行）：
+  * 12 章节目录：概述/架构/技术栈/依赖/目录/部署/配置/数据/监控/FAQ/责任/版本
+  * 含 5 层架构图 + 请求流转图 + 端口规划表 + 依赖清单 + 快速命令速查
+- 编写 docs/PROJECT_HANDOVER.md（~560 行）：
+  * 10 章节目录：概述/快速启动/权限/配置位置/接口修改/配置调整/场景Step-by-Step/AI工作流/质量门禁/风险禁忌
+  * 含快速启动 Checklist + 新增 API 端点 6 步流程 + 6 常见修改场景 + 10 绝对禁忌
+- 编写 docs/USER_GUIDE.md（~480 行）：
+  * 8 章节目录：功能介绍/快速上手/权限/操作流程/操作指南/FAQ/反馈渠道/术语表
+  * 含 5 Tab 详解 + 10 常见操作指南 + 15 FAQ + 术语表 + 快捷键 + 风险提示
+- 三文档交叉引用：MAINTENANCE ↔ HANDOVER ↔ USER_GUIDE + ARCHITECTURE + STRATEGY_LOGIC + worklog.md
+
+Stage Summary:
+- 已完成:
+  1. PROJECT_MAINTENANCE.md: 项目维护文档（架构/技术栈/依赖/部署/配置/数据/监控/FAQ/责任/版本），~520 行
+  2. PROJECT_HANDOVER.md: AI 移交文档（快速启动/权限/配置位置/接口修改/配置调整/场景/AI工作流/质量门禁/风险），~560 行
+  3. USER_GUIDE.md: 用户使用说明（功能/上手/权限/操作流程/指南/FAQ/反馈/术语），~480 行
+  4. 三文档形成完整文档体系，覆盖运维 / AI 开发 / 终端用户三类读者
+  5. 所有文档与项目实际结构 / 配置 / 代码入口严格对齐（经 subagent 扫描验证）
+- 文件变更:
+  新增 (3 个文件):
+    docs/PROJECT_MAINTENANCE.md   # ~520 行
+    docs/PROJECT_HANDOVER.md      # ~560 行
+    docs/USER_GUIDE.md            # ~480 行
+- 未解决问题:
+  1. 三文档未在 page.tsx 提供 UI 入口（用户需直接访问 docs/ 路径），后续可加「帮助」按钮
+  2. USER_GUIDE 提到的「研究员/观察者角色」为规划项，当前系统无认证
+  3. MAINTENANCE 提到的版本号不一致问题（4 处）尚未统一
+  4. HANDOVER 提到的 webDevReview cron 本轮将创建（见下一步）
+- 下一阶段建议 (R8+):
+  1. 在 page.tsx header 加「帮助」按钮，链接 USER_GUIDE
+  2. 统一版本号为 1.0.0（package.json / engine/__init__.py / config/app.yaml / page.tsx footer）
+  3. package.json name 从 nextjs_tailwind_shadcn_ts 改为 tdxquant
+  4. 创建 .env.example 模板
+  5. 引入 ruff + mypy 后端 lint
+  6. 通知中心 localStorage 持久化
+  7. WebSocket 服务部署（:3003）
+  8. 回测 + K 线接真实数据
