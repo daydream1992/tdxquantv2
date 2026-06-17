@@ -10,7 +10,7 @@ import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
-import { Play, Eye, Clock, Hash } from 'lucide-react'
+import { Play, Eye, Clock, Hash, History } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { StrategyDTO } from '@/lib/api'
 
@@ -19,6 +19,7 @@ export interface StrategyCardProps {
   onToggle?: (id: string, next: boolean) => void
   onRun?: (id: string) => void
   onViewConfig?: (id: string) => void
+  onViewHistory?: (id: string) => void
   className?: string
 }
 
@@ -27,6 +28,7 @@ export function StrategyCard({
   onToggle,
   onRun,
   onViewConfig,
+  onViewHistory,
   className,
 }: StrategyCardProps) {
   return (
@@ -97,9 +99,18 @@ export function StrategyCard({
             variant="ghost"
             onClick={() => onViewConfig?.(strategy.strategy_id)}
             className="h-8 px-2 text-muted-foreground hover:text-foreground"
-            title="查看配置"
+            title="查看/编辑配置"
           >
             <Eye className="size-3.5" />
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => onViewHistory?.(strategy.strategy_id)}
+            className="h-8 px-2 text-muted-foreground hover:text-foreground"
+            title="运行历史"
+          >
+            <History className="size-3.5" />
           </Button>
           <Button
             size="sm"

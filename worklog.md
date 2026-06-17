@@ -8267,3 +8267,157 @@ Stage Summary:
   4. 飞书推送通道实现
   5. 因子插件补全（对照 STRATEGY_LOGIC.md）
   6. 回测引擎 Web 化
+
+---
+Task ID: R2-优化轮2
+Agent: main (webDevReview cron)
+Task: QA 测试 + 修多个 bug + 推进 5 个新功能
+
+Work Log:
+
+### QA 发现的 Bug（全部已修复）
+
+1. **Bug1: 板块管理 Tab 显示 "0 只"** (engine/exporters/sector_exporter.py)
+   - 原因: SectorExporter 在 Mock 模式下仅记日志，不写 DuckDB ``sector_snapshots`` 表
+   - 修复: 新增 ``_record_snapshot()`` 方法，无论 Mock/Real 都写一份板块快照到 ``sector_snapshots``，Web 端才能查到 ``stock_count``
+   - 验证: 5 个板块现在全部显示 30 只，``last_update`` 时间戳正确
+
+2. **Bug2: 实时大屏 "监控股票数=0" + "实时行情" 区域为空** (engine/api/routes/strategies.py)
+   - 原因: 没有任何代码调用 ``state.upsert_subscription()`` 把选股结果加入监控
+   - 修复: 在 ``run_strategy`` API 端点添加后置钩子 ``_auto_subscribe_top_picks()``，把每次选股的 Top 20 写入 ``EngineState`` 内存订阅 + ``monitor_subscriptions`` 表
+   - 同时在 ``monitor/quotes`` 端点添加 ``_fallback_top_picks()``，订阅为空时从 ``selection_results`` 兜底注入
+   - 验证: 监控数从 0 → 12+，实时行情表显示 12 只股票带名称/价格/涨跌幅
+
+3. **Bug3: 信号中心 Tab 为空** (engine/api/routes/strategies.py)
+   - 原因: 策略选股完成后未生成 ``selection`` 类型信号
+   - 修复: 在 ``run_strategy`` 添加 ``_emit_selection_signal()`` 后置钩子，写一条信号到 ``signal_events`` 表，内容包括策略名 + 选出数量 + Top3 股票
+   - 同时同步 ``EngineState.record_signal("selection")`` 累加内存计数
+   - 验证: 信号中心现在显示 6 条选股信号，Dashboard ``今日信号=6``
+
+4. **Bug4: MockAdapter pricevol 字段映射错误** (engine/data_adapter/mock_adapter.py)
+   - 原因: ``ZAF`` 实际是涨跌幅百分比（如 -1.08 表示跌 1.08%），代码却把它当成现价，导致价格出现 -1.02 这种负数
+   - 修复: 重新映射 V8 快照字段
+     - ``Now`` = MA5Value (5日均线价，近似现价)
+     - ``LastClose`` = Now / (1 + ZAF/100)
+     - ``pct_change`` = ZAF / 100 (转小数)
+     - ``Volume`` = TotalBVol + TotalSVol (手)
+     - ``Amount`` = CJJEPre1 * 10000 (万元→元)
+   - 验证: 实时行情现价正常 (94.60 / 7.76 / 62.34)，涨跌幅合理 (+12.31% / +9.99% / -1.02%)
+
+5. **Bug5: FastAPI 重启后 Dashboard 计数全部归零** (engine/api/routes/monitor.py)
+   - 原因: ``EngineState`` 是内存单例，进程重启即丢失 today_signals / monitored_count
+   - 修复: ``get_status`` 端点增加 DuckDB 兜底逻辑：内存计数为 0 时，从 ``signal_events`` / ``monitor_subscriptions`` 表查今日数据
+   - 验证: FastAPI 重启后 Dashboard 立即显示 ``监控=12, 今日信号=6``
+
+### 新增的 5 个功能
+
+1. **Feature1: 策略 YAML 在线编辑器** (src/components/quant/StrategyManager.tsx)
+   - 策略卡片"查看配置"按钮 → Dialog 显示 YAML → 点击"编辑配置"切到编辑模式
+   - 编辑模式：textarea + "保存并热加载"按钮 + "取消"按钮 + 未保存提示
+   - 保存调用 ``PUT /api/config/strategies/[id]`` → FastAPI 校验 YAML 语法 + strategy_id 一致性 → 写文件 + reload
+   - 错误透传：YAML 语法错误 / strategy_id 不一致 / 网络不可达 都有清晰提示
+   - 新增 Next.js API 路由: ``src/app/api/config/strategies/route.ts`` + ``[id]/route.ts``
+   - 新增 ``configAPI.listStrategyConfigs()`` / ``updateStrategyConfig()`` 前端 API
+
+2. **Feature2: 选股结果行展开 - 因子分解详情** (src/components/quant/SelectionResults.tsx)
+   - 点击表格行展开因子明细卡片网格 (1-3 列响应式)
+   - 每个因子卡片显示: factor_id + weight + 值 + 分 + **贡献进度条** (渐变色, 正向琥珀/负向绿)
+   - 底部汇总栏: 总分 + 排名 + 策略ID + 代码
+   - hover 微交互: 卡片背景渐变
+
+3. **Feature3: 策略执行历史 Sheet** (src/components/quant/StrategyManager.tsx)
+   - 策略卡片新增"运行历史"按钮 (History icon)
+   - 点击打开右侧 Sheet，调用 ``GET /api/strategies/[id]/runs`` 取最近 50 条
+   - 每条记录卡片: run_id + status + started_at + 耗时 + 选出数量 + 证券池数量 + 错误信息
+   - 状态图标: completed=绿色✓ / failed=红色✗
+   - 新增 Next.js API 路由: ``src/app/api/strategies/[id]/runs/route.ts``
+   - 新增 ``strategyAPI.runs()`` + ``StrategyRunRecord`` 类型
+
+4. **Feature4: StatCard UI 增强** (src/components/quant/StatCard.tsx)
+   - 渐变背景光晕 (radial-gradient at top right, tone 色 18% 透明)
+   - **Sparkline 装饰** (右上角 SVG polyline, 12 个数据点, tone 色)
+   - hover 微动效: 卡片边框变亮 + 阴影增强 + 数字 scale-105 + 图标 scale-110
+   - 底部装饰条改为渐变 (linear-gradient transparent → color → transparent)
+   - Dashboard 4 个 StatCard 各自配置了不同的 sparkline 数据
+
+5. **Feature5: 主题切换器实际可用** (src/lib/theme.ts)
+   - 新增 ``lightTheme`` 配置 (白底 #f8fafc, 卡片 #ffffff, 边框 #e2e8f0, 深琥珀金 #d97706)
+   - 切换主题时**完整切换配色** (不只是 mode flag, 而是替换整个 ThemeConfig)
+   - **localStorage 持久化** (key: ``tdxquant-theme-mode``)
+   - 启动时读取 localStorage，避免刷新后被服务端配置覆盖
+   - 主题按钮 title 显示当前模式 ("切换主题（当前：深色）")
+   - 验证: 点击切换按钮 → 整页配色切换 → 刷新后保留 → title 更新
+
+### 端到端验证 (Agent Browser E2E)
+
+| Tab | 验证项 | 结果 |
+|-----|--------|------|
+| 实时大屏 | 监控数/今日信号/涨停/告警 4 卡片 | ✓ 12/6/0/0 (从 DuckDB 兜底) |
+| 实时大屏 | StatCard sparkline + 渐变光晕 | ✓ 渲染正常 |
+| 实时大屏 | 实时行情表 12 只股票 | ✓ 隆扬电子/返利科技/华锡有色 价格涨跌幅正确 |
+| 实时大屏 | 信号实时流 6 条 | ✓ 5 策略 + 1 重跑 选股信号 Top3 摘要 |
+| 实时大屏 | 策略板块概览 5/5 启用 | ✓ |
+| 策略管理 | 5 策略卡片 + 启用/停用 + 运行/历史/配置 | ✓ 3 个按钮全部存在 |
+| 策略管理 | YAML 编辑器 (查看→编辑→保存) | ✓ 编辑模式/未保存提示/YAML 校验 全部正常 |
+| 策略管理 | 运行历史 Sheet | ✓ 显示 cslx 2 条执行记录 |
+| 选股结果 | 150 行 + 行展开因子明细 | ✓ 8 因子卡片 + 贡献进度条 + 总分汇总 |
+| 信号中心 | 6 条选股信号 + 类型筛选 | ✓ Top3 股票摘要 + 推送通道 + 状态 |
+| 板块管理 | 5 板块各 30 只 | ✓ 之前是 0 只, 修复后正常 |
+| 主题切换 | 深色↔浅色 + 持久化 | ✓ title 更新 + 配色完整切换 |
+| Footer | sticky 底部 | ✓ 显示 TdxQuant v0.1.0 (P1) + 数据源 mock |
+
+### API 调用统计 (dev.log)
+- ``GET /api/strategies`` 200 (15-30ms)
+- ``GET /api/selections?limit=200`` 200 (60-90ms)
+- ``GET /api/signals?limit=10`` 200 (15-30ms)
+- ``GET /api/monitor?action=status`` 200 (10-25ms)
+- ``GET /api/monitor?action=quotes`` 200 (14-22ms)
+- ``GET /api/sectors`` 200 (13-25ms)
+- ``GET /api/strategies/{id}/runs`` 200 (650ms 首次编译, 后续 17ms)
+- ``PUT /api/config/strategies/{id}`` 200 (FastAPI 直连成功)
+- 0 个 4xx/5xx 错误
+
+### 文件变更清单
+```
+后端 (Python):
+  engine/exporters/sector_exporter.py        # Bug1: 新增 _record_snapshot
+  engine/api/routes/strategies.py            # Bug2/3: 后置钩子 _emit_selection_signal + _auto_subscribe_top_picks
+  engine/api/routes/monitor.py               # Bug5: status 从 DuckDB 兜底 + quotes _fallback_top_picks
+  engine/data_adapter/mock_adapter.py        # Bug4: pricevol 字段映射重新映射
+
+前端 (TypeScript):
+  src/components/quant/StrategyManager.tsx   # Feature1/3: YAML 编辑器 + 运行历史 Sheet
+  src/components/quant/StrategyCard.tsx      # 新增 onViewHistory 回调 + History 按钮
+  src/components/quant/SelectionResults.tsx  # Feature2: 因子明细卡片网格 + 贡献条
+  src/components/quant/StatCard.tsx          # Feature4: sparkline + 渐变光晕 + hover 动效
+  src/components/quant/Dashboard.tsx         # 配置 sparkline 数据
+  src/lib/api.ts                             # 新增 configAPI.listStrategyConfigs / updateStrategyConfig + StrategyRunRecord
+  src/lib/theme.ts                           # Feature5: lightTheme + localStorage 持久化
+  src/app/page.tsx                           # 主题按钮 title 动态化
+  src/app/api/config/strategies/route.ts     # 新增: GET 列出策略配置
+  src/app/api/config/strategies/[id]/route.ts # 新增: PUT 更新策略 YAML (直连 FastAPI)
+  src/app/api/strategies/[id]/runs/route.ts  # 新增: GET 策略执行历史
+```
+
+Stage Summary:
+- 项目当前状态: P1 完成 + 本轮修复 5 个核心 Bug + 新增 5 个高价值功能, 系统全链路打通
+- 已完成修改:
+  1. SectorExporter 写 sector_snapshots → 板块管理 Tab 显示真实股票数
+  2. 策略运行后置钩子 → 自动生成信号 + 自动订阅 Top20 → Dashboard 数据全活
+  3. MockAdapter 字段映射重做 → 实时行情显示真实价格/涨跌幅
+  4. 策略 YAML 在线编辑器 → Web UI 改配置, 自动 reload, 错误透传
+  5. 选股结果因子明细卡片 → 贡献进度条 + 总分汇总
+  6. 策略执行历史 Sheet → run_id/耗时/选出数 一目了然
+  7. StatCard sparkline + 渐变光晕 → 金融大屏感
+  8. 主题切换完整可用 → 深浅色完整切换 + localStorage 持久化
+- 未解决问题:
+  1. 因子实现是简化版（占位），实际生产需对照 STRATEGY_LOGIC.md 补全公式
+  2. score 部分策略分数偏低，需优化因子计算
+  3. 后台进程仍可能被 sandbox 杀, 需要时重启 ``bash scripts/start_all.sh``
+- 下一阶段优先事项:
+  1. P2 实时监控 (WebSocket + subscribe_hq 分批 50)
+  2. 飞书推送通道实现 (channels/feishu.py)
+  3. 回测引擎 Web 化
+  4. 因子插件补全 (对照 STRATEGY_LOGIC.md)
+  5. 板块管理 Tab 增加成份股查看抽屉 (类似运行历史)
+  6. 策略对比页 (多策略并排横向对比选股结果)

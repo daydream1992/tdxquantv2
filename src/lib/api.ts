@@ -172,6 +172,21 @@ export const strategyAPI = {
       method: 'POST',
       body: JSON.stringify({ action: 'run_all' }),
     }),
+  runs: (id: string) =>
+    fetchAPI<Array<StrategyRunRecord>>(`/api/strategies/${id}/runs`),
+}
+
+export interface StrategyRunRecord {
+  run_id: string
+  strategy_id: string
+  run_date: string | null
+  status: string
+  started_at: string | null
+  finished_at: string | null
+  duration_ms: number
+  universe_count: number
+  result_count: number
+  error_message: string
 }
 
 export interface SelectionQuery {
@@ -235,4 +250,23 @@ export const themeAPI = {
 
 export const configAPI = {
   reload: () => fetchAPI<{ ok: boolean; reloaded: string[] }>('/api/config', { method: 'POST' }),
+  listStrategyConfigs: () =>
+    fetchAPI<Array<{
+      strategy_id: string
+      strategy_name: string
+      enabled: boolean
+      yaml_path: string
+      yaml_content: string
+    }>>('/api/config/strategies'),
+  updateStrategyConfig: (id: string, yaml_content: string, enabled?: boolean) =>
+    fetchAPI<{
+      strategy_id: string
+      strategy_name: string
+      enabled: boolean
+      yaml_path: string
+      yaml_content: string
+    }>(`/api/config/strategies/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ yaml_content, enabled }),
+    }),
 }

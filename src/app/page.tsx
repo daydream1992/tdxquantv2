@@ -135,14 +135,14 @@ export default function Home() {
               <Button
                 variant="ghost"
                 size="icon"
-                className="size-9"
+                className="size-9 hover:bg-amber-500/10"
                 onClick={toggleMode}
-                title="切换主题"
+                title={`切换主题（当前：${theme.mode === 'dark' ? '深色' : '浅色'}）`}
               >
                 {theme.mode === 'dark' ? (
-                  <Sun className="size-4" />
+                  <Sun className="size-4 text-amber-400" />
                 ) : (
-                  <Moon className="size-4" />
+                  <Moon className="size-4 text-slate-600" />
                 )}
               </Button>
               <Button

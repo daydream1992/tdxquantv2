@@ -253,38 +253,75 @@ export function SelectionResults() {
           maxHeight="32rem"
           pageSize={20}
           expandedRowKey={expandedKey}
-          renderExpanded={(r) => (
-            <div className="space-y-2">
-              <div className="text-xs font-semibold text-muted-foreground">因子明细</div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                {r.factors.map((f) => (
-                  <div
-                    key={f.factor_id}
-                    className="rounded-md border border-quant p-2 bg-background/40"
-                  >
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-mono text-foreground/80">{f.factor_id}</span>
-                      <Badge variant="outline" className="text-[10px] border-quant">
-                        w={f.weight.toFixed(2)}
-                      </Badge>
-                    </div>
-                    <div className="flex items-center justify-between text-xs mt-1 tabular-nums">
-                      <span className="text-muted-foreground">值 {f.value.toFixed(3)}</span>
-                      <span className="text-quant-primary">分 {f.score.toFixed(3)}</span>
-                    </div>
+          renderExpanded={(r) => {
+            const maxScore = Math.max(...r.factors.map((f) => Math.abs(f.score)), 0.01)
+            return (
+              <div className="space-y-3 p-2">
+                <div className="flex items-center justify-between">
+                  <div className="text-xs font-semibold text-muted-foreground flex items-center gap-1">
+                    <ChevronUp className="size-3" />
+                    因子明细 ({r.factors.length})
                   </div>
-                ))}
+                  <div className="text-[10px] text-muted-foreground font-mono">
+                    run_id: {r.run_id}
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                  {r.factors.map((f) => {
+                    const pct = Math.min(100, (Math.abs(f.score) / maxScore) * 100)
+                    const isPositive = f.score >= 0
+                    return (
+                      <div
+                        key={f.factor_id}
+                        className="rounded-md border border-quant p-2.5 bg-background/40 hover:bg-background/60 transition-colors"
+                      >
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-mono text-foreground/80">{f.factor_id}</span>
+                          <Badge variant="outline" className="text-[10px] border-quant">
+                            w={f.weight.toFixed(2)}
+                          </Badge>
+                        </div>
+                        <div className="flex items-center justify-between text-xs mt-1 tabular-nums">
+                          <span className="text-muted-foreground">值 {f.value.toFixed(3)}</span>
+                          <span className={isPositive ? 'text-quant-primary' : 'text-[var(--quant-down)]'}>
+                            分 {f.score.toFixed(3)}
+                          </span>
+                        </div>
+                        {/* 因子贡献条 */}
+                        <div className="mt-1.5 h-1 rounded-full bg-muted/30 overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all duration-500 ${
+                              isPositive
+                                ? 'bg-gradient-to-r from-amber-500/40 to-amber-400'
+                                : 'bg-gradient-to-r from-emerald-500/40 to-emerald-400'
+                            }`}
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+                {/* 汇总栏 */}
+                <div className="flex items-center justify-between gap-2 pt-1 border-t border-quant/50">
+                  <div className="flex items-center gap-3 text-xs">
+                    <span className="text-muted-foreground">总分</span>
+                    <span className="text-base font-bold text-quant-primary tabular-nums">
+                      {r.score.toFixed(3)}
+                    </span>
+                    <Badge variant="outline" className="text-[10px] border-quant">
+                      排名 #{r.rank}
+                    </Badge>
+                  </div>
+                  <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
+                    <span>策略: <span className="font-mono text-foreground/70">{r.strategy_id}</span></span>
+                    <span>·</span>
+                    <span>代码: <span className="font-mono text-foreground/70">{r.stock_code}</span></span>
+                  </div>
+                </div>
               </div>
-              <div className="text-[10px] text-muted-foreground pt-1 flex items-center gap-1">
-                {expandedKey === `${r.run_id}-${r.stock_code}` ? (
-                  <ChevronUp className="size-3" />
-                ) : (
-                  <ChevronDown className="size-3" />
-                )}
-                run_id: <span className="font-mono">{r.run_id}</span>
-              </div>
-            </div>
-          )}
+            )
+          }}
           onRowClick={(r) =>
             setExpandedKey((prev) =>
               prev === `${r.run_id}-${r.stock_code}` ? null : `${r.run_id}-${r.stock_code}`

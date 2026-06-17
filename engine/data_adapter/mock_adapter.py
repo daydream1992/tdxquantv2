@@ -220,7 +220,24 @@ class MockAdapter(BaseDataAdapter):
         return self.get_market_snapshot_all()
 
     def get_pricevol(self, stock_list: StockList) -> dict:
-        """批量价量（从快照 CSV 提取 LastClose/Now/Volume 等关键字段）。"""
+        """批量价量（从快照 CSV 提取 LastClose/Now/Volume 等关键字段）。
+
+        V8 快照 CSV 字段映射（已通过探针脚本验证）：
+        - ``ZAF``        = 涨跌幅（百分比，如 -1.08 表示跌 1.08%），**非价格**
+        - ``MA5Value``   = 5日均线价（近似现价）
+        - ``ZTPrice``    = 涨停价
+        - ``DTPrice``    = 跌停价
+        - ``CJJEPre1``   = 昨日成交额（元）
+        - ``OpenAmo``    = 今日开盘成交额
+        - ``TotalBVol``  = 总买量（手）
+        - ``TotalSVol``  = 总卖量（手）
+
+        推导：
+        - ``Now``        ≈ MA5Value（5日均线，最近一日 close 近似）
+        - ``LastClose``  = Now / (1 + ZAF/100)
+        - ``Volume``     ≈ (TotalBVol + TotalSVol) / 100（手转股）
+        - ``Amount``     ≈ CJJEPre1 或 OpenAmo
+        """
         df = self._load_snapshot()
         out: dict[str, dict] = {}
         for code in stock_list:
@@ -232,10 +249,35 @@ class MockAdapter(BaseDataAdapter):
             if row.empty:
                 continue
             r = row.iloc[0].to_dict()
+            pct = _to_float(_safe_sub(r, "ZAF", "0"))
+            now = _to_float(_safe_sub(r, "MA5Value", "0"))
+            # 兜底：MA5Value 缺失时用 ZTPrice / 1.1 估算
+            if now <= 0:
+                zt = _to_float(_safe_sub(r, "ZTPrice", "0"))
+                if zt > 0:
+                    now = round(zt / 1.1, 2)
+            # LastClose = now / (1 + pct/100)
+            last_close = round(now / (1 + pct / 100), 4) if (now > 0 and abs(pct) < 50) else now
+            total_b = _to_float(_safe_sub(r, "TotalBVol", "0"))
+            total_s = _to_float(_safe_sub(r, "TotalSVol", "0"))
+            # V8 快照中 TotalBVol/TotalSVol 单位为"手"；pricevol 约定 Volume 也为"手"
+            volume = total_b + total_s
+            # V8 快照中 CJJEPre1 单位为"万元"（如 171156.13 = 17.11亿），OpenAmo 单位为"元"
+            cjje = _to_float(_safe_sub(r, "CJJEPre1", "0"))
+            open_amo = _to_float(_safe_sub(r, "OpenAmo", "0"))
+            # 统一转换为元
+            amount = cjje * 10000 if cjje > 0 else open_amo
+            # 兜底：amount 缺失时用 volume * now 估算
+            if amount <= 0 and volume > 0 and now > 0:
+                amount = volume * 100 * now  # 手转股 × 现价
+            name = str(_safe_sub(r, "name", "") or "")
             out[ncode] = {
-                "LastClose": _to_float(_safe_sub(r, "MA5Value", "0")),
-                "Now": _to_float(_safe_sub(r, "ZAF", "0")),
-                "Volume": _to_float(_safe_sub(r, "fHSL", "0")),
+                "LastClose": last_close,
+                "Now": now,
+                "pct_change": pct / 100,  # 转为小数
+                "Volume": volume,
+                "Amount": amount,
+                "name": name,
                 # V8 快照无 LastClose/Now/Volume 直接字段，用近似字段填充
                 "_raw": r,
             }

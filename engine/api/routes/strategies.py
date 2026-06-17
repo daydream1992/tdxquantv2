@@ -22,7 +22,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from engine.api.deps import get_config, get_runner, get_storage
+from engine.api.deps import get_config, get_runner, get_state, get_storage
 from engine.api.schemas import (
     OkResponse,
     StrategyBatchActionRequest,
@@ -197,6 +197,15 @@ async def run_strategy(
         )
 
     n_final = 0 if ctx.final is None else len(ctx.final)
+
+    # 副作用：写 selection 信号 + 自动订阅 Top 20 到监控
+    try:
+        state = get_state()
+        _emit_selection_signal(state, ctx, sc)
+        _auto_subscribe_top_picks(state, ctx, top_n=20)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("策略 %s 后置钩子(信号/订阅)失败: %s", strategy_id, exc)
+
     return StrategyRunResponse(
         ok=True,
         run_id=ctx.run_id,
@@ -387,12 +396,24 @@ def _batch_set_enabled(strategies_dir: Path, cfg: Any, enabled: bool) -> None:
 async def _run_all_enabled(cfg: Any, runner: Any) -> StrategyBatchRunResponse:
     strategies = cfg.strategies() or {}
     results: list[StrategyBatchRunResult] = []
+    state = None
+    try:
+        state = get_state()
+    except Exception:  # noqa: BLE001
+        pass
     for sid, sc in strategies.items():
         if not getattr(sc, "enabled", True):
             continue
         try:
             ctx = runner.run_strategy(sid)
             n_final = 0 if ctx.final is None else len(ctx.final)
+            # 副作用：写 selection 信号 + 自动订阅 Top 20 到监控
+            try:
+                if state is not None:
+                    _emit_selection_signal(state, ctx, sc)
+                    _auto_subscribe_top_picks(state, ctx, top_n=20)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("策略 %s 后置钩子失败: %s", sid, exc)
             results.append(
                 StrategyBatchRunResult(id=sid, count=n_final, ok=True)
             )
@@ -466,3 +487,165 @@ def _to_int(v: Any) -> int:
         return int(v)
     except (TypeError, ValueError):
         return 0
+
+
+# ============================================================================
+# 后置钩子：策略选股完成后的副作用
+# ============================================================================
+
+
+def _emit_selection_signal(state: Any, ctx: Any, sc: Any) -> None:
+    """策略选股完成后，写一条 ``selection`` 类型信号到 ``signal_events`` 表。
+
+    覆盖场景：
+    - 信号中心 Tab 永远有数据可看
+    - Dashboard ``today_signals`` 计数累加
+    - ``EngineState.record_signal("selection")`` 同步内存计数
+
+    信号内容：策略名 + 选出数量 + Top 3 名股票
+    """
+    import json
+    import uuid
+
+    storage = None
+    try:
+        storage = get_storage()
+    except Exception:  # noqa: BLE001
+        pass
+
+    strategy_id = ctx.strategy_id
+    strategy_name = getattr(sc, "strategy_name", "") or strategy_id
+    final = ctx.final
+    n = 0 if final is None else len(final)
+
+    # 取 Top 3 名称做摘要
+    top_names: list[str] = []
+    if final is not None and not final.empty:
+        name_col = None
+        for c in ("stock_name", "name", "股票名称"):
+            if c in final.columns:
+                name_col = c
+                break
+        code_col = None
+        for c in ("stock_code", "code", "Code"):
+            if c in final.columns:
+                code_col = c
+                break
+        if name_col and code_col:
+            for _, row in final.head(3).iterrows():
+                nm = str(row.get(name_col, "") or "").strip()
+                cd = str(row.get(code_col, "") or "").strip()
+                if nm and cd:
+                    top_names.append(f"{nm}({cd})")
+                elif cd:
+                    top_names.append(cd)
+
+    summary = f"策略「{strategy_name}」选出 {n} 只标的"
+    if top_names:
+        summary += "，Top3：" + "、".join(top_names)
+
+    event_id = str(uuid.uuid4())
+    triggered_at = datetime.now()
+    channels = ["websocket", "csv_log"]  # 预留：未来消息总线扩展
+    snapshot = {
+        "run_id": ctx.run_id,
+        "strategy_id": strategy_id,
+        "result_count": n,
+        "duration_sec": ctx.duration_sec,
+        "top_picks": top_names,
+    }
+
+    # 写 DuckDB signal_events
+    if storage is not None and hasattr(storage, "execute"):
+        sql = (
+            "INSERT INTO signal_events "
+            "(event_id, strategy_id, stock_code, stock_name, alert_type, "
+            " condition_expr, snapshot, severity, channels_fired, triggered_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        params = [
+            event_id,
+            strategy_id,
+            "",  # 信号非单股，stock_code 留空
+            "",  # stock_name 留空
+            "selection",
+            summary,
+            json.dumps(snapshot, ensure_ascii=False),
+            "info",
+            json.dumps(channels, ensure_ascii=False),
+            triggered_at,
+        ]
+        try:
+            storage.execute(sql, params)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("写 signal_events 失败 (非致命): %s", exc)
+
+    # 累加 EngineState 计数（Dashboard 实时显示）
+    try:
+        state.record_signal("selection")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _auto_subscribe_top_picks(state: Any, ctx: Any, top_n: int = 20) -> None:
+    """把选股结果前 N 只股票加入监控订阅。
+
+    实现要点：
+    - ``subscribe_hq`` 上限 100 只（P2 真实模式分批 50 一组）
+    - Mock 模式仅写 ``monitor_subscriptions`` 表 + EngineState 内存，便于
+      Web 实时大屏 ``GET /api/monitor/quotes`` 立即返回数据
+    - 同一 stock_code 重复订阅会被 upsert 覆盖（不累积）
+    """
+    final = ctx.final
+    if final is None or final.empty:
+        return
+    code_col = None
+    for c in ("stock_code", "code", "Code"):
+        if c in final.columns:
+            code_col = c
+            break
+    if code_col is None:
+        return
+
+    codes: list[str] = []
+    for v in final[code_col].astype(str).tolist()[:top_n]:
+        v = v.strip()
+        if v:
+            codes.append(v)
+    if not codes:
+        return
+
+    # 写 EngineState 内存订阅
+    for i, code in enumerate(codes):
+        try:
+            state.upsert_subscription(
+                code,
+                strategy_id=ctx.strategy_id,
+                subscriber="auto_top_pick",
+                batch_no=i // 50 + 1,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    # 同步到 DuckDB monitor_subscriptions 表（持久化）
+    storage = None
+    try:
+        storage = get_storage()
+    except Exception:  # noqa: BLE001
+        return
+    if storage is None or not hasattr(storage, "execute"):
+        return
+    sql = (
+        "INSERT INTO monitor_subscriptions "
+        "(stock_code, strategy_id, subscriber, subscribed_at, active, batch_no) "
+        "VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    now = datetime.now()
+    rows = [
+        (code, ctx.strategy_id, "auto_top_pick", now, True, i // 50 + 1)
+        for i, code in enumerate(codes)
+    ]
+    try:
+        storage.executemany(sql, rows)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("写 monitor_subscriptions 失败 (非致命): %s", exc)

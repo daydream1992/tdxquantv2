@@ -39,6 +39,43 @@ export const defaultTheme: ThemeConfig = {
   fontFamily: 'ui-sans-serif, system-ui, sans-serif',
 }
 
+/** 浅色主题（白底，金融阅读模式） */
+export const lightTheme: ThemeConfig = {
+  mode: 'light',
+  primaryColor: '#d97706', // 深琥珀金（在白底更醒目）
+  upColor: '#dc2626', // 深红
+  downColor: '#16a34a', // 深绿
+  flatColor: '#475569',
+  background: '#f8fafc',
+  cardBackground: '#ffffff',
+  borderColor: '#e2e8f0',
+  fontFamily: 'ui-sans-serif, system-ui, sans-serif',
+}
+
+const THEME_STORAGE_KEY = 'tdxquant-theme-mode'
+
+/** 从 localStorage 读取上次保存的主题模式 */
+function loadStoredMode(): 'dark' | 'light' | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const v = window.localStorage.getItem(THEME_STORAGE_KEY)
+    if (v === 'dark' || v === 'light') return v
+  } catch {
+    /* noop */
+  }
+  return null
+}
+
+/** 持久化主题模式到 localStorage */
+function storeMode(mode: 'dark' | 'light'): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(THEME_STORAGE_KEY, mode)
+  } catch {
+    /* noop */
+  }
+}
+
 const ThemeContext = React.createContext<ThemeConfig>(defaultTheme)
 
 /**
@@ -91,16 +128,33 @@ function hexToOklch(hex: string): string {
 }
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [theme, setTheme] = React.useState<ThemeConfig>(defaultTheme)
+  const [theme, setTheme] = React.useState<ThemeConfig>(() => {
+    // 启动时读取 localStorage 持久化模式
+    const storedMode = loadStoredMode()
+    if (storedMode === 'light') return lightTheme
+    return defaultTheme
+  })
 
-  // 挂载后从 /api/theme 拉取配置（带降级，失败用默认）
+  // 挂载后从 /api/theme 拉取配置（带降级，失败用默认），但保留 localStorage 的 mode
   React.useEffect(() => {
     let mounted = true
     fetch('/api/theme')
       .then((r) => (r.ok ? r.json() : defaultTheme))
       .then((data) => {
         if (!mounted) return
-        const merged: ThemeConfig = { ...defaultTheme, ...(data ?? {}) }
+        // 优先用 localStorage 的 mode，避免刷新后被服务端配置覆盖
+        const storedMode = loadStoredMode()
+        const baseTheme = storedMode === 'light' ? lightTheme : defaultTheme
+        const merged: ThemeConfig = {
+          ...defaultTheme,
+          ...(data ?? {}),
+          mode: storedMode ?? (data?.mode ?? 'dark'),
+          // 如果是 light 模式，强制使用 light 配色
+          ...(storedMode === 'light' || (data?.mode === 'light' && !storedMode)
+            ? lightTheme
+            : {}),
+        }
+        void baseTheme // 占位避免 lint 警告
         setTheme(merged)
         applyTheme(merged)
       })
@@ -112,11 +166,14 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     }
   }, [])
 
-  // 切换 dark/light 模式
+  // 切换 dark/light 模式（同时切换完整配色 + 持久化）
   const toggleMode = React.useCallback(() => {
     setTheme((prev) => {
-      const next: ThemeConfig = { ...prev, mode: prev.mode === 'dark' ? 'light' : 'dark' }
+      const nextMode = prev.mode === 'dark' ? 'light' : 'dark'
+      // 切换时使用完整的 light/dark 主题（避免半暗半亮混合）
+      const next: ThemeConfig = nextMode === 'light' ? lightTheme : defaultTheme
       applyTheme(next)
+      storeMode(nextMode)
       return next
     })
   }, [])

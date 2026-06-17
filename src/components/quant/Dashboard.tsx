@@ -83,6 +83,7 @@ export function Dashboard() {
           tone="primary"
           hint={`引擎 ${status?.engine_status ?? '...'} · ${status?.adapter_mode ?? ''} 模式`}
           loading={loading}
+          spark={[0.2, 0.3, 0.5, 0.4, 0.6, 0.5, 0.7, 0.6, 0.8, 0.7, 0.9, 1.0]}
         />
         <StatCard
           label="今日信号数"
@@ -91,6 +92,7 @@ export function Dashboard() {
           tone="primary"
           hint="全部信号通道"
           loading={loading}
+          spark={[0.1, 0.3, 0.2, 0.5, 0.4, 0.7, 0.6, 0.8, 0.5, 0.9, 0.7, 1.0]}
         />
         <StatCard
           label="涨停股票数"
@@ -99,6 +101,7 @@ export function Dashboard() {
           tone="up"
           hint="盘中触及涨停"
           loading={loading}
+          spark={[0.0, 0.1, 0.05, 0.2, 0.15, 0.3, 0.25, 0.4, 0.35, 0.5, 0.45, 0.6]}
         />
         <StatCard
           label="异常告警数"
@@ -107,6 +110,7 @@ export function Dashboard() {
           tone="down"
           hint="跌幅/异常推送"
           loading={loading}
+          spark={[0.0, 0.05, 0.0, 0.1, 0.05, 0.0, 0.15, 0.1, 0.05, 0.2, 0.1, 0.15]}
         />
       </div>
 
