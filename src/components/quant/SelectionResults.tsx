@@ -21,7 +21,7 @@ import {
 } from '@/components/ui/select'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Download, Filter, ChevronDown, ChevronUp, List, Layers3, Columns3 } from 'lucide-react'
+import { Download, Filter, ChevronDown, ChevronUp, List, Layers3, Columns3, History } from 'lucide-react'
 import { StockTable, type Column } from './StockTable'
 import { ScoreBadge } from './ScoreBadge'
 import { LoadingState } from './LoadingState'
@@ -35,6 +35,7 @@ import {
 } from '@/lib/api'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { StrategyCompareView } from './StrategyCompareView'
+import { BacktestView } from './BacktestView'
 import type { StockAggRow } from './types'
 
 // 按股票聚合的视图类型 (从 ./types 导入, 避免循环依赖)
@@ -49,8 +50,8 @@ export function SelectionResults() {
   const [startDate, setStartDate] = React.useState<string>('')
   const [endDate, setEndDate] = React.useState<string>('')
   const [expandedKey, setExpandedKey] = React.useState<string | null>(null)
-  // 视图切换: 'detail' (明细) | 'agg' (按股票汇总) | 'compare' (策略横向对比)
-  const [viewMode, setViewMode] = React.useState<'detail' | 'agg' | 'compare'>('detail')
+  // 视图切换: 'detail' (明细) | 'agg' (按股票汇总) | 'compare' (策略横向对比) | 'backtest' (回测)
+  const [viewMode, setViewMode] = React.useState<'detail' | 'agg' | 'compare' | 'backtest'>('detail')
 
   // 按股票聚合：同一只股票被多少策略选中
   const aggRows = React.useMemo<StockAggRow[]>(() => {
@@ -346,7 +347,7 @@ export function SelectionResults() {
             <ToggleGroup
               type="single"
               value={viewMode}
-              onValueChange={(v) => v && setViewMode(v as 'detail' | 'agg' | 'compare')}
+              onValueChange={(v) => v && setViewMode(v as 'detail' | 'agg' | 'compare' | 'backtest')}
               className="rounded-md border border-quant bg-transparent h-8"
             >
               <ToggleGroupItem
@@ -372,6 +373,14 @@ export function SelectionResults() {
               >
                 <Columns3 className="size-3.5" />
                 对比
+              </ToggleGroupItem>
+              <ToggleGroupItem
+                value="backtest"
+                className="h-7 px-2 text-xs data-[state=on]:bg-amber-500/15 data-[state=on]:text-amber-400"
+                title="回测视图：基于历史选股模拟交易"
+              >
+                <History className="size-3.5" />
+                回测
               </ToggleGroupItem>
             </ToggleGroup>
             <Button
@@ -418,6 +427,9 @@ export function SelectionResults() {
             description="尝试调整筛选条件，或在策略管理页运行策略"
           />
         </Card>
+      ) : viewMode === 'backtest' ? (
+        /* 回测视图：基于历史选股模拟交易 */
+        <BacktestView />
       ) : viewMode === 'compare' ? (
         /* 对比视图：策略横向对比矩阵 */
         <StrategyCompareView

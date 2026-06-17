@@ -11,7 +11,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 
-from engine.api.deps import get_state, get_storage
+from engine.api.deps import get_config, get_state, get_storage
 from engine.api.schemas import (
     SignalEventResponse,
     SignalStatsItem,
@@ -67,6 +67,7 @@ async def get_signal_stats(
 async def list_signals(
     storage: Any = Depends(get_storage),
     state: Any = Depends(get_state),
+    cfg: Any = Depends(get_config),
     type: str | None = Query(None, description="按类型筛选: limit_up|drop_alert|breakout|selection|system"),
     strategy_id: str | None = Query(None, description="按策略 ID 筛选"),
     start_date: str | None = Query(None, description="开始日期 YYYY-MM-DD"),
@@ -107,9 +108,12 @@ async def list_signals(
         logger.warning("查询 signal_events 失败: %s", exc)
         return []
 
+    # 预构建 strategy_id → (name, emoji) 映射，避免每行都查 cfg
+    smap = _build_strategy_map(cfg)
+
     out: list[SignalEventResponse] = []
     for _, row in df.iterrows():
-        out.append(_row_to_signal(row))
+        out.append(_row_to_signal(row, smap))
 
     # 同步把信号计数累加到 EngineState（best-effort）
     try:
@@ -126,7 +130,28 @@ async def list_signals(
 # ============================================================================
 
 
-def _row_to_signal(row: Any) -> SignalEventResponse:
+def _build_strategy_map(cfg: Any) -> dict[str, dict[str, str]]:
+    """构建 ``strategy_id → {name, emoji, sector_code}`` 映射。
+
+    从 :class:`ConfigLoader.strategies()` 反查，失败时返回空 dict。
+    """
+    smap: dict[str, dict[str, str]] = {}
+    if cfg is None:
+        return smap
+    try:
+        strategies = cfg.strategies() or {}
+        for sid, sc in strategies.items():
+            smap[sid] = {
+                "name": getattr(sc, "strategy_name", "") or sid,
+                "emoji": getattr(sc, "strategy_emoji", "") or "",
+                "sector_code": getattr(sc, "sector_code", "") or "",
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("构建 strategy_map 失败: %s", exc)
+    return smap
+
+
+def _row_to_signal(row: Any, smap: dict[str, dict[str, str]] | None = None) -> SignalEventResponse:
     import json
 
     alert_type = str(row.get("alert_type", "system"))
@@ -150,12 +175,22 @@ def _row_to_signal(row: Any) -> SignalEventResponse:
         "info": "success",
     }.get(severity, "success")
 
+    # 反查 strategy_name + emoji（之前硬编码 None，QA 发现信号中心策略列显示 "—"）
+    sid = str(row.get("strategy_id") or "") or None
+    strategy_name: str | None = None
+    strategy_emoji: str | None = None
+    if sid and smap:
+        info = smap.get(sid)
+        if info:
+            strategy_name = info.get("name") or sid
+            strategy_emoji = info.get("emoji") or None
+
     return SignalEventResponse(
         id=str(row.get("event_id", "")),
         time=_to_str(row.get("triggered_at")) or "",
         type=frontend_type,
-        strategy_id=str(row.get("strategy_id") or "") or None,
-        strategy_name=None,
+        strategy_id=sid,
+        strategy_name=strategy_name,
         stock_code=str(row.get("stock_code") or "") or None,
         stock_name=str(row.get("stock_name") or "") or None,
         content=str(row.get("condition_expr", "")) or alert_type,

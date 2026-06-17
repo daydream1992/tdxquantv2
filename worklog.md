@@ -8705,3 +8705,470 @@ Stage Summary:
   6. 策略对比页增加导出功能 (PDF/Excel)
   7. 信号中心增加推送通道配置 UI
 
+
+---
+Task ID: R5-后端通道系统
+Agent: main (webDevReview cron)
+Task: 实现消息总线插件化通道系统 + 修复 2 Bug
+
+Work Log:
+
+### 阶段判断
+- P1+ 稳定运行, R4 已完成 6 项功能 (实时 hook / K线图 / 策略对比 / Dashboard增强 / 信号高亮 / 类型抽离)
+- 本轮后端目标: 修复 2 Bug + 实现 channels 插件系统
+- QA 发现: signals.py 路由 _row_to_signal() 把 strategy_name 硬编码 None → 信号中心"策略"列显示 "—"
+- QA 发现: strategies.py:549 channels 硬编码 ["websocket","csv_log"] → 与策略 YAML alert_conditions.channels 不一致
+- QA 发现: engine/channels/ 目录是空的, 消息总线"插件化"只是规划未实现
+
+### Bug 修复 (2 项)
+
+1. **Bug1: signals.py strategy_name 反查**
+   - 文件: `engine/api/routes/signals.py`
+   - 新增 `_build_strategy_map(cfg)` 从 ConfigLoader.strategies() 构建 sid→{name,emoji,sector_code} 映射
+   - `_row_to_signal(row, smap)` 接收映射, 反查填充 strategy_name
+   - list_signals 路由注入 `cfg: Any = Depends(get_config)`
+   - 验证: curl `/api/signals?limit=1` 返回 `strategy_name=弱转强` (之前是 null)
+
+2. **Bug2: strategies.py channels 硬编码**
+   - 文件: `engine/api/routes/strategies.py` (`_emit_selection_signal` 函数)
+   - 从策略 YAML monitor.alert_conditions 聚合 channels (取并集)
+   - 至少包含 csv_log (审计要求)
+   - 调用 `get_registry().dispatch(payload, channels=channels)` 真实分发
+   - 把成功推送的通道名回写到 channels_fired 字段
+
+### 新功能: 消息总线插件化通道系统 (6 个新文件)
+
+1. **engine/channels/__init__.py** — 包入口, 导出 BaseChannel/ChannelPayload/ChannelRegistry
+2. **engine/channels/base.py** — 抽象基类 + ChannelPayload 数据结构 + ChannelResult
+   - ChannelPayload 统一格式: signal_id/type/strategy_id/strategy_name/strategy_emoji/stock_code/stock_name/title/content/severity/priority/extra/triggered_at
+   - display_title / signal_type_label / severity_label 属性
+   - BaseChannel: enabled/validate_config/send/status 抽象方法
+   - force_enabled 标记 (csv_log 永远开启)
+3. **engine/channels/csv_log.py** — CSV 日志通道 (force_enabled=True)
+   - 写入 logs/signals.csv, 11 列表头
+   - 线程安全 (threading.Lock)
+   - 首次写入自动创建表头
+4. **engine/channels/websocket.py** — WebSocket 推送通道 (轮询模拟)
+   - 进程级 deque(maxlen=50) 缓存最近信号
+   - push_recent() / drain_recent() 供前端轮询拉取
+   - 默认开启 (轮询模式无成本)
+5. **engine/channels/tdx_warn.py** — 通达信客户端弹窗通道
+   - 构造 warn 文本 (标题+内容+代码+策略+等级)
+   - 尝试 from tqcenter import TqApi, 失败记录 mock 日志
+   - validate_config: duration_ms 1~60000, sound_level 0/1/2
+6. **engine/channels/feishu.py** — 飞书自定义机器人 Webhook 通道
+   - interactive card 格式 (header+elements)
+   - 颜色映射: high=red / medium=orange / low=blue
+   - HMAC-SHA256 签名 (若启用 secret)
+   - @ 用户 / @ 所有人 支持
+   - validate_config: webhook_url 必须是 open.feishu.cn 域名
+7. **engine/channels/registry.py** — 通道注册中心 + 配置持久化
+   - 单例 ChannelRegistry, 线程安全
+   - dispatch(payload, channels) 批量分发
+   - list_channels() 状态查询
+   - update_config(new_cfg) 持久化到 config/channels.yaml + 热重载
+   - test_channel(name) 发送测试消息
+   - _ensure_default_config() 首次访问自动生成默认模板
+
+### 新功能: /api/channels 路由 (1 个新文件)
+
+- 文件: `engine/api/routes/channels.py`
+- 4 个端点:
+  * `GET /api/channels` — 通道列表与状态 (4 通道: csv_log/websocket/tdx_warn/feishu)
+  * `PUT /api/channels` — 批量更新配置 (持久化 + 热重载)
+  * `POST /api/channels/{name}/test` — 发送测试消息到指定通道
+  * `POST /api/channels/signals/{signal_id}/repush` — 重新推送历史信号
+- main.py 注册: `app.include_router(channels_routes.router, prefix="/api/channels")`
+
+### 前端 API 代理 (3 个新文件)
+
+- `src/app/api/channels/route.ts` — GET/PUT 代理
+- `src/app/api/channels/[name]/test/route.ts` — POST 测试代理
+- `src/app/api/channels/signals/[signalId]/repush/route.ts` — POST 重推代理
+- `src/lib/api.ts` 新增 channelAPI (list/update/test/repush) + 4 个 DTO 类型
+
+### QA 验证 (curl)
+
+| 验证项 | 结果 |
+|--------|------|
+| `bun run lint` (后端改动前) | ✓ 0 错误 |
+| FastAPI /health | ✓ 200 (uptime_seconds=2) |
+| GET /api/channels | ✓ 200 (4 通道: csv_log/websocket/tdx_warn/feishu) |
+| GET /api/signals?limit=1 | ✓ strategy_name=弱转强 (Bug1 修复验证) |
+| feishu secret 显示 *** | ✓ (status() 脱敏) |
+| channels.yaml 自动生成 | ✓ config/channels.yaml 默认模板 |
+
+### 已知未验证项 (待 subagent 完成前端后端到端测试)
+- 飞书 webhook 实际推送 (需真实 webhook_url, 当前 enabled=false)
+- 信号重推 PUT /api/channels/signals/{id}/repush (待 subagent 在 SignalCenter 集成)
+- 通道测试 POST /api/channels/{name}/test (待 subagent 在 Settings Dialog 集成)
+
+### 文件变更清单
+```
+后端 (Python):
+  engine/channels/__init__.py          # 新增: 包入口
+  engine/channels/base.py              # 新增: 抽象基类 + ChannelPayload
+  engine/channels/csv_log.py           # 新增: CSV 日志通道
+  engine/channels/websocket.py         # 新增: WebSocket 轮询模拟通道
+  engine/channels/tdx_warn.py          # 新增: 通达信弹窗通道
+  engine/channels/feishu.py            # 新增: 飞书 Webhook 通道
+  engine/channels/registry.py          # 新增: 通道注册中心 + 配置持久化
+  engine/api/routes/channels.py        # 新增: /api/channels 路由 (4 端点)
+  engine/api/routes/signals.py         # 修复: strategy_name 反查 + cfg 注入
+  engine/api/routes/strategies.py      # 修复: channels 从 YAML 读取 + 真实分发
+  engine/api/main.py                   # 注册 channels_routes
+
+前端 (TypeScript):
+  src/app/api/channels/route.ts                                  # 新增: GET/PUT 代理
+  src/app/api/channels/[name]/test/route.ts                      # 新增: POST 测试代理
+  src/app/api/channels/signals/[signalId]/repush/route.ts        # 新增: POST 重推代理
+  src/lib/api.ts                                                 # 新增: channelAPI + 4 DTO 类型
+
+配置:
+  config/channels.yaml                  # 自动生成: 4 通道默认模板
+```
+
+Stage Summary:
+- 项目当前状态: P1+ 稳定 + 本轮后端实现消息总线插件化通道系统 + 修复 2 Bug
+- 已完成修改:
+  1. Bug1: signals.py strategy_name 反查 → 信号中心策略列不再显示 "—"
+  2. Bug2: strategies.py channels 从 YAML alert_conditions 读取 → 不再硬编码
+  3. channels 插件系统: 4 通道 (csv_log/websocket/tdx_warn/feishu) + 注册中心 + 配置持久化
+  4. /api/channels 路由: 4 端点 (list/update/test/repush)
+  5. 前端 API 代理: 3 个 route.ts + channelAPI 客户端
+- 未解决问题:
+  1. 飞书 webhook 实际推送需用户填真实 webhook_url (UI 待 subagent 实现)
+  2. 通道测试按钮 UI 待 subagent 实现
+  3. 信号重推按钮 UI 待 subagent 实现
+- 下一阶段优先事项:
+  1. 前端 Settings Dialog (推送通道配置 UI)
+  2. SignalCenter 增强 (状态徽章颜色化 + 重推按钮 + 策略列显示)
+  3. 回测引擎 API + UI
+
+
+---
+Task ID: R5-A-前端通道UI
+Agent: full-stack-developer (subagent)
+Task: 推送通道配置 Settings Dialog + SignalCenter 增强
+
+Work Log:
+
+### 阶段判断
+- 上一阶段 (R5-后端通道系统) 已完成后端 channels 插件系统 + 4 端点 + 3 个 API 代理 + channelAPI 客户端
+- 本轮前端目标: 创建 ChannelSettingsDialog + 修改 page.tsx header + 增强 SignalCenter
+- 必读文件全部读完: worklog.md / page.tsx / SignalCenter.tsx / api.ts / MiniKline.tsx / shadcn ui 组件
+
+### 任务 1: 创建 ChannelSettingsDialog.tsx (新文件)
+- 文件: `src/components/quant/ChannelSettingsDialog.tsx` (约 450 行)
+- 实现:
+  * 受控 Dialog (props.open / onOpenChange / onSaved)
+  * 大尺寸 `sm:max-w-2xl` + `max-h-[92vh]` + flex 布局 (header/body/footer)
+  * 4 个通道按固定顺序展示 (csv_log / websocket / tdx_warn / feishu)
+  * 每个通道一个 Card: 左侧图标 (lucide FileText/Radio/Bell/MessageSquare) + 名称 + code 标签 + 描述 + 状态 Badge; 右侧测试按钮 + Switch + 展开按钮
+  * csv_log: 强制开启 (force_enabled=true), Switch 禁用, 只读展示 path
+  * websocket: 只读 (readOnly=true), Switch 禁用, 展示"轮询模式无配置"
+  * tdx_warn: 可配置 duration_ms (1000-60000 number input) + sound_level (select 0/1/2)
+  * feishu: 可配置 webhook_url (url input) + secret (password input) + at_all (switch) + at_users (textarea 逗号分隔, 自动转数组)
+  * 错误显示: 红色 Badge + 红色边框 Card + 错误详情区块
+  * 测试按钮: 调用 channelAPI.test(name) → toast loading/success/error
+  * 保存按钮: 调用 channelAPI.update(forms) → toast 成功 (含热重载提示) / 失败 (含校验错误)
+  * 重置按钮: 重新加载配置
+  * 主题: 全部用 var(--quant-primary) 琥珀色系, 无 indigo/blue
+  * 响应式: sm: 断点切换 grid 列数; mobile 上 Dialog 全屏
+  * 加载态: Loader2 spinner
+  * 底部使用说明区块 (5 条提示)
+
+### 任务 2: 修改 page.tsx header 设置按钮
+- 文件: `src/app/page.tsx`
+- 改动:
+  * 新增 import: ChannelSettingsDialog
+  * 新增 import: channelAPI (从 @/lib/api)
+  * 新增 state: settingsOpen + channelErrors
+  * 新增 useEffect: 60 秒轮询 channelAPI.list() 统计错误数, settingsOpen 关闭时刷新
+  * 替换原设置按钮 onClick (从 toast.info 改为 setSettingsOpen(true))
+  * 设置按钮添加 `relative hover:bg-amber-500/10` 样式
+  * 当 channelErrors > 0 时, 按钮右上角显示红点 (size-2 rounded-full bg-red-500 ring-2 ring-background)
+  * title 动态: "通道有 N 个错误，点击配置" / "推送通道配置"
+  * 在 Footer 之后挂载 `<ChannelSettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />`
+
+### 任务 3: 增强 SignalCenter.tsx (整体重写)
+- 文件: `src/components/quant/SignalCenter.tsx` (337 → 约 380 行)
+- 改动:
+  1. **状态徽章颜色化** (push_status):
+     - 新增 PUSH_STATUS_META 映射 (success→绿 CheckCircle2, partial→琥珀 AlertCircle, failed→红 XCircle, pending→灰 Clock)
+     - Badge 用半透明背景 + 边框 + 图标 (与现有 TYPE_META 风格统一)
+  2. **推送通道列** 改进:
+     - 新增 CHANNEL_BADGE_META 映射 (csv_log→灰 "CSV", websocket→青 "WS", tdx_warn→紫 "TDX", feishu→绿 "飞书", email→琥珀 "邮件")
+     - 每个 channel 渲染为小 Badge (半透明背景 + 边框 + 简称), title 显示完整 channel name
+  3. **重推按钮** (新增列 "操作"):
+     - RefreshCw 图标 + "重推" 文字 (lg:inline)
+     - 点击调用 channelAPI.repush(signal.id)
+     - 加载态: animate-spin + "推送中" 文字
+     - 成功: toast "已重推到 {fired.join(', ')}" + 各通道结果 ✓/✗ 描述
+     - 部分失败: toast warning
+     - 失败: toast error
+     - e.stopPropagation() 避免触发行点击
+  4. **策略列** 改进:
+     - 优先 strategy_name; 若只有 strategy_id 显示 id; 都没有显示 —
+     - 反查 strategies 数组拿 strategy_emoji 拼接 (emoji + name)
+  5. **股票列** 改进:
+     - 显示 `stock_name(stock_code)` 格式 (之前是 stock_code stock_name)
+     - 都没有时显示 —
+  6. **行 hover 效果**:
+     - 通过 StockTable 新增 rowClassName prop, 在 tr 上加 `hover:bg-amber-500/5`
+  7. **新信号动画**:
+     - 新增 isNewSignal 判定 (Date.now() - time < 60s)
+     - 新增 rowClassName 回调返回 'signal-row-new' CSS class
+     - 30 秒定时器刷新 tick 触发重渲染
+     - CSS 实现: 左侧 3px 琥珀色边框 (box-shadow inset) + 微弱 glow 动画 (2.4s) + 半透明背景
+  8. **图例提示**: 表格上方新增图例行说明新信号标识 + 重推功能
+  9. **内容列**: 加 `line-clamp-2` 防止过长
+
+### 任务 3.1: StockTable.tsx 增强 (支撑 SignalCenter)
+- 文件: `src/components/quant/StockTable.tsx`
+- 改动:
+  * StockTableProps 新增 `rowClassName?: (row: T) => string`
+  * 函数签名解构 rowClassName
+  * tr 的 className 增加 `hover:bg-amber-500/5` + `rowClassName?.(row)` 拼接
+
+### 任务 4: 全局样式增强 (globals.css)
+- 文件: `src/app/globals.css`
+- 新增 CSS:
+  * `.signal-row-new`: 新信号行样式 (左侧 3px 琥珀色 inset box-shadow + 5% 透明背景 + !important 覆盖 hover)
+  * `@keyframes signal-new-glow`: 2.4s glow 动画 (12px → 6px → 0px 琥珀色外阴影)
+  * 表单 focus ring 全局覆盖: input/textarea/select/switch focus-visible 时 border 改为琥珀色 (覆盖默认蓝色)
+  * data-slot 选择器精准定位 shadcn 组件
+
+### QA 验证
+
+| 验证项 | 结果 |
+|--------|------|
+| `bun run lint` | ✓ 0 错误 0 警告 (EXIT=0) |
+| dev server log | ✓ 无编译错误, /api/channels 200 |
+| TypeScript 类型 | ✓ 严格模式通过 (lint 包含 type-check) |
+
+### 文件变更清单
+```
+新增:
+  src/components/quant/ChannelSettingsDialog.tsx    # 新增: 推送通道配置 Dialog (约 450 行)
+
+修改:
+  src/app/page.tsx                                  # 修改: 设置按钮打开 Dialog + 红点提示
+  src/components/quant/SignalCenter.tsx             # 修改: 状态徽章/通道徽章/重推按钮/策略列/股票列/新信号动画
+  src/components/quant/StockTable.tsx               # 修改: 新增 rowClassName prop + hover 效果
+  src/app/globals.css                               # 修改: 新增 .signal-row-new 动画 + 琥珀色 focus ring
+```
+
+Stage Summary:
+- 已完成:
+  1. ChannelSettingsDialog: 4 通道配置 UI (csv_log/websocket 只读, tdx_warn/feishu 可编辑) + 测试/保存/重置按钮
+  2. page.tsx header: 设置按钮打开 Dialog + 错误红点提示 (60s 轮询)
+  3. SignalCenter 增强: 状态徽章颜色化 (4 态) + 通道徽章 (5 种) + 重推按钮 + 策略列 emoji + 股票列格式 + 行 hover + 新信号动画
+  4. StockTable 增强: rowClassName prop 支持自定义行样式
+  5. globals.css: 新信号 glow 动画 + 琥珀色 focus ring (覆盖默认蓝色)
+- 文件变更: 1 新增 + 4 修改
+- 未解决问题:
+  1. 飞书 webhook 实际推送需用户填真实 webhook_url (UI 已就绪, 等待用户输入)
+  2. 通道测试按钮在 csv_log/websocket 上也可点击 (后端 test_channel 对所有通道都有效, 不算 bug)
+  3. 新信号动画依赖前端 time 字段准确性, 若后端 time 时区有偏差可能误判 (后端已用 ISO 格式, 应无问题)
+- 下一阶段建议:
+  1. 端到端测试: 用户在 Settings Dialog 填入飞书 webhook 后点击测试, 验证真实推送
+  2. 信号重推端到端: 在 SignalCenter 点击任意行的"重推"按钮, 验证后端 repush 路由
+  3. 回测引擎 API + UI (R6 优先)
+
+---
+Task ID: R5-B-回测引擎
+Agent: full-stack-developer (subagent)
+Task: 回测引擎 API + UI 实现
+
+Work Log:
+- 读完上下文：worklog.md (R3/R4/R5), engine/api/routes/{strategies,selection,channels}.py, deps.py, schemas.py, main.py, src/lib/{api-proxy,api}.ts, MiniKline.tsx, Dashboard.tsx, SelectionResults.tsx, StatCard.tsx, StockTable.tsx
+- 确认 5 个策略已有 4 次选股历史 (每个 30 只股票)，可直接用作回测买入信号
+- 后端新建 engine/api/routes/backtest.py (约 580 行)：
+  * 3 个端点：POST /api/backtest/run / GET /api/backtest/history / GET /api/backtest/{run_id}
+  * BacktestRunRequest / BacktestResultResponse / BacktestHistoryItem / BacktestDailyEquity / BacktestTrade 等 Pydantic schemas
+  * 简化版回测引擎 _run_backtest()：基于 selection_results 历史选股信号，等权买入 top_n、持有 N 天卖出
+  * 确定性 mock 价格：用 hashlib.md5(stock_code|day_index) 生成 -3%~+5% 涨幅，保证同一股票每次回测结果一致
+  * 计算指标：总收益 / 年化 / 最大回撤 / 夏普 (sqrt(252) 年化) / 胜率 / Alpha / Beta
+  * 无 selection_results 时 mock 20 个交易日 × 3-5 只股票
+  * 持久化到 DuckDB backtest_results 表 (惰性 CREATE TABLE IF NOT EXISTS)
+  * 注册到 main.py：app.include_router(backtest_routes.router, prefix="/api/backtest")
+- 前端 3 个 Next.js API route 代理 (参考 channels/route.ts 风格)：
+  * src/app/api/backtest/run/route.ts (POST)
+  * src/app/api/backtest/history/route.ts (GET)
+  * src/app/api/backtest/[runId]/route.ts (GET)
+- 前端 src/lib/api.ts 末尾新增 backtestAPI + 4 个 DTO 类型 (BacktestParamsDTO/BacktestResultDTO/BacktestDailyEquityDTO/BacktestTradeDTO/BacktestHistoryItemDTO)
+- 前端新建 src/components/quant/BacktestView.tsx (约 750 行)，5 大区块：
+  1. 顶部表单 Card：策略 Select / 日期 input[type=date] / 初始资金 / top_n (3/5/10) / hold_days (1/3/5/10/20) + "运行回测"按钮 (Loader2 加载态)
+  2. 统计指标 Grid：8 个卡片 (总收益/年化/最大回撤/夏普/胜率/交易次数/Alpha/Beta)，每个带 tone 色 + 渐变光晕 + 底部装饰条
+  3. 收益曲线 SVG (920×320，纯手绘)：策略资产曲线 (琥珀金) + 基准虚线 (灰) + 回撤阴影 (红半透明) + 十字光标 + tooltip (日期/资产/收益/回撤) + Y 轴 5 档刻度 + X 轴 6 档日期
+  4. 交易记录表格 (复用 StockTable)：代码/名称/买入日/卖出日/买入价/卖出价/持仓天数/收益率/收益金额，正绿负红；顶部汇总条 6 项 (总次数/盈/亏/胜率/累计盈亏/平均收益率)
+  5. 历史回测列表 (Collapsible 折叠，默认收起)：run_id 前 8 位 / 策略 / 日期范围 / 总收益 / 最大回撤 / 夏普 / 创建时间 / "查看"按钮 (加载历史详情到上方)
+- 集成到 SelectionResults.tsx：在现有 ToggleGroup 增加 "回测" 第 4 个 toggle (History 图标)；viewMode 类型从 'detail'|'agg'|'compare' 扩展为 'detail'|'agg'|'compare'|'backtest'；选中时渲染 <BacktestView />
+- 解决 sandbox 进程保活问题：用 subprocess.Popen + start_new_session=True 派生 uvicorn daemon，避免 bash 会话结束后被杀
+- 重启 FastAPI (新路由生效)，验证 3 个端点全部 200：
+  * POST /api/backtest/run (dbqzt 策略) → run_id=e3e15fadd4e4 / total_return=29.65% / 21 trades / 17 profit
+  * GET /api/backtest/history → 4 条历史回测记录
+  * GET /api/backtest/c31afc47c730 → 单条详情完整返回
+- 通过 Next.js 代理验证：POST /api/backtest/run 200 in 116ms / GET /api/backtest/history 200 in 108ms / GET /api/backtest/[id] 200 in 564ms
+
+Stage Summary:
+- 已完成:
+  1. 后端 backtest.py 路由 (3 端点) + 简化版回测引擎 (mock 价格 + 真实选股信号)
+  2. DuckDB backtest_results 表 (惰性创建，含 result_json 完整快照)
+  3. 前端 3 个 API route 代理 + backtestAPI 客户端 + 4 个 DTO 类型
+  4. BacktestView.tsx 5 大区块 UI (表单/统计/曲线/交易/历史)
+  5. 集成到 SelectionResults.tsx 第 4 个 toggle "回测"
+  6. lint 0 错误，3 个 API 端点全部 200
+- 文件变更:
+  后端 (Python):
+    engine/api/routes/backtest.py        # 新增: 回测路由 + 引擎 (580 行)
+    engine/api/main.py                   # 修改: 注册 backtest_routes
+  前端 (TypeScript):
+    src/app/api/backtest/run/route.ts    # 新增: POST 代理
+    src/app/api/backtest/history/route.ts # 新增: GET 代理
+    src/app/api/backtest/[runId]/route.ts # 新增: GET 单条代理
+    src/lib/api.ts                       # 修改: 新增 backtestAPI + 5 个 DTO 类型
+    src/components/quant/BacktestView.tsx # 新增: 回测 UI (750 行, 5 区块)
+    src/components/quant/SelectionResults.tsx # 修改: 第 4 个 toggle "回测"
+- 未解决问题:
+  1. 回测 mock 价格涨幅范围 -3%~+5% 偏向多头，年化收益率虚高 (906% 等)，仅用作演示；真实回测需对接 tqcenter.get_market_data 拉真实历史价
+  2. DuckDB backtest_results 表无 SEQUENCE/索引 (简化版)，如需查询优化可加 CREATE INDEX
+  3. sandbox 进程保活仍依赖 Python subprocess.Popen 派生 daemon，若 sandbox 重启需手动重新派生 (已记录命令)
+  4. 当前每次回测结果都全量持久化 result_json (含完整 daily_equity + trades)，长时间使用会让 DuckDB 文件增大；后续可加定期清理或冷热分离
+- 下一阶段优先事项:
+  1. 回测引擎接入真实历史价 (tqcenter.get_market_data)
+  2. 回测结果导出 (PDF/Excel 报告)
+  3. 多策略并排回测对比
+  4. 回测参数预设保存 (用户常用配置)
+  5. 信号重推按钮 UI 集成 (R5 主 agent 已实现后端，前端待补)
+  6. Settings Dialog (推送通道配置 UI)
+
+---
+Task ID: R5-总结
+Agent: main (webDevReview cron)
+Task: R5 轮次总结 - 后端通道系统 + 前端 Settings Dialog + 信号中心增强 + 回测引擎
+
+Work Log:
+
+### 本轮整体进展
+
+R5 轮次围绕"消息总线插件化通道系统 + 回测引擎"主题,完成 2 Bug 修复 + 4 大新功能,前后端贯通,QA 全部通过。
+
+### QA 验证 (agent-browser + curl)
+
+| 验证项 | 结果 |
+|--------|------|
+| `bun run lint` (最终) | ✓ EXIT=0 (0 错误 0 警告) |
+| FastAPI /health | ✓ 200 |
+| GET /api/channels | ✓ 200 (4 通道正常) |
+| GET /api/signals?limit=1 | ✓ strategy_name=弱转强 (Bug1 修复) |
+| POST /api/backtest/run | ✓ run_id=1338ce869157, total_return=29.65%, sharpe=9.47 |
+| GET /api/backtest/history | ✓ 200 (5 条历史) |
+| agent-browser 首页加载 | ✓ Dashboard 完整, Top3 涨跌榜正常 |
+| agent-browser 信号中心 | ✓ 策略列显示"弱转强/强转弱反抽" (之前是 "—") |
+| agent-browser 设置 Dialog | ✓ 4 通道 (CSV/WebSocket/TDX/飞书) 配置 UI 完整 |
+| agent-browser 回测视图 | ✓ 选股结果 Tab 第 4 toggle "回测" + 8 统计卡片 + 交易记录 |
+| agent-browser 运行回测 | ✓ 点击"运行回测"按钮返回完整绩效指标 |
+
+### 关键里程碑
+
+1. **Bug 修复 (2 项)**:
+   - signals.py `_row_to_signal()` strategy_name 反查 (从 cfg.strategies() 构建 smap)
+   - strategies.py:549 channels 硬编码 → 从策略 YAML monitor.alert_conditions 聚合 + 真实分发
+
+2. **消息总线插件化 (后端)**:
+   - 4 通道实现: csv_log (强制开启) / websocket (轮询) / tdx_warn (通达信弹窗) / feishu (飞书 webhook)
+   - 注册中心 ChannelRegistry 单例, 配置持久化到 config/channels.yaml
+   - 4 个 API 端点: GET/PUT /api/channels + POST /{name}/test + POST /signals/{id}/repush
+
+3. **推送通道配置 UI (前端)**:
+   - ChannelSettingsDialog 组件 (~450 行), 4 通道卡片式布局
+   - csv_log 强制开启 (Switch 禁用), websocket 只读
+   - tdx_warn/feishu 可展开配置 (duration_ms/sound_level, webhook_url/secret/at_all/at_users)
+   - 测试/保存/重置三按钮 + toast 反馈
+   - page.tsx header 设置按钮集成 + 错误红点提示
+
+4. **信号中心增强**:
+   - 状态徽章 4 态颜色化 (success 绿/partial 琥珀/failed 红/pending 灰) + 图标
+   - 通道徽章 5 种 (CSV 灰/WS 青/TDX 紫/飞书绿)
+   - 重推按钮 (RefreshCw) → channelAPI.repush → toast 结果
+   - 策略列: emoji + name (Bug1 修复后)
+   - 新信号 (1 分钟内): 左侧 3px 琥珀边框 + glow 动画
+
+5. **回测引擎 (全栈)**:
+   - 后端: engine/api/routes/backtest.py (~580 行)
+     - POST /api/backtest/run, GET /api/backtest/history, GET /api/backtest/{run_id}
+     - 基于 selection_results 历史选股信号 + 确定性 mock 价格 (md5 hash)
+     - 计算: 总收益/年化/复利年化/最大回撤/夏普(√252)/胜率/Alpha/Beta
+     - 持久化到 DuckDB backtest_results 表 (惰性 CREATE)
+   - 前端: BacktestView.tsx (~750 行)
+     - 顶部表单 (策略/日期/资金/持仓数/持有天数)
+     - 8 统计卡片 Grid (总收益/年化/复利年化/最大回撤/夏普/胜率/交易次数/Alpha/Beta)
+     - 收益曲线 SVG (920×320, 策略曲线琥珀金 + 基准虚线 + 回撤阴影 + 十字光标 tooltip)
+     - 交易记录表格 (9 列 + 6 项汇总)
+     - 历史回测列表 (Collapsible 折叠)
+   - 集成: SelectionResults.tsx 第 4 toggle "回测"
+
+### 文件变更总览 (R5 全轮)
+
+```
+后端 (Python) - 9 个文件:
+  engine/channels/__init__.py          # 新增: 包入口
+  engine/channels/base.py              # 新增: 抽象基类 + ChannelPayload
+  engine/channels/csv_log.py           # 新增: CSV 日志通道
+  engine/channels/websocket.py         # 新增: WebSocket 轮询模拟通道
+  engine/channels/tdx_warn.py          # 新增: 通达信弹窗通道
+  engine/channels/feishu.py            # 新增: 飞书 Webhook 通道
+  engine/channels/registry.py          # 新增: 通道注册中心 + 配置持久化
+  engine/api/routes/channels.py        # 新增: /api/channels 路由
+  engine/api/routes/backtest.py        # 新增: /api/backtest 路由
+  engine/api/routes/signals.py         # 修复: strategy_name 反查
+  engine/api/routes/strategies.py      # 修复: channels 从 YAML 读取 + 真实分发
+  engine/api/main.py                   # 注册 channels + backtest 路由
+
+前端 (TypeScript) - 12 个文件:
+  src/components/quant/ChannelSettingsDialog.tsx  # 新增: 推送配置 Dialog
+  src/components/quant/BacktestView.tsx           # 新增: 回测视图
+  src/components/quant/SignalCenter.tsx           # 增强: 状态徽章/通道徽章/重推按钮
+  src/components/quant/StockTable.tsx             # 增强: rowClassName prop
+  src/components/quant/SelectionResults.tsx       # 增强: 第 4 toggle "回测"
+  src/app/page.tsx                                # 增强: 设置按钮打开 Dialog
+  src/app/globals.css                             # 增强: 信号 glow 动画 + focus ring
+  src/app/api/channels/route.ts                   # 新增: GET/PUT 代理
+  src/app/api/channels/[name]/test/route.ts       # 新增: POST 测试代理
+  src/app/api/channels/signals/[signalId]/repush/route.ts  # 新增: POST 重推代理
+  src/app/api/backtest/run/route.ts               # 新增: POST 代理
+  src/app/api/backtest/history/route.ts           # 新增: GET 代理
+  src/app/api/backtest/[runId]/route.ts           # 新增: GET 代理
+  src/lib/api.ts                                  # 增强: channelAPI + backtestAPI + 9 DTO 类型
+
+配置:
+  config/channels.yaml                 # 自动生成: 4 通道默认模板
+```
+
+Stage Summary:
+- 项目当前状态: **P1++ 稳定 + R5 轮次完成消息总线插件化 + 回测引擎全栈**
+- 已完成修改:
+  1. Bug1 修复: signals.py strategy_name 反查 (信号中心策略列正常显示)
+  2. Bug2 修复: strategies.py channels 从 YAML 读取 (不再硬编码)
+  3. 消息总线插件化: 4 通道 (csv_log/websocket/tdx_warn/feishu) + 注册中心 + 配置持久化
+  4. /api/channels 路由: 4 端点 (list/update/test/repush)
+  5. 推送通道配置 UI: ChannelSettingsDialog (4 通道卡片式 + 测试/保存/重置)
+  6. 信号中心增强: 状态徽章颜色化 + 通道徽章 + 重推按钮 + 新信号动画
+  7. 回测引擎 API: 3 端点 (run/history/get) + DuckDB 持久化
+  8. 回测视图 UI: 8 统计卡片 + SVG 收益曲线 + 交易记录表 + 历史列表
+- 未解决问题:
+  1. 飞书 webhook 实际推送需用户填真实 webhook_url (UI 已就绪, 通道已实现)
+  2. 回测 mock 价格涨幅偏多头 (-3%~+5%), 真实回测需对接 tqcenter.get_market_data
+  3. agent-browser + Next.js dev 偶尔不稳定 (curl 全部通过, 用户走 Preview Panel 正常)
+  4. sandbox 可能杀后台进程, 需要时重启 `bash scripts/start_all.sh`
+- 下一阶段优先事项 (R6):
+  1. 因子插件补全 (对照 STRATEGY_LOGIC.md, 实现真实公式而非简化版)
+  2. K线图接入真实数据 (tqcenter get_market_data 替代 generateMockKline)
+  3. 策略对比页增加导出功能 (PDF/Excel)
+  4. 信号中心增加推送通道筛选 (按 channel 过滤信号)
+  5. 回测引擎对接真实历史数据 (替换 mock 价格)
+  6. 板块管理增加"批量导出全部板块"按钮
+  7. Dashboard 增加"策略胜率排行"卡片 (基于 backtest_results)
+  8. 全局搜索 (Cmd+K) 跨策略/股票/信号快速跳转

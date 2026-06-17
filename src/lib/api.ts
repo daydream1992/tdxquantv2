@@ -271,3 +271,130 @@ export const configAPI = {
       body: JSON.stringify({ yaml_content, enabled }),
     }),
 }
+
+// ===== 推送通道 =====
+
+export interface ChannelConfigDTO {
+  name: string
+  enabled: boolean
+  config: Record<string, unknown>
+  errors: string[]
+}
+
+export interface ChannelListDTO {
+  channels: ChannelConfigDTO[]
+  config_path: string
+}
+
+export interface ChannelTestResultDTO {
+  ok: boolean
+  message: string
+  channel: string
+}
+
+export interface SignalRepushResultDTO {
+  ok: boolean
+  signal_id: string
+  fired: string[]
+  results: Array<{ channel: string; ok: boolean; message: string }>
+}
+
+export const channelAPI = {
+  list: () => fetchAPI<ChannelListDTO>('/api/channels'),
+  update: (channels: Record<string, Record<string, unknown>>) =>
+    fetchAPI<{ ok: boolean; errors: string[]; channels: ChannelConfigDTO[] }>(
+      '/api/channels',
+      { method: 'PUT', body: JSON.stringify({ channels }) }
+    ),
+  test: (name: string) =>
+    fetchAPI<ChannelTestResultDTO>(`/api/channels/${encodeURIComponent(name)}/test`, {
+      method: 'POST',
+    }),
+  repush: (signalId: string) =>
+    fetchAPI<SignalRepushResultDTO>(
+      `/api/channels/signals/${encodeURIComponent(signalId)}/repush`,
+      { method: 'POST' }
+    ),
+}
+
+// ===== 回测 =====
+
+export interface BacktestParamsDTO {
+  strategy_id: string
+  start_date: string
+  end_date: string
+  initial_capital?: number
+  top_n?: number
+  hold_days?: number
+}
+
+export interface BacktestDailyEquityDTO {
+  date: string
+  equity: number
+  return_pct: number
+  drawdown: number
+}
+
+export interface BacktestTradeDTO {
+  stock_code: string
+  stock_name: string
+  entry_date: string
+  exit_date: string
+  entry_price: number
+  exit_price: number
+  pnl_pct: number
+  pnl_amount: number
+  hold_days: number
+}
+
+export interface BacktestResultDTO {
+  run_id: string
+  strategy_id: string
+  strategy_name: string
+  strategy_emoji: string
+  start_date: string
+  end_date: string
+  initial_capital: number
+  final_capital: number
+  total_return: number
+  annual_return: number
+  max_drawdown: number
+  sharpe_ratio: number
+  win_rate: number
+  total_trades: number
+  profit_trades: number
+  loss_trades: number
+  avg_hold_days: number
+  daily_equity: BacktestDailyEquityDTO[]
+  trades: BacktestTradeDTO[]
+  benchmark_return: number
+  alpha: number
+  beta: number
+  top_n: number
+  hold_days: number
+  created_at: string
+}
+
+export interface BacktestHistoryItemDTO {
+  run_id: string
+  strategy_id: string
+  strategy_name: string
+  strategy_emoji: string
+  start_date: string
+  end_date: string
+  total_return: number
+  max_drawdown: number
+  sharpe_ratio: number
+  created_at: string
+}
+
+export const backtestAPI = {
+  run: (params: BacktestParamsDTO) =>
+    fetchAPI<BacktestResultDTO>('/api/backtest/run', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+  history: () => fetchAPI<BacktestHistoryItemDTO[]>('/api/backtest/history'),
+  get: (runId: string) =>
+    fetchAPI<BacktestResultDTO>(`/api/backtest/${encodeURIComponent(runId)}`),
+}

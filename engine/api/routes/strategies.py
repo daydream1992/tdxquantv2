@@ -546,7 +546,25 @@ def _emit_selection_signal(state: Any, ctx: Any, sc: Any) -> None:
 
     event_id = str(uuid.uuid4())
     triggered_at = datetime.now()
-    channels = ["websocket", "csv_log"]  # 预留：未来消息总线扩展
+
+    # 从策略 YAML 的 monitor.alert_conditions 聚合 channels（取并集）
+    # 之前硬编码 ["websocket", "csv_log"]，QA 发现信号中心 channels 列与 YAML 不一致
+    channels: list[str] = []
+    try:
+        monitor = getattr(sc, "monitor", None)
+        if monitor is not None:
+            for cond in getattr(monitor, "alert_conditions", []) or []:
+                for ch in cond.get("channels", []) or []:
+                    if ch not in channels:
+                        channels.append(ch)
+    except Exception:  # noqa: BLE001
+        pass
+    # 至少包含 csv_log（审计要求）
+    if not channels:
+        channels = ["csv_log"]
+    if "csv_log" not in channels:
+        channels.append("csv_log")
+
     snapshot = {
         "run_id": ctx.run_id,
         "strategy_id": strategy_id,
@@ -554,6 +572,33 @@ def _emit_selection_signal(state: Any, ctx: Any, sc: Any) -> None:
         "duration_sec": ctx.duration_sec,
         "top_picks": top_names,
     }
+
+    # 构造统一 payload，分发到所有启用的通道
+    try:
+        from engine.channels import ChannelPayload, get_registry
+
+        payload = ChannelPayload(
+            signal_id=event_id,
+            signal_type="selection",
+            strategy_id=strategy_id,
+            strategy_name=strategy_name,
+            strategy_emoji=getattr(sc, "strategy_emoji", "") or "",
+            title=f"策略「{strategy_name}」选出 {n} 只标的",
+            content=summary,
+            severity="info",
+            priority="medium",
+            triggered_at=triggered_at,
+            extra={"snapshot": snapshot},
+        )
+        # 实际推送（csv_log 永远走，feishu/tdx_warn/websocket 按 enabled）
+        results = get_registry().dispatch(payload, channels=channels)
+        # 把成功推送的通道名回写到 channels_fired
+        fired = [r.channel for r in results if r.ok]
+        if not fired:
+            fired = channels  # fallback
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("通道分发失败，回退到默认 channels: %s", exc)
+        fired = channels
 
     # 写 DuckDB signal_events
     if storage is not None and hasattr(storage, "execute"):
@@ -572,7 +617,7 @@ def _emit_selection_signal(state: Any, ctx: Any, sc: Any) -> None:
             summary,
             json.dumps(snapshot, ensure_ascii=False),
             "info",
-            json.dumps(channels, ensure_ascii=False),
+            json.dumps(fired, ensure_ascii=False),
             triggered_at,
         ]
         try:

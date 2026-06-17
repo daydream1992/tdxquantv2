@@ -1,0 +1,2002 @@
+     1→# TdxQuant 量化交易系统改造 - 工作日志
+     2→
+     3→## 项目背景
+     4→- 用户上传了 TdxQuant 官方说明书（7z）和 V8_1 线下独立运行版选股系统（zip）
+     5→- 目标：摒弃 CSV 数据源，全面用 API 接口，选股逻辑不变，增加实盘监控能力
+     6→- 当前阶段：**文档知识体系建立**（不写代码，先建立完整知识框架）
+     7→
+     8→## 文档结构总览
+     9→解压位置：
+    10→- 说明书：`/home/z/my-project/docs/tdx-quant/通达信量化平台说明书/`
+    11→- V8选股系统：`/home/z/my-project/docs/v8-data/stock_selection_v8_1_standalone/`
+    12→
+    13→说明书文件清单（共 52 个 markdown + 1 个 py + 15 个 probe 脚本）：
+    14→- CLAUDE.md（核心 API 速查）
+    15→- tongdaxin_query.py（API 实现源码）
+    16→- a行情类信息/（8 篇）
+    17→- b财务类数据/（9 篇）
+    18→- c分类板块/（3 篇）
+    19→- d客户端操作类/（1 篇）
+    20→- e ETF/可转债/（2 篇）
+    21→- f 调用通达信公式/（7 篇）
+    22→- g场景化例子/（6 篇）
+    23→- 通用函数/（10 篇）
+    24→- probe_scripts/（15 个 .py 探针脚本 + 1 个 README）
+    25→
+    26→V8 选股系统文件清单：
+    27→- run.py / verify.py / merge.py / README.md
+    28→- data/ 目录含 8 个 CSV（L2快照/K线多个周期/行业分类/板块关系/名称映射）
+    29→
+    30→## 知识框架建立任务（Task 2-a ~ 2-j 并行）
+    31→每个子任务由独立子代理执行，产出结构化摘要追加到本日志。
+    32→
+    33→---
+    34→Task ID: 2-f
+    35→Agent: general-purpose
+    36→Task: 读取 g场景化例子 全部文档
+    37→
+    38→Work Log:
+    39→- 读取 7 个文档（任务描述写 6 篇，实际目录有 7 个 .md，已全部读完）
+    40→  1. 执行选股策略并加入客户端自定义板块.md
+    41→  2. 打通通达信量化任督二脉：公式与Python双向数据互通闭环.md
+    42→  3. FAQ常见问题与解决方案.md
+    43→  4. 订阅行情涨幅突破实时预警.md
+    44→  5. 计算调仓信号并快速买卖.md
+    45→  6. VBT简单回测并输出图形.md
+    46→  7. 通达信TQ策略介绍和应用示例.md
+    47→
+    48→Stage Summary:
+    49→
+    50→### 场景1: 执行选股策略并加入客户端自定义板块
+    51→
+    52→- **业务流程**:
+    53→  1. 从板块 `通达信88` 获取股票池
+    54→  2. 拉取历史日线 Close（前复权、填充缺失）
+    55→  3. 用 pandas + numpy 计算每只股票"连续上涨天数"（核心技巧：`up_mask` 上涨日置 1、非上涨置 NaN → `ffill` → `cumsum` → 在非上涨日处重置计数）
+    56→  4. 筛选"最新交易日连续上涨 ≥ N 天"的股票
+    57→  5. 调用 `tq.create_sector` 创建自定义板块
+    58→  6. 调用 `tq.send_user_block` 把股票列表推送到客户端板块（无符合则推空列表清空）
+    59→  7. 调用 `tq.send_message` 把 MSG 提示推送到 TQ 策略管理器
+    60→  8. 在客户端 `LZXG` 板块中查看结果
+    61→
+    62→- **完整代码示例**:
+    63→  ```python
+    64→  import pandas as pd
+    65→  import numpy as np
+    66→  from datetime import datetime
+    67→  from tqcenter import tq
+    68→
+    69→  # 初始化tq
+    70→  tq.initialize(__file__)
+    71→
+    72→  # 1. 基础配置（可修改项）
+    73→  batch_codes = tq.get_stock_list_in_sector('通达信88')    # 目标板块
+    74→  start_time = "20251025"                                  # 数据起始日期
+    75→  target_end = datetime.now().strftime("%Y%m%d")           # 数据结束日期（当前日期）
+    76→  N = 3                                                    # 目标连续上涨天数
+    77→  block_code = 'LZXG'                                      # 自定义板块简称（必选）
+    78→  block_name = '连涨选股'                                   # 自定义板块名称（必选）
+    79→
+    80→  # 2. 获取并整理收盘价数据
+    81→  df_real = tq.get_market_data(
+    82→      field_list=['Close'],
+    83→      stock_list=batch_codes,
+    84→      start_time=start_time,
+    85→      end_time=target_end,
+    86→      dividend_type='front',  # 前复权
+    87→      period='1d',            # 日线
+    88→      fill_data=True          # 填充缺失数据
+    89→  )
+    90→  # 转换为「日期×股票代码」的收盘价宽表
+    91→  close_df = tq.price_df(df_real, 'Close', column_names=batch_codes)
+    92→
+    93→  # 3. 标记每日是否上涨（核心判断逻辑）
+    94→  is_up = close_df > close_df.shift(1)  # True=当日上涨，False=当日非上涨
+    95→
+    96→  # 4. 核心：计算连续上涨天数
+    97→  # 步骤1：上涨日标记为1，非上涨日标记为NaN
+    98→  up_mask = np.where(is_up, 1, np.nan)
+    99→  up_mask_df = pd.DataFrame(up_mask, index=close_df.index, columns=close_df.columns)
+   100→
+   101→  # 步骤2：前向填充 → 连续上涨阶段的非上涨日（NaN）会被1填充
+   102→  filled_df = up_mask_df.ffill()
+   103→
+   104→  # 步骤3：累计非NaN值的数量（初步计数）
+   105→  consec_up_days = filled_df.notna().cumsum()
+   106→
+   107→  # 步骤4：非上涨日重置计数（关键步骤，实现"连续"效果）
+   108→  reset_counts = consec_up_days.where(~is_up).ffill().fillna(0)
+   109→  consec_up_days = (consec_up_days - reset_counts).astype(int)
+   110→
+   111→  # 5. 筛选符合条件的股票（连续上涨≥N天）
+   112→  latest_date = consec_up_days.index[-1]  # 最新交易日
+   113→  latest_consec_up = consec_up_days.loc[latest_date]  # 每只股票最新的连续上涨天数
+   114→  target_stocks = latest_consec_up[latest_consec_up >= N].sort_values(ascending=False)
+   115→  target_stocks_list = target_stocks.index.tolist()  # 提取符合条件的股票代码列表
+   116→
+   117→  # 6. 先创建自定义板块，再执行添加/清空操作
+   118→  print(f"\n=== 筛选结果（连续上涨≥{N}天）===")
+   119→  # 第一步：创建自定义板块
+   120→  try:
+   121→      tq.create_sector(block_code=block_code, block_name=block_name)
+   122→      print(f"✅ 已成功创建自定义板块「{block_name}（{block_code}）」")
+   123→  except Exception as e:
+   124→      # 板块已存在时可能报错，此处捕获异常不中断流程
+   125→      print(f"ℹ️  自定义板块创建提示：{e}（若提示已存在，可忽略此信息）")
+   126→
+   127→  # 第二步：处理板块成份股（添加/清空）
+   128→  if not target_stocks.empty:
+   129→      # 打印筛选结果
+   130→      print(f"符合条件的股票共 {len(target_stocks)} 只：")
+   131→      for stock_code, days in target_stocks.items():
+   132→          print(f"{stock_code}：连续上涨 {days} 天")
+   133→      
+   134→      # 发送至自定义板块
+   135→      try:
+   136→          tq.send_user_block(block_code=block_code, stocks=target_stocks_list)
+   137→          print(f"\n✅ 已成功将股票添加至自定义板块「{block_name}（{block_code}）」")
+   138→      except Exception as e:
+   139→          print(f"\n❌ 添加自定义板块失败：{e}")
+   140→      
+   141→      # 发送提示消息至TQ策略管理器
+   142→      msg = f"MSG,筛选结果：{start_time}至{target_end}，连续上涨≥{N}天的股票共{len(target_stocks)}只，已添加至「{block_name}（{block_code}）」"
+   143→      try:
+   144→          tq.send_message(msg)
+   145→          print("✅ 提示消息发送成功")
+   146→      except Exception as e:
+   147→          print(f"❌ 消息发送失败：{e}")
+   148→  else:
+   149→      # 无符合条件股票时清空板块
+   150→      print("暂无符合条件的股票")
+   151→      try:
+   152→          tq.send_user_block(block_code=block_code, stocks=[])
+   153→          print(f"✅ 已清空自定义板块「{block_name}（{block_code}）」")
+   154→      except Exception as e:
+   155→          print(f"❌ 清空自定义板块失败：{e}")
+   156→      
+   157→      # 发送空结果提示
+   158→      msg = f"MSG,筛选结果：{start_time}至{target_end}，连续上涨≥{N}天的股票共0只，已清空「{block_name}（{block_code}）」"
+   159→      try:
+   160→          tq.send_message(msg)
+   161→      except Exception as e:
+   162→          print(f"❌ 消息发送失败：{e}")
+   163→  ```
+   164→
+   165→- **涉及 API**: `tq.initialize` / `tq.get_stock_list_in_sector` / `tq.get_market_data` / `tq.price_df` / `tq.create_sector` / `tq.send_user_block` / `tq.send_message`
+   166→
+   167→---
+   168→
+   169→### 场景2: 公式与Python双向互通（4 个子示例）
+   170→
+   171→包含 4 个示例，覆盖"批量调用公式选股"和"实时预警"两条主线，是公式 API 实战全集。
+   172→
+   173→#### 2.1 利用 MACD 公式筛选金叉信号（批量处理版）
+   174→
+   175→- **业务流程**: 全市场 → `formula_process_mul_zb` 一次算全市场 MACD → 取 DIF/DEA 最后 2 个值 → 判断"昨日 DIF<DEA，今日 DIF>=DEA" → 推送到客户端自选股
+   176→- **完整代码**:
+   177→  ```python
+   178→  from tqcenter import tq
+   179→
+   180→  '''
+   181→      利用此示例需要先在客户端下载全A股盘后数据，不然结果不准确
+   182→      通过MACD指标公式选出最新交易日金叉的股票
+   183→  '''
+   184→
+   185→  tq.initialize(__file__)
+   186→
+   187→  # 先获取A股全部股票
+   188→  all_stocks = tq.get_stock_list(market='5')
+   189→
+   190→  print("正在处理，请等待...")
+   191→  import time
+   192→
+   193→  # 开始计时
+   194→  start_time = time.time()
+   195→
+   196→  macd_stocks = []
+   197→  mul_zb_result = tq.formula_process_mul_zb(
+   198→      formula_name='MACD',
+   199→      formula_arg='12,26,9',
+   200→      xsflag=6,
+   201→      return_count=2,
+   202→      return_date=False,
+   203→      stock_list=all_stocks,
+   204→      stock_period='1d',
+   205→      count=100,
+   206→      dividend_type=1)
+   207→
+   208→  if mul_zb_result:
+   209→      for key in mul_zb_result:
+   210→          if key != "ErrorId":
+   211→              if len(mul_zb_result[key]['DIF']) >= 2 and len(mul_zb_result[key]['DEA']) >= 2:
+   212→                  if float(mul_zb_result[key]['DIF'][-2]) < float(mul_zb_result[key]['DEA'][-2]) and float(mul_zb_result[key]['DIF'][-1]) >= float(mul_zb_result[key]['DEA'][-1]):
+   213→                      macd_stocks.append(key)
+   214→
+   215→  print("今日MACD金叉股票列表：")
+   216→  print(macd_stocks)
+   217→  print("符合MACD金叉条件的股票数量：", len(macd_stocks))
+   218→  # 结束计时
+   219→  end_time = time.time()
+   220→
+   221→  # 计算时间差
+   222→  execution_time = end_time - start_time
+   223→  print(f"执行时间: {execution_time:.6f} 秒")
+   224→  print(f"执行时间: {execution_time * 1000:.2f} 毫秒")
+   225→
+   226→  zxg_result = tq.send_user_block(block_code='', stocks=macd_stocks)
+   227→  ```
+   228→- **涉及 API**: `tq.get_stock_list` / `tq.formula_process_mul_zb` / `tq.send_user_block`
+   229→
+   230→#### 2.2 利用 MACD 公式筛选金叉信号（for 循环版）
+   231→
+   232→- **业务流程**: 逐只股票 → `formula_set_data_info` 设置股票数据上下文 → `formula_zb` 取 MACD → 判断金叉。适合小批量调试，可对比性能。
+   233→- **完整代码**:
+   234→  ```python
+   235→  from tqcenter import tq
+   236→
+   237→  '''
+   238→      利用此示例需要先在客户端下载全A股盘后数据，不然结果不准确
+   239→      通过MACD指标公式选出最新交易日金叉的股票
+   240→  '''
+   241→  tq.initialize(__file__)
+   242→
+   243→  # 先获取A股全部股票
+   244→  all_stocks = tq.get_stock_list(market='5')
+   245→
+   246→  print("正在处理，请等待...")
+   247→
+   248→  import time
+   249→
+   250→  # 开始计时
+   251→  start_time = time.time()
+   252→
+   253→  macd_stocks = []
+   254→
+   255→  for stock in all_stocks:
+   256→      try:
+   257→          # 1. 设置股票数据
+   258→          tq.formula_set_data_info(
+   259→              stock_code=stock,
+   260→              stock_period='1d',
+   261→              count=100,  # 需要足够的数据计算MACD
+   262→              dividend_type=1  # 前复权
+   263→          )
+   264→
+   265→          # 2. 获取MACD指标
+   266→          macd_result = tq.formula_zb(
+   267→              formula_name='MACD',
+   268→              formula_arg='12,26,9',
+   269→              xsflag=6
+   270→          )
+   271→
+   272→          # 3. 获取DIF和DEA值，判断金叉
+   273→          if macd_result and 'Data' in macd_result:
+   274→              dif_values = macd_result['Data']['DIF']
+   275→              dea_values = macd_result['Data']['DEA']
+   276→
+   277→              if len(dif_values) >= 2 and len(dea_values) >= 2:
+   278→                  dif_prev = float(dif_values[-2])  # 前一天的DIF
+   279→                  dif_now = float(dif_values[-1])   # 今天的DIF
+   280→                  dea_prev = float(dea_values[-2])  # 前一天的DEA
+   281→                  dea_now = float(dea_values[-1])   # 今天的DEA
+   282→
+   283→                  # MACD金叉信号：昨天DIF<DEA，今天DIF>=DEA
+   284→                  if dif_prev < dea_prev and dif_now >= dea_now:
+   285→                      macd_stocks.append(stock)
+   286→                      print(f"MACD金叉信号: {stock}, DIF: {dif_prev:.4f}→{dif_now:.4f}, DEA: {dea_prev:.4f}→{dea_now:.4f}")
+   287→
+   288→      except Exception as e:
+   289→          print(f"处理股票 {stock} 时出错: {e}")
+   290→          continue
+   291→
+   292→  print("今日MACD金叉股票列表：")
+   293→  print(macd_stocks)
+   294→  print("符合MACD金叉条件的股票数量：", len(macd_stocks))
+   295→
+   296→  # 结束计时
+   297→  end_time = time.time()
+   298→
+   299→  # 计算时间差
+   300→  execution_time = end_time - start_time
+   301→
+   302→  print(f"执行时间: {execution_time:.6f} 秒")
+   303→  print(f"执行时间: {execution_time * 1000:.2f} 毫秒")
+   304→
+   305→  zxg_result = tq.send_user_block(block_code='', stocks=macd_stocks)
+   306→  ```
+   307→- **涉及 API**: `tq.get_stock_list` / `tq.formula_set_data_info` / `tq.formula_zb` / `tq.send_user_block`
+   308→
+   309→#### 2.3 订阅方式实时预警（subscribe_hq 版）
+   310→
+   311→- **业务流程**: 取前 50 只股票（订阅上限 100）→ 注册 `subscribe_hq` 回调 → 回调内每 6 秒被触发 → 用 `formula_set_data_info` + `formula_xg('UPN','3')` 跑 UPN 选股 → 选出的股票通过 `get_market_data(count=2)` 拿最新价/昨收/成交量 → 调 `send_warn` 推预警到客户端。Ctrl+C 取消订阅。
+   312→- **完整代码**:
+   313→  ```python
+   314→  import datetime
+   315→  import json
+   316→  import sys
+   317→
+   318→  sys.path.append('C:/new_tdx_test2025/PYPlugins/user')
+   319→
+   320→  from tqcenter import tq
+   321→
+   322→  tq.initialize('订阅Handlebar.py')
+   323→
+   324→  """
+   325→  这里是外部运行的初始化模式把tqcenter目录加上，再import它，
+   326→  initialize参数为标准的.py文件名即可
+   327→  """
+   328→
+   329→  # 获取A股全部股票（测试时限制数量，订阅不能超过100只）
+   330→  all_stocks = tq.get_stock_list(market='5')[:50]
+   331→
+   332→
+   333→  def get_real_time_data(stock_code):
+   334→      """
+   335→      获取股票的实时行情数据
+   336→      根据通达信TQ接口文档，这里需要调用相应的数据获取函数
+   337→      """
+   338→      try:
+   339→          # 获取最近两天的数据，用于获取前一日收盘价
+   340→          market_data = tq.get_market_data(
+   341→              field_list=['Close', 'Volume'],
+   342→              stock_list=[stock_code],
+   343→              count=2,  # 获取2天数据，用于获取前一日收盘价
+   344→              period='1d',
+   345→              dividend_type='none',
+   346→              fill_data=True
+   347→          )
+   348→          if market_data and 'Close' in market_data:
+   349→              close_df = market_data['Close']
+   350→              if not close_df.empty:
+   351→                  # 获取最新收盘价
+   352→                  last_price = close_df.iloc[-1][stock_code]
+   353→                  # 获取前一日收盘价
+   354→                  if len(close_df) >= 2:
+   355→                      prev_close = close_df.iloc[-2][stock_code]
+   356→                  else:
+   357→                      prev_close = '0.00'
+   358→                  # 获取成交量
+   359→                  if 'Volume' in market_data:
+   360→                      volume_df = market_data['Volume']
+   361→                      volume = volume_df.iloc[-1][stock_code] if not volume_df.empty else '0'
+   362→                  else:
+   363→                      volume = '0'
+   364→
+   365→                  return str(last_price), str(prev_close), str(volume)
+   366→
+   367→      except Exception as e:
+   368→          print(f"获取{stock_code}实时数据失败: {e}")
+   369→
+   370→      return '0.00', '0.00', '0'
+   371→
+   372→
+   373→  def my_callback_func(data_str):
+   374→      print("Callback received data:", data_str)
+   375→      code_json = json.loads(data_str)
+   376→      print(f"codes = {code_json.get('Code')}")
+   377→
+   378→      upn_stocks = []  # 用于存放符合UPN公式选股条件的股票列表
+   379→      for stock in all_stocks:
+   380→          formula_set_res = tq.formula_set_data_info(
+   381→              stock_code=stock,
+   382→              stock_period='1d',
+   383→              count=20,
+   384→              dividend_type=1
+   385→          )
+   386→          if formula_set_res:
+   387→              # 使用UPN公式选股，参数'3'表示3日上涨
+   388→              formula_xg = tq.formula_xg(formula_name='UPN', formula_arg='3')
+   389→              print(f"formula_xg = {formula_xg}")
+   390→              if formula_xg and 'Data' in formula_xg and 'UP3' in formula_xg['Data']:
+   391→                  up3_data = formula_xg['Data']['UP3']
+   392→                  if up3_data and len(up3_data) > 0 and up3_data[-1] is not None:
+   393→                      if up3_data[-1] != '0':
+   394→                          upn_stocks.append(stock)
+   395→
+   396→      print("符合UPN公式选股条件的股票列表：")
+   397→      print(upn_stocks)
+   398→      print("符合UPN公式选股条件的股票数量：", len(upn_stocks))
+   399→
+   400→      # 为选出的股票发送预警
+   401→      if upn_stocks:
+   402→          send_warnings_for_stocks(upn_stocks)
+   403→
+   404→      return None
+   405→
+   406→
+   407→  def send_warnings_for_stocks(stock_list):
+   408→      """为股票列表发送预警信息"""
+   409→      if not stock_list:
+   410→          return
+   411→
+   412→      # 获取当前时间，格式化为YYYYMMDDHHMMSS
+   413→      current_time = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+   414→
+   415→      # 准备预警参数列表
+   416→      stock_count = len(stock_list)
+   417→
+   418→      # 初始化列表
+   419→      time_list = []
+   420→      price_list = []
+   421→      close_list = []
+   422→      volum_list = []
+   423→
+   424→      # 为每只股票获取实时数据
+   425→      for stock in stock_list:
+   426→          last_price, prev_close, volume = get_real_time_data(stock)
+   427→          time_list.append(current_time)
+   428→          price_list.append(last_price)
+   429→          close_list.append(prev_close)
+   430→          volum_list.append(volume)
+   431→
+   432→      # 其他固定参数
+   433→      reason_list = ["3天连涨"] * stock_count  # 根据实际选股条件修改
+   434→      bs_flag_list = ['0'] * stock_count  # 买卖标志：0
+   435→      warn_type_list = ['0'] * stock_count  # 预警类型：0
+   436→
+   437→      # 调用send_warn函数发送预警
+   438→      try:
+   439→          warn_res = tq.send_warn(
+   440→              stock_list=stock_list,
+   441→              time_list=time_list,
+   442→              price_list=price_list,
+   443→              close_list=close_list,
+   444→              volum_list=volum_list,
+   445→              bs_flag_list=bs_flag_list,
+   446→              warn_type_list=warn_type_list,
+   447→              reason_list=reason_list,
+   448→              count=stock_count
+   449→          )
+   450→          print("预警发送结果：", warn_res)
+   451→          # 预警发送成功后会在TQ策略信号窗口展示
+   452→          # 预警图标对应bs_flag_list的每个元素的整数值，0买为红色B，1卖为绿色S，2未知为黄色双叠三角形
+   453→          # 双击买卖预警信号记录可以直接打开闪电下单进行买卖操作
+   454→      except Exception as e:
+   455→          print(f"发送预警失败: {e}")
+   456→
+   457→
+   458→  # 订阅行情
+   459→  sub_hq = tq.subscribe_hq(stock_list=all_stocks, callback=my_callback_func)
+   460→  print("订阅结果：", sub_hq)
+   461→
+   462→  # 保持运行
+   463→  import time
+   464→
+   465→  try:
+   466→      print("程序运行中，按Ctrl+C停止...")
+   467→      while True:
+   468→          time.sleep(60)  # 每分钟检查一次
+   469→  except KeyboardInterrupt:
+   470→      print("程序终止")
+   471→      # 取消订阅
+   472→      if sub_hq:
+   473→          tq.unsubscribe_hq(stock_list=all_stocks)
+   474→
+   475→  tq.close()
+   476→  ```
+   477→- **涉及 API**: `tq.subscribe_hq` / `tq.unsubscribe_hq` / `tq.formula_set_data_info` / `tq.formula_xg` / `tq.get_market_data` / `tq.send_warn` / `tq.close`
+   478→
+   479→#### 2.4 定时器方式实时预警
+   480→
+   481→- **业务流程**: 每分钟 `time.sleep(60)` 跑一次 → 用 UPN 公式选股（全市场覆盖，可扩到几千只）→ 选出的逐只 `get_market_data(count=2)` 拿数据 → `send_warn` 推送。区别于 2.3：用主循环 sleep 取代订阅回调，可突破 100 只订阅限制。
+   482→- **完整代码**:
+   483→  ```python
+   484→  # 定时器实时预警
+   485→
+   486→  import datetime
+   487→  import json
+   488→  import sys
+   489→  import time
+   490→
+   491→  sys.path.append('C:/new_tdx_test2025/PYPlugins/user')
+   492→
+   493→  from tqcenter import tq
+   494→
+   495→  tq.initialize('定时器实时预警Handlebar效果.py')
+   496→
+   497→  # 获取A股全部股票（测试时限制数量）
+   498→  all_stocks = tq.get_stock_list(market='5')[:150]
+   499→
+   500→
+   501→  def get_real_time_data(stock_code):
+   502→      """
+   503→      获取股票的实时行情数据
+   504→      根据通达信TQ接口文档，这里需要调用相应的数据获取函数
+   505→      """
+   506→      try:
+   507→          # 获取最近两天的数据，用于获取前一日收盘价
+   508→          market_data = tq.get_market_data(
+   509→              field_list=['Close', 'Volume'],
+   510→              stock_list=[stock_code],
+   511→              count=2,  # 获取2天数据，用于获取前一日收盘价
+   512→              period='1d',
+   513→              dividend_type='none',
+   514→              fill_data=True
+   515→          )
+   516→          if market_data and 'Close' in market_data:
+   517→              close_df = market_data['Close']
+   518→              if not close_df.empty:
+   519→                  # 获取最新收盘价
+   520→                  last_price = close_df.iloc[-1][stock_code]
+   521→                  # 获取前一日收盘价
+   522→                  if len(close_df) >= 2:
+   523→                      prev_close = close_df.iloc[-2][stock_code]
+   524→                  else:
+   525→                      prev_close = '0.00'
+   526→                  # 获取成交量
+   527→                  if 'Volume' in market_data:
+   528→                      volume_df = market_data['Volume']
+   529→                      volume = volume_df.iloc[-1][stock_code] if not volume_df.empty else '0'
+   530→                  else:
+   531→                      volume = '0'
+   532→
+   533→                  return str(last_price), str(prev_close), str(volume)
+   534→
+   535→      except Exception as e:
+   536→          print(f"获取{stock_code}实时数据失败: {e}")
+   537→
+   538→      return '0.00', '0.00', '0'
+   539→
+   540→
+   541→  def run_upn_selection():
+   542→      """
+   543→      执行UPN公式选股并发送预警
+   544→      这个函数将每分钟执行一次
+   545→      """
+   546→      print(f"\n{'='*50}")
+   547→      print(f"执行时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+   548→      print(f"{'='*50}")
+   549→
+   550→      upn_stocks = []  # 用于存放符合UPN公式选股条件的股票列表
+   551→      for stock in all_stocks:
+   552→          formula_set_res = tq.formula_set_data_info(
+   553→              stock_code=stock,
+   554→              stock_period='1d',
+   555→              count=5,
+   556→              dividend_type=1
+   557→          )
+   558→          if formula_set_res:
+   559→              # 使用UPN公式选股，参数'3'表示3日上涨
+   560→              formula_xg = tq.formula_xg(formula_name='UPN', formula_arg='3')
+   561→              if formula_xg and 'Data' in formula_xg and 'UP3' in formula_xg['Data']:
+   562→                  up3_data = formula_xg['Data']['UP3']
+   563→                  if up3_data and len(up3_data) > 0 and up3_data[-1] is not None:
+   564→                      if up3_data[-1] != '0':
+   565→                          upn_stocks.append(stock)
+   566→
+   567→      print("符合UPN公式选股条件的股票列表：")
+   568→      print(upn_stocks)
+   569→      print("符合UPN公式选股条件的股票数量：", len(upn_stocks))
+   570→
+   571→      # 为选出的股票发送预警
+   572→      if upn_stocks:
+   573→          send_warnings_for_stocks(upn_stocks)
+   574→      else:
+   575→          print("本次选股未发现符合条件的股票")
+   576→
+   577→
+   578→  def send_warnings_for_stocks(stock_list):
+   579→      """为股票列表发送预警信息"""
+   580→      if not stock_list:
+   581→          return
+   582→
+   583→      # 获取当前时间，格式化为YYYYMMDDHHMMSS
+   584→      current_time = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+   585→
+   586→      # 准备预警参数列表
+   587→      stock_count = len(stock_list)
+   588→
+   589→      # 初始化列表
+   590→      time_list = []
+   591→      price_list = []
+   592→      close_list = []
+   593→      volum_list = []
+   594→
+   595→      # 为每只股票获取实时数据
+   596→      for stock in stock_list:
+   597→          last_price, prev_close, volume = get_real_time_data(stock)
+   598→          time_list.append(current_time)
+   599→          price_list.append(last_price)
+   600→          close_list.append(prev_close)
+   601→          volum_list.append(volume)
+   602→
+   603→      # 其他固定参数
+   604→      reason_list = ["3天连涨"] * stock_count  # 根据实际选股条件修改
+   605→      bs_flag_list = ['0'] * stock_count  # 买卖标志：0
+   606→      warn_type_list = ['0'] * stock_count  # 预警类型：0
+   607→
+   608→      # 调用send_warn函数发送预警
+   609→      try:
+   610→          warn_res = tq.send_warn(
+   611→              stock_list=stock_list,
+   612→              time_list=time_list,
+   613→              price_list=price_list,
+   614→              close_list=close_list,
+   615→              volum_list=volum_list,
+   616→              bs_flag_list=bs_flag_list,
+   617→              warn_type_list=warn_type_list,
+   618→              reason_list=reason_list,
+   619→              count=stock_count
+   620→          )
+   621→          print("预警发送结果：", warn_res)
+   622→          # 预警发送成功后会在TQ策略信号窗口展示
+   623→          # 预警图标对应bs_flag_list的每个元素的整数值，0买为红色B，1卖为绿色S，2未知为黄色双叠三角形
+   624→          # 双击买卖预警信号记录可以直接打开闪电下单进行买卖操作
+   625→      except Exception as e:
+   626→          print(f"发送预警失败: {e}")
+   627→
+   628→
+   629→  # 主循环：每分钟执行一次选股
+   630→  def main_loop():
+   631→      """
+   632→      主循环函数，每分钟执行一次选股
+   633→      使用time.sleep()实现定时执行
+   634→      """
+   635→      print("UPN选股预警系统启动")
+   636→      print(f"开始时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+   637→      print(f"监控股票数量: {len(all_stocks)}")
+   638→      print("="*50)
+   639→
+   640→      execution_count = 0
+   641→      try:
+   642→          while True:
+   643→              execution_count += 1
+   644→              print(f"\n第{execution_count}次执行选股...")
+   645→              # 执行选股逻辑
+   646→              run_upn_selection()
+   647→              # 计算下次执行时间
+   648→              next_time = datetime.datetime.now() + datetime.timedelta(minutes=1)
+   649→              print(f"下次执行时间: {next_time.strftime('%Y-%m-%d %H:%M:%S')}")
+   650→              # 等待60秒
+   651→              time.sleep(60)
+   652→      except KeyboardInterrupt:
+   653→          print("\n程序被用户中断")
+   654→      except Exception as e:
+   655→          print(f"程序运行出错: {e}")
+   656→      finally:
+   657→          print("UPN选股预警系统已停止")
+   658→
+   659→
+   660→  # 启动主循环
+   661→  if __name__ == "__main__":
+   662→      main_loop()
+   663→  ```
+   664→
+   665→#### 2.5 利用 UPN 公式筛选连涨股（批量处理版）
+   666→
+   667→- **业务流程**: `formula_process_mul_xg('UPN','3')` 一次算全市场 → 每只股票取 UP3 序列最后一个值，为 '1' 即为连涨 → 推送到自选股
+   668→- **完整代码**:
+   669→  ```python
+   670→  from tqcenter import tq
+   671→
+   672→  import time
+   673→
+   674→  '''
+   675→      利用此示例需要先在客户端下载全A股盘后数据，不然结果不准确
+   676→  '''
+   677→
+   678→  tq.initialize(__file__)
+   679→
+   680→  # 先获取A股全部股票
+   681→  all_stocks = tq.get_stock_list(market='5')
+   682→
+   683→  print("正在处理，请等待...")
+   684→
+   685→  upn_stocks = []
+   686→
+   687→  mul_xg_result = tq.formula_process_mul_xg(
+   688→      formula_name='UPN',
+   689→      formula_arg='3',
+   690→      return_count=1,
+   691→      return_date=False,
+   692→      stock_list=all_stocks,
+   693→      stock_period='1d',
+   694→      count=5,
+   695→      dividend_type=1)
+   696→
+   697→  if mul_xg_result:
+   698→      for key in mul_xg_result:
+   699→          if key != "ErrorId":
+   700→              if mul_xg_result[key]['UP3'] and mul_xg_result[key]['UP3'][-1] == '1':
+   701→                  upn_stocks.append(key)
+   702→
+   703→  print("符合UPN公式选股条件的股票列表：")
+   704→  print(upn_stocks)
+   705→  print("符合UPN公式选股条件的股票数量：", len(upn_stocks))
+   706→
+   707→  zxg_result = tq.send_user_block(block_code='', stocks=upn_stocks)
+   708→  ```
+   709→- **涉及 API**: `tq.get_stock_list` / `tq.formula_process_mul_xg` / `tq.send_user_block`
+   710→
+   711→---
+   712→
+   713→### 场景3: 订阅行情涨幅突破实时预警（实时监控关键参考）
+   714→
+   715→- **订阅模式**:
+   716→  - 从板块（`通达信88`）取股票池，**分批 50 只一组**调 `tq.subscribe_hq`（规避单次订阅过多/订阅上限）
+   717→  - 回调函数 `price_rise_callback` 接收 JSON 字符串（含 `Code`/`ErrorId`）
+   718→  - 回调内调 `tq.get_full_tick(code)` 取最新快照（`Now`/`LastClose`/`Volume`）
+   719→  - 计算 `rise_rate = (latest_price - pre_close) / pre_close * 100`
+   720→  - 超过 `PRICE_RISE_THRESHOLD=5.0%` 触发预警
+   721→- **回调机制**:
+   722→  - **前置过滤**: 非监控股票、已触发股票、`ErrorId != "0"`、无效价格 → 直接 return
+   723→  - **防抖**: `last_warn_time` defaultdict 记录每只股票上次触发时间，10 秒内不重复推送
+   724→  - **首次触发即退订**: 把股票加入 `TRIGGERED_STOCKS` set → 调 `unsubscribe_single_stock` 取消该股票订阅（避免重复监控/推送）
+   725→  - **信号处理**: `signal.signal(SIGINT, signal_handler)` 捕获 Ctrl+C → 强制 `unsubscribe_stocks` 清理资源 → `sys.exit(0)`
+   726→- **完整代码**:
+   727→  ```python
+   728→  import json
+   729→  import time
+   730→  import signal
+   731→  import sys
+   732→  from datetime import datetime, timedelta
+   733→  from collections import defaultdict
+   734→  from tqcenter import tq
+   735→
+   736→  # ===================== 全局配置 =====================
+   737→  # 板块配置：支持多个板块/自定义板块
+   738→  SECTOR_NAMES = ['通达信88']  # 可扩展为其他板块名称或代码
+   739→  PRICE_RISE_THRESHOLD = 5.0  # 涨幅阈值>5%
+   740→  ANTI_SHAKE_SECONDS = 10      # 防抖间隔
+   741→  BATCH_SUBSCRIBE_SIZE = 50    # 分批订阅大小（避免单次订阅过多）
+   742→
+   743→  # 全局变量
+   744→  SUBSCRIBE_CODES = []         # 动态获取的监控股票列表
+   745→  last_warn_time = defaultdict(int)
+   746→  EXIT_FLAG = False
+   747→  TRIGGERED_STOCKS = set()     # 记录已首次触发预警的股票（避免重复监控/推送）
+   748→
+   749→  # ===================== 信号处理函数 =====================
+   750→  def signal_handler(signum, frame):
+   751→      """处理 Ctrl+C（SIGINT）信号"""
+   752→      global EXIT_FLAG
+   753→      print(f"\n\n[{datetime.now().strftime('%H:%M:%S')}] 接收到退出信号（Ctrl+C），开始清理资源...")
+   754→      EXIT_FLAG = True
+   755→      # 强制取消订阅+关闭 TDX
+   756→      try:
+   757→          unsubscribe_stocks()
+   758→      except Exception as e:
+   759→          print(f"取消订阅失败：{e}")
+   760→      print("资源清理完成，程序退出！")
+   761→      sys.exit(0)
+   762→
+   763→  # ===================== 工具函数 =====================
+   764→  def get_valid_stock_codes(sector_names):
+   765→      """
+   766→      从指定板块获取有效股票代码列表
+   767→      :param sector_names: 板块名称列表
+   768→      :return: 去重后的有效股票代码列表
+   769→      """
+   770→      valid_codes = set()  # 用集合去重
+   771→      for sector in sector_names:
+   772→          try:
+   773→              # 获取板块股票列表（TDX 初始化后调用）
+   774→              sector_codes = tq.get_stock_list_in_sector(sector)
+   775→              if not sector_codes:
+   776→                  print(f"[{datetime.now().strftime('%H:%M:%S')}] 警告：板块{sector}未获取到股票列表")
+   777→                  continue
+   778→
+   779→              # 过滤无效代码（空值、格式错误）
+   780→              for code in sector_codes:
+   781→                  if code and isinstance(code, str) and (code.endswith('.SH') or code.endswith('.SZ')):
+   782→                      valid_codes.add(code)
+   783→                  else:
+   784→                      print(f"[{datetime.now().strftime('%H:%M:%S')}] 过滤无效代码：{code}")
+   785→
+   786→          except Exception as e:
+   787→              print(f"[{datetime.now().strftime('%H:%M:%S')}] 获取板块{sector}股票列表失败：{e}")
+   788→              import traceback
+   789→              traceback.print_exc()
+   790→
+   791→      # 转为列表并排序
+   792→      valid_codes_list = sorted(list(valid_codes))
+   793→      print(f"[{datetime.now().strftime('%H:%M:%S')}] 从板块{sector_names}获取到有效股票{len(valid_codes_list)}只：{valid_codes_list[:10]}...")
+   794→      return valid_codes_list
+   795→
+   796→
+   797→  def batch_subscribe(stocks, batch_size):
+   798→      """
+   799→      分批订阅股票（避免单次订阅过多）
+   800→      :param stocks: 股票列表
+   801→      :param batch_size: 每批订阅数量
+   802→      :return: 整体订阅结果（True/False）
+   803→      """
+   804→      total_success = True
+   805→      for i in range(0, len(stocks), batch_size):
+   806→          batch = stocks[i:i+batch_size]
+   807→          try:
+   808→              print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 订阅第{i//batch_size + 1}批股票（{len(batch)}只）：{batch[:5]}...")
+   809→              sub_res = tq.subscribe_hq(stock_list=batch, callback=price_rise_callback)
+   810→              if not sub_res:
+   811→                  print(f"[{datetime.now().strftime('%H:%M:%S')}] 第{i//batch_size + 1}批订阅失败：{sub_res}")
+   812→                  total_success = False
+   813→              else:
+   814→                  print(f"[{datetime.now().strftime('%H:%M:%S')}] 第{i//batch_size + 1}批订阅成功：{sub_res}")
+   815→          except Exception as e:
+   816→              print(f"[{datetime.now().strftime('%H:%M:%S')}] 第{i//batch_size + 1}批订阅异常：{e}")
+   817→              total_success = False
+   818→      return total_success
+   819→
+   820→
+   821→  def unsubscribe_single_stock(stock_code):
+   822→      """
+   823→      取消单只股票的订阅（首次触发后不再监控）
+   824→      :param stock_code: 股票代码
+   825→      :return: 取消结果（True/False）
+   826→      """
+   827→      try:
+   828→          un_sub_res = tq.unsubscribe_hq(stock_list=[stock_code])
+   829→          if un_sub_res:
+   830→              # 从全局订阅列表中移除
+   831→              if stock_code in SUBSCRIBE_CODES:
+   832→                  SUBSCRIBE_CODES.remove(stock_code)
+   833→              return True
+   834→          return False
+   835→      except Exception as e:
+   836→          print(f"[{datetime.now().strftime('%H:%M:%S')}] 取消{stock_code}订阅失败：{e}")
+   837→          return False
+   838→
+   839→
+   840→  # ===================== 核心回调函数 =====================
+   841→  def price_rise_callback(data_str):
+   842→      try:
+   843→          code_json = json.loads(data_str)
+   844→          code = code_json.get('Code')
+   845→
+   846→          # 前置过滤：无效数据/非监控股票/已触发过的股票
+   847→          if (code_json.get('ErrorId') != "0" or not code) or \
+   848→             (code not in SUBSCRIBE_CODES) or \
+   849→             (code in TRIGGERED_STOCKS):
+   850→              return
+   851→
+   852→          # 获取最新行情数据
+   853→          report_ptr = tq.get_full_tick(code)
+   854→
+   855→          latest_price = 0.0
+   856→          pre_close = 0.0
+   857→
+   858→          if report_ptr:
+   859→              latest_price = round(float(report_ptr['Now']), 2)
+   860→              pre_close = round(float(report_ptr['LastClose']), 2)
+   861→
+   862→              if pre_close <= 0 and latest_price > 0:
+   863→                  pre_close = latest_price - 0.01
+   864→
+   865→          # 过滤最新价/昨收价无效的情况
+   866→          if latest_price <= 0 or pre_close <= 0:
+   867→              return
+   868→
+   869→          # 计算涨幅
+   870→          rise_rate = round(((latest_price - pre_close) / pre_close) * 100, 2) if pre_close > 0 else 0.0
+   871→
+   872→          # 仅处理满足涨幅阈值+防抖的情况
+   873→          if rise_rate > PRICE_RISE_THRESHOLD:
+   874→              current_time = int(time.time())
+   875→              if current_time - last_warn_time[code] < ANTI_SHAKE_SECONDS:
+   876→                  return
+   877→
+   878→              # 标记为已触发，后续不再处理
+   879→              TRIGGERED_STOCKS.add(code)
+   880→              last_warn_time[code] = current_time
+   881→
+   882→              # 取消该股票的订阅（不再监控）
+   883→              unsubscribe_single_stock(code)
+   884→
+   885→              # 发送预警
+   886→              warn_time = datetime.now().strftime("%Y%m%d%H%M%S")
+   887→              reason = "涨幅突破"
+   888→
+   889→              try:
+   890→                  # 成交量用实际值，无则填0
+   891→                  volume = report_ptr.get('Volume', '0') if report_ptr else '0'
+   892→                  warn_res = tq.send_warn(
+   893→                      stock_list=[code],
+   894→                      time_list=[warn_time],
+   895→                      price_list=[str(latest_price)],
+   896→                      close_list=[str(pre_close)],
+   897→                      volum_list=[volume])
+   898→                  print(f"[{datetime.now().strftime('%H:%M:%S')}] 预警已发送：{code} 涨幅{rise_rate}%")
+   899→              except Exception as e:
+   900→                  print(f"[{datetime.now().strftime('%H:%M:%S')}] 发送预警失败：{e}")
+   901→
+   902→      except Exception as e:
+   903→          print(f"[{datetime.now().strftime('%H:%M:%S')}] 回调处理异常：{e}")
+   904→
+   905→
+   906→  # ===================== 主函数 =====================
+   907→  def main():
+   908→      # 注册信号处理器
+   909→      signal.signal(signal.SIGINT, signal_handler)
+   910→
+   911→      # 初始化通达信
+   912→      tq.initialize(__file__)
+   913→
+   914→      # 获取监控股票列表
+   915→      global SUBSCRIBE_CODES
+   916→      SUBSCRIBE_CODES = get_valid_stock_codes(SECTOR_NAMES)
+   917→
+   918→      if not SUBSCRIBE_CODES:
+   919→          print("未获取到有效股票代码，程序退出")
+   920→          return
+   921→
+   922→      # 分批订阅
+   923→      print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 开始订阅{len(SUBSCRIBE_CODES)}只股票...")
+   924→      batch_subscribe(SUBSCRIBE_CODES, BATCH_SUBSCRIBE_SIZE)
+   925→
+   926→      # 保持程序运行
+   927→      print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 订阅完成，进入监控模式（按 Ctrl+C 退出）...")
+   928→      while not EXIT_FLAG:
+   929→          time.sleep(1)
+   930→
+   931→      print("程序已退出")
+   932→
+   933→
+   934→  if __name__ == "__main__":
+   935→      main()
+   936→  ```
+   937→- **涉及 API**:
+   938→  | API | 用途 |
+   939→  |-----|------|
+   940→  | `tq.initialize(__file__)` | 初始化通达信量化平台 |
+   941→  | `tq.get_stock_list_in_sector()` | 获取板块成份股 |
+   942→  | `tq.subscribe_hq()` | 订阅行情（支持回调函数） |
+   943→  | `tq.unsubscribe_hq()` | 取消订阅行情 |
+   944→  | `tq.get_full_tick()` | 获取最新快照数据（Now/LastClose/Volume） |
+   945→  | `tq.send_warn()` | 发送预警到客户端 |
+   946→
+   947→---
+   948→
+   949→### 场景4: 计算调仓信号并快速买卖（实盘交易关键参考）
+   950→
+   951→> ⚠️ 注意：本文档名为"快速买卖"但实际只演示了**信号计算 + MSG 推送 + send_warn 预警**，**没有出现真正下单 API**（如 `place_order`）。真正的下单是通过 `send_warn` 推送买卖预警到客户端，用户**双击预警记录打开闪电下单**完成交易。这是 TdxQuant 当前的"半自动"模式。
+   952→
+   953→- **下单 API**: 实际无直接下单 API；通过 `send_warn(bs_flag_list=['0'买/'1'卖])` 推送买卖预警，用户在客户端双击预警调用闪电下单
+   954→- **委托管理**: 文档未涉及委托查询/撤单 API（推测需查 d客户端操作类 或 通用函数 文档）
+   955→- **业务流程**:
+   956→  1. 取板块 `通达信88` 股票池，回算 start_date = 今天 - (2*N+20) 天
+   957→  2. `get_market_data` 取前复权 Close → `price_df` 转宽表
+   958→  3. 用 `vbt.MA.run` 算 N 日均线；`close_df.vbt.crossed_above(ma)` / `crossed_below(ma)` 生成买入/卖出信号
+   959→  4. 遍历股票，提取 latest_date 当天的 buy_signals / sell_signals（含 today_close / prev_close / ma_price）
+   960→  5. `send_message("MSG,...")` 把统计行+信号明细推送到 TQ 策略管理器
+   961→  6. `send_warn(bs_flag_list='0'买/'1'卖, warn_type_list='1')` 推买卖预警到客户端
+   962→- **完整代码**:
+   963→  ```python
+   964→  from datetime import datetime, timedelta
+   965→  from tqcenter import tq as tdxdata
+   966→  import vectorbt as vbt
+   967→  import pandas as pd
+   968→
+   969→  # 初始化
+   970→  tdxdata.initialize(__file__)
+   971→  run_time = datetime.now()
+   972→  run_time_str = run_time.strftime("%Y-%m-%d %H:%M:%S")
+   973→  # 预警时间戳（格式：YYYYMMDDHHMMSS）
+   974→  warn_time = run_time.strftime("%Y%m%d%H%M%S")
+   975→
+   976→  # ===================== 1. 配置参数 =====================
+   977→  N = 5  # 均线周期
+   978→  batch_codes = tdxdata.get_stock_list_in_sector('通达信88')
+   979→  end_date = run_time.strftime("%Y%m%d")
+   980→  start_date = (run_time - timedelta(days=2 * N + 20)).strftime("%Y%m%d")
+   981→
+   982→  # ===================== 2. 获取并处理数据 =====================
+   983→  # 获取日线Close数据（保留完整索引用于日期筛选）
+   984→  df_real = tdxdata.get_market_data(
+   985→      field_list=['Close'],
+   986→      stock_list=batch_codes,
+   987→      start_time=start_date,
+   988→      end_time=end_date,
+   989→      dividend_type='front',
+   990→      period='1d',
+   991→      fill_data=True
+   992→  )
+   993→  close_df = tdxdata.price_df(df_real, 'Close', column_names=batch_codes)
+   994→
+   995→  # 计算均线+生成信号
+   996→  ma = vbt.MA.run(close_df, window=N).ma
+   997→  ma.columns = close_df.columns
+   998→  entries = close_df.vbt.crossed_above(ma)  # 上穿（买入）
+   999→  exits = close_df.vbt.crossed_below(ma)    # 下穿（卖出）
+  1000→  latest_date = close_df.index[-1]  # 今日日期（DataFrame最后一行）
+  1001→  # 获取上一个工作日日期
+  1002→  prev_date = close_df.index[-2] if len(close_df.index) >= 2 else latest_date
+  1003→
+  1004→  # ===================== 3. 筛选最新买卖信号 =====================
+  1005→  buy_signals = {}
+  1006→  sell_signals = {}
+  1007→
+  1008→  # 遍历股票筛选信号
+  1009→  for code in batch_codes:
+  1010→      # 确保股票有足够的交易数据
+  1011→      if code not in close_df.columns:
+  1012→          continue
+  1013→      
+  1014→      # 今日收盘价
+  1015→      today_close = close_df.loc[latest_date, code]
+  1016→      # 上一个工作日收盘价
+  1017→      prev_close = close_df.loc[prev_date, code] if len(close_df.index) >= 2 else today_close
+  1018→      
+  1019→      # 买入信号：最新日期Close上穿均线
+  1020→      if entries.loc[latest_date, code]:
+  1021→          buy_signals[code] = {
+  1022→              'today_close': round(today_close, 2),    # 今日close
+  1023→              'prev_close': round(prev_close, 2),      # 上一个工作日close
+  1024→              'ma_price': round(ma.loc[latest_date, code], 2)
+  1025→          }
+  1026→      # 卖出信号：最新日期Close下穿均线
+  1027→      if exits.loc[latest_date, code]:
+  1028→          sell_signals[code] = {
+  1029→              'today_close': round(today_close, 2),    # 今日close
+  1030→              'prev_close': round(prev_close, 2),      # 上一个工作日close
+  1031→              'ma_price': round(ma.loc[latest_date, code], 2)
+  1032→          }
+  1033→
+  1034→  # ===================== 4. 生成并发送MSG =====================
+  1035→  def send_msg(content):
+  1036→      msg = f"MSG,{content}"
+  1037→      print(msg)
+  1038→      try:
+  1039→          tdxdata.send_message(msg)
+  1040→      except Exception as e:
+  1041→          print(f"发送失败: {e}")
+  1042→
+  1043→  # 统计行
+  1044→  stat_line = (
+  1045→      f"运行时间：{run_time_str}，均线周期：{N}天，"
+  1046→      f"买入信号数：{len(buy_signals)} 只，卖出信号数：{len(sell_signals)} 只"
+  1047→  )
+  1048→
+  1049→  print("\n=== MSG格式（TQ策略管理器显示区域）===")
+  1050→  send_msg(stat_line)
+  1051→
+  1052→  # 处理买入信号
+  1053→  if buy_signals:
+  1054→      send_msg(f"=== 买入信号（Close上穿{N}日均线）===")
+  1055→      for idx, (code, info) in enumerate(buy_signals.items(), 1):
+  1056→          line = f"{idx}. {code}：买入信号，今日Close:{info['today_close']}，昨日Close:{info['prev_close']}"
+  1057→          send_msg(line)
+  1058→
+  1059→  # 处理卖出信号
+  1060→  if sell_signals:
+  1061→      send_msg(f"=== 卖出信号（Close下穿{N}日均线）===")
+  1062→      for idx, (code, info) in enumerate(sell_signals.items(), 1):
+  1063→          line = f"{idx}. {code}：卖出信号，今日Close:{info['today_close']}，昨日Close:{info['prev_close']}"
+  1064→          send_msg(line)
+  1065→
+  1066→  # 无信号的情况
+  1067→  if not buy_signals and not sell_signals:
+  1068→      send_msg(f"运行时间：{run_time_str}，均线周期：{N}天，无买入或卖出信号")
+  1069→
+  1070→  # ===================== 5. 调用send_warn接口发送预警 =====================
+  1071→  def send_trade_warn():
+  1072→      """发送买卖信号对应的预警（精简版，仅保留核心逻辑）"""
+  1073→      # 合并所有信号用于发送预警
+  1074→      all_signals = []
+  1075→      if buy_signals:
+  1076→          all_signals.extend([(code, info, '买入') for code, info in buy_signals.items()])
+  1077→      if sell_signals:
+  1078→          all_signals.extend([(code, info, '卖出') for code, info in sell_signals.items()])
+  1079→      
+  1080→      if not all_signals:
+  1081→          print("\n无预警信息需要发送")
+  1082→          return
+  1083→      
+  1084→      # 构造预警参数列表
+  1085→      codes = []
+  1086→      time_list = []
+  1087→      price_list = []       # 今日close
+  1088→      close_list = []       # 上一个工作日close
+  1089→      volum_list = []
+  1090→      bs_flag_list = []
+  1091→      warn_type_list = []
+  1092→      reason_list = []
+  1093→      
+  1094→      for code, info, trade_type in all_signals:
+  1095→          codes.append(code)
+  1096→          time_list.append(warn_time)
+  1097→          price_list.append(str(info['today_close']))    # 替换为今日close
+  1098→          close_list.append(str(info['prev_close']))     # 替换为上一个工作日close
+  1099→          volum_list.append('0')
+  1100→          bs_flag_list.append('0' if trade_type == '买入' else '1')
+  1101→          warn_type_list.append('1')
+  1102→          reason_list.append(f"{trade_type}信号")
+  1103→      
+  1104→      # 调用预警接口
+  1105→      try:
+  1106→          warn_res = tdxdata.send_warn(
+  1107→              stock_list=codes,
+  1108→              time_list=time_list,
+  1109→              price_list=price_list,
+  1110→              close_list=close_list,
+  1111→              volum_list=volum_list,
+  1112→              bs_flag_list=bs_flag_list,
+  1113→              warn_type_list=warn_type_list,
+  1114→              reason_list=reason_list,
+  1115→              count=len(codes)
+  1116→          )
+  1117→          print(f"\n预警发送完成，共发送 {len(codes)} 条预警，接口返回：{warn_res}")
+  1118→      except Exception as e:
+  1119→          print(f"\n预警发送失败：{e}")
+  1120→
+  1121→  # 执行预警发送
+  1122→  send_trade_warn()
+  1123→
+  1124→  print("\n所有消息发送完成！")
+  1125→  tdxdata.close()
+  1126→  ```
+  1127→- **涉及 API**: `tq.initialize` / `tq.get_stock_list_in_sector` / `tq.get_market_data` / `tq.price_df` / `tq.send_message` / `tq.send_warn`（bs_flag: 0买1卖2未知；warn_type: 1表示买卖信号） / `tq.close`
+  1128→
+  1129→---
+  1130→
+  1131→### 场景5: VBT 简单回测（回测引擎参考）
+  1132→
+  1133→- **回测流程**:
+  1134→  1. 多取 `window + 10` 天历史数据用于 MA 预热
+  1135→  2. `tq.get_market_data(field_list=['Close','Open'], dividend_type='front')` → `price_df` 转宽表
+  1136→  3. `vbt.MA.run(close_df, window=window).ma.ffill()` 计算均线
+  1137→  4. **信号延迟一天** `close_df.vbt.crossed_above(ma5).shift(1).fillna(False).astype(bool)` —— 防止未来函数
+  1138→  5. `vbt.Portfolio.from_signals(close=close_df, entries=, exits=, price=open_df, init_cash=100000, fees=0.0003, freq='D', size_granularity=100)` 执行回测（A 股最小 100 股）
+  1139→  6. `portfolio[stock].plot().show()` 交互式图形
+  1140→  7. `portfolio.stats()` 输出统计指标；`portfolio.trades.records_readable` 输出交易记录
+  1141→- **注意**: VBT 的 `Portfolio.from_signals` **不支持分红送股等权益变动**，官方明确说仅做示例。如需精确回测，应用前复权价格且仅做短线回测，或改用场景6 的 `send_bt_data` 自定义回测。
+  1142→- **完整代码**:
+  1143→  ```python
+  1144→  import pandas as pd
+  1145→  import vectorbt as vbt
+  1146→  from tqcenter import tq
+  1147→  from datetime import datetime
+  1148→
+  1149→  tq.initialize(__file__)
+  1150→
+  1151→  # 解决 pandas future warning
+  1152→  pd.set_option('future.no_silent_downcasting', True)
+  1153→  pd.set_option('display.float_format', lambda x: f"{x:.10f}".rstrip('0').rstrip('.') if '.' in f"{x:.10f}" else f"{x}")
+  1154→
+  1155→  # ========================= 核心配置（用户可直接修改这里）=========================
+  1156→  target_start = '20250701'  # 【目标回测开始时间】（真正想回测的起始日）
+  1157→  target_end = '20251231'    # 【目标回测结束时间】
+  1158→  stock_code_list = ['688318.SH']     # 股票代码
+  1159→  window = 5         # MA 指标周期（如 MA5、MA10、MA20，改这里自动适配历史数据）
+  1160→  # ==========================================================
+  1161→  start_time = (pd.to_datetime(target_start) - pd.Timedelta(days=window + 10)).strftime('%Y%m%d')
+  1162→
+  1163→  # 1. 获取价格数据
+  1164→  df_real = tq.get_market_data(
+  1165→      field_list=['Close', 'Open'],
+  1166→      stock_list=stock_code_list,
+  1167→      start_time=start_time,
+  1168→      end_time=target_end,
+  1169→      dividend_type='front',
+  1170→      period='1d',
+  1171→      fill_data=True
+  1172→  )
+  1173→  close_df = tq.price_df(df_real, 'Close', column_names=stock_code_list)
+  1174→  open_df = tq.price_df(df_real, 'Open', column_names=stock_code_list)
+  1175→
+  1176→  # 2. 买卖信号计算与生成
+  1177→  ma5_dynamic = vbt.MA.run(close_df, window=window).ma.ffill()
+  1178→  ma5_dynamic.columns = close_df.columns
+  1179→
+  1180→  entries_df = close_df.vbt.crossed_above(ma5_dynamic).shift(1).fillna(False).astype(bool)
+  1181→  exits_df = close_df.vbt.crossed_below(ma5_dynamic).shift(1).fillna(False).astype(bool)
+  1182→
+  1183→  print(f"\n信号生成统计:")
+  1184→  print(f"买入信号总数: {entries_df.sum().sum()}")
+  1185→  print(f"卖出信号总数: {exits_df.sum().sum()}")
+  1186→
+  1187→  # 3. 执行回测
+  1188→  portfolio = vbt.Portfolio.from_signals(
+  1189→      close=close_df,             # 净值计算用未复权收盘价
+  1190→      entries=entries_df,         # 延迟后的买入信号
+  1191→      exits=exits_df,             # 延迟后的卖出信号
+  1192→      price=open_df,              # 含滑点的成交价格
+  1193→      init_cash=100000,           # 初始资金 10 万元
+  1194→      fees=0.0003,                # 手续费 0.03%（双边）
+  1195→      freq='D',                   # 日线频率
+  1196→      size_granularity=100        # A 股最小交易单位 100 股
+  1197→  )
+  1198→
+  1199→  # ========== vbt 绘图 ==========
+  1200→  portfolio[stock_code_list[0]].plot().show()
+  1201→
+  1202→  # 4. 输出回测结果
+  1203→  print(f"\n" + "="*60)
+  1204→  print(f"投资组合回测表现")
+  1205→  print("="*60)
+  1206→  stats_df = portfolio.stats()
+  1207→  print(stats_df)
+  1208→
+  1209→  print(f"\n" + "="*60)
+  1210→  print(f"投资组合回测记录")
+  1211→  print("="*60)
+  1212→  trades_df_original = portfolio.trades.records_readable.copy()
+  1213→  print(trades_df_original.to_string())
+  1214→  ```
+  1215→- **涉及 API**: `tq.initialize` / `tq.get_market_data` / `tq.price_df`（VBT 部分 `vbt.MA.run` / `vbt.crossed_above` / `vbt.crossed_below` / `vbt.Portfolio.from_signals`）
+  1216→
+  1217→---
+  1218→
+  1219→### 场景6: 通达信 TQ 策略介绍和应用示例（5 个 .py 全集）
+  1220→
+  1221→这是 20250122 公众号文章的完整示例集合，含 5 个 .py 文件，是 TdxQuant 全功能"小百科"。
+  1222→
+  1223→#### 6.1 fiststrategy.py —— 基础使用模板
+  1224→
+  1225→- **业务流程**: 标准 `tq.initialize(__file__)` 初始化 + 参数说明（codes 格式 6位+后缀、时间格式 YYYYMMDD[HHMMSS]、period 1d/1w/1m/5m/15m/30m/60m、dividend_type none/front/back）+ `refresh_cache()` / `refresh_kline(stock_list,period)` 缓存刷新 + `get_market_data` 标准调用（**单位：高开低收-元，成交量-手，成交额-万元**）
+  1226→- **完整代码**:
+  1227→  ```python
+  1228→  #fiststrategy.py
+  1229→  import numpy as np
+  1230→  import pandas as pd
+  1231→  from tqcenter import tq
+  1232→  import time
+  1233→  import json
+  1234→  import os
+  1235→  # 将工作目录切换到当前脚本文件所在的目录
+  1236→  os.chdir(os.path.dirname(os.path.abspath(__file__)))
+  1237→  # 之后，相对路径就会基于脚本所在目录进行解析
+  1238→
+  1239→
+  1240→  """
+  1241→      这里是tq的简单使用示例
+  1242→      使用时请确保已经启动通达信客户端并登录
+  1243→      取消对应注释即可运行对应功能
+  1244→  """
+  1245→
+  1246→  """
+  1247→      参数设置
+  1248→  """
+  1249→  codes = ["688318.SH"] #传入的股票代码格式必须是标准格式：6位数+市场后缀（.SH/.SZ/.JJ等）
+  1250→  startime = "20250620" #传入的时间格式必须是：YYYYMMDD 或 YYYYMMDDHHMMSS 
+  1251→  endtime = "20250801"
+  1252→  period = '1d' #K线周期：1d/1w/1m/5m/15m/30m/60m等
+  1253→  dividend_type='none' #复权类型：none-不复权，front-前复权，back-后复权
+  1254→
+  1255→  #初始化
+  1256→  tq.initialize(__file__) #所有策略连接通达信客户端都必须调用此函数进行初始化
+  1257→
+  1258→  '''
+  1259→      刷新行情缓存 刷新后5分钟内取最新report和k线数据不会触发刷新
+  1260→  '''
+  1261→  # refresh_cache = tq.refresh_cache()
+  1262→  # print(refresh_cache)
+  1263→
+  1264→  '''
+  1265→      缓存历史K线 目前仅支持1m 5m 1d三种类型数据 不建议一次更新太多，会堵塞策略和客户端
+  1266→  '''
+  1267→  # refresh_kline = tq.refresh_kline(stock_list=['688318.SH'],period='1d')
+  1268→  # print(refresh_kline)
+  1269→
+  1270→  '''
+  1271→      获取K线数据  获取K线数据需要先在客户端中下载对应盘后数据，调用会触发客户端刷新数据，耗时过长请耐心等待
+  1272→      field_list可以筛选返回字段，默认返回全部字段 比如 field_list=['Open','Close'] 就是只取开盘价和收盘价
+  1273→      count可以设置每只股票取的数据量
+  1274→      暂时不支持获取分笔数据
+  1275→      开高低收单位为元，成交量单位为手，成交额单位为万元
+  1276→  '''
+  1277→  df = tq.get_market_data(
+  1278→          field_list=[],
+  1279→          stock_list=['600519.SH'],
+  1280→          start_time='20251208',
+  1281→          end_time='20251210',
+  1282→          count=-1,
+  1283→          dividend_type='none',
+  1284→          period='1d',
+  1285→          fill_data=False
+  1286→      )
+  1287→  print(df)
+  1288→  ```
+  1289→- **涉及 API**: `tq.initialize` / `tq.refresh_cache` / `tq.refresh_kline`（仅支持 1m/5m/1d）/ `tq.get_market_data`
+  1290→
+  1291→#### 6.2 strategywarn.py —— 预警接口完整参数示例
+  1292→
+  1293→- **业务流程**: 演示 `send_warn` 的完整字段：4 条预警（含买/卖/未知/空跳过），明确字段含义（bs_flag 0买1卖2未知；reason_list 每元素≤25 汉字/50 英文）
+  1294→- **完整代码**:
+  1295→  ```python
+  1296→  #strategywarn.py
+  1297→  import numpy as np 
+  1298→  import pandas as pd 
+  1299→  from tqcenter import tq
+  1300→  import time
+  1301→  import json
+  1302→
+  1303→  """
+  1304→      这里是tq的简单使用示例
+  1305→      使用时请确保已经启动通达信客户端并登录
+  1306→      取消对应注释即可运行对应功能
+  1307→  """
+  1308→
+  1309→  """
+  1310→      参数设置
+  1311→  """
+  1312→  codes = ["688318.SH"] #传入的股票代码格式必须是标准格式：6位数+市场后缀（.SH/.SZ/.JJ等）
+  1313→  startime = "20250620" #传入的时间格式必须是：YYYYMMDD 或 YYYYMMDDHHMMSS 
+  1314→  endtime = "20250801"
+  1315→  period = '1d' #K线周期：1d/1w/1m/5m/15m/30m/60m等
+  1316→  dividend_type='none' #复权类型：none-不复权，front-前复权，back-后复权
+  1317→
+  1318→  #初始化
+  1319→  tq.initialize(__file__) #所有策略连接通达信客户端都必须调用此函数进行初始化
+  1320→
+  1321→
+  1322→  '''
+  1323→      发送预警信号给通达信客户端的TQ策略界面
+  1324→      price_list close_list volum_list bs_flag_list warn_type_list 均要求为纯数字字符串List
+  1325→      bs_flag_list 0买1卖2未知
+  1326→      reason_list每个元素有效长度为25个汉字（50个英文）
+  1327→  '''
+  1328→  warn_res = tq.send_warn(stock_list = ['688318.SH','688318.SH','600519.SH','600519.SH'],
+  1329→               time_list = ['20251215141115','20251215142100','20251215143101','20251215145001'],
+  1330→               price_list= ['123.45','133.45','1823.45','1853.45'],
+  1331→               close_list= ['122.50','132.50','1822.50','1822.50'],
+  1332→               volum_list= ['1000','2000','15000','15000'],
+  1333→               bs_flag_list= ['0','','2','1'],
+  1334→               warn_type_list= ['0','','2','1'],
+  1335→               reason_list= ['价格突破预警线','收盘价突破预警线','成交量突破预警线','价格下破预警线'],
+  1336→               count=4)
+  1337→  print(warn_res)
+  1338→  ```
+  1339→- **涉及 API**: `tq.send_warn`（关键参数约束：所有数字字段为字符串 List；bs_flag 0/1/2；reason ≤25 汉字）
+  1340→
+  1341→#### 6.3 TQHuiCe.py —— 回测数据序列推送（核心）
+  1342→
+  1343→- **业务流程**: 演示 `send_bt_data` 把**时间序列数据**推送到 TQ 策略界面，配通达信公式 `SIGNALS_TQ(ID, TYPE)` 引用展示。每条 data_list 子列表的元素位置即 ID（1-N）。
+  1344→- **完整代码**:
+  1345→  ```python
+  1346→  #TQHuiCe.py
+  1347→  import numpy as np 
+  1348→  import pandas as pd 
+  1349→  from tqcenter import tq
+  1350→  import time
+  1351→  import json
+  1352→  """
+  1353→      这里是tq的简单使用示例
+  1354→      使用时请确保已经启动通达信客户端并登录
+  1355→      取消对应注释即可运行对应功能
+  1356→  """
+  1357→  #初始化
+  1358→  tq.initialize(__file__) #所有策略连接通达信客户端都必须调用此函数进行初始化
+  1359→  bt_data = tq.send_bt_data(stock_code = '688318.SH',
+  1360→                            time_list = ['20260120141100','20260120141400'],
+  1361→                            data_list = [['1','143.41','200','0','0','0'],['0','0','0','1','143.48','200']],
+  1362→                            count = 2)
+  1363→  print(bt_data)
+  1364→  ```
+  1365→- **涉及 API**: `tq.send_bt_data(stock_code, time_list, data_list, count)` —— 这是 TQ 把 Python 算的指标/净值推送到 K 线图的核心通道
+  1366→
+  1367→#### 6.4 stratexldata.py —— 完整自实现回测 + send_bt_data 推送（最长示例）
+  1368→
+  1369→- **业务流程**: 
+  1370→  1. 取 60 天 OHLC，算 MA5/MA10，用 `(fast>slow) & (ref(fast,1)<=ref(slow,1))` 算金叉信号
+  1371→  2. `get_benchmark_data('000300.SH')` 取沪深 300 作基准，算基准净值/年化
+  1372→  3. `calculate_daily_statistics` 自实现每日回测（整百股买入/手续费 0.03% 双边/胜率/年化/最大回撤/夏普/贝塔），输出每日序列 DataFrame
+  1373→  4. 把每日 16 个指标序列化成 data_list → `send_bt_data` 推送到 K 线
+  1374→  5. 通达信公式 `SIGNALS_TQ(ID, TYPE)` 引用展示（ID 1-16 对应 MA5/MA10/买卖信号/开平仓次数/净值/基准净值/胜率/年化/基准年化/贝塔/最大回撤/夏普/资金/持仓量；TYPE 0/1/2 控制平滑处理）
+  1375→- **完整代码**:
+  1376→  ```python
+  1377→  #stratexldata.py
+  1378→  #展示每日持仓量能看数据 验证开仓和手续费的   #用悬挂目录的时候  读不出来
+  1379→  from tqcenter import tq
+  1380→  import pandas as pd
+  1381→  import numpy as np
+  1382→  import math
+  1383→  from datetime import datetime
+  1384→  import sys
+  1385→
+  1386→
+  1387→  # ==================== 技术指标计算函数 ====================
+  1388→  def calculate_ema(series, window):
+  1389→      """计算指数移动平均"""
+  1390→      return series.ewm(span=window, adjust=False).mean()
+  1391→
+  1392→  def calculate_sma(series, window):
+  1393→      """计算简单移动平均"""
+  1394→      return series.rolling(window=window).mean()
+  1395→
+  1396→  def calculate_llv(series, window):
+  1397→      """计算周期内最低值"""
+  1398→      return series.rolling(window=window).min()
+  1399→
+  1400→  def calculate_hhv(series, window):
+  1401→      """计算周期内最高值"""
+  1402→      return series.rolling(window=window).max()
+  1403→
+  1404→  def calculate_ma(series, window):
+  1405→      """计算简单移动平均 (别名，与calculate_sma功能相同)"""
+  1406→      return calculate_sma(series, window)
+  1407→
+  1408→  def ref(series, periods):
+  1409→      """引用若干周期前的数据"""
+  1410→      return series.shift(periods)
+  1411→
+  1412→  def calculate_cross_signal(fast_series, slow_series):
+  1413→      """
+  1414→      计算金叉信号序列。
+  1415→      规则：当快线从下方上穿慢线时，标记为1（金叉），否则为0。
+  1416→      注意：这是一个简单的信号，未考虑信号持续期。
+  1417→      """
+  1418→      # 判断条件：今日快线 > 慢线，且昨日快线 <= 慢线
+  1419→      cross_up = (fast_series > slow_series) & (ref(fast_series, 1) <= ref(slow_series, 1))
+  1420→      return cross_up.astype(int)
+  1421→
+  1422→  def get_benchmark_data(benchmark_code='000300.SH', count=60):
+  1423→      """
+  1424→      获取基准品种数据
+  1425→      """
+  1426→      try:
+  1427→          # 获取基准市场数据
+  1428→          benchmark_data = tq.get_market_data(
+  1429→              field_list=['Open', 'High', 'Low', 'Close'],
+  1430→              stock_list=[benchmark_code],
+  1431→              period='1d',
+  1432→              count=count,
+  1433→              dividend_type='front'  # 前复权数据
+  1434→          )
+  1435→          
+  1436→          # 提取收盘价序列
+  1437→          benchmark_close = benchmark_data['Close'][benchmark_code]
+  1438→          
+  1439→          # 计算基准收益率序列
+  1440→          benchmark_returns = benchmark_close.pct_change().fillna(0)
+  1441→          
+  1442→          # 计算基准净值（从1开始）
+  1443→          benchmark_net_value = (1 + benchmark_returns).cumprod()
+  1444→          
+  1445→          # 计算基准年化收益率
+  1446→          trading_days = len(benchmark_net_value)
+  1447→          if trading_days > 0:
+  1448→              benchmark_total_return = benchmark_net_value.iloc[-1] - 1
+  1449→              benchmark_annual_return = (1 + benchmark_total_return) ** (252 / trading_days) - 1
+  1450→          else:
+  1451→              benchmark_total_return = 0
+  1452→              benchmark_annual_return = 0
+  1453→          
+  1454→          return {
+  1455→              'close': benchmark_close,
+  1456→              'returns': benchmark_returns,
+  1457→              'net_value': benchmark_net_value,
+  1458→              'total_return': benchmark_total_return,
+  1459→              'annual_return': benchmark_annual_return
+  1460→          }
+  1461→          
+  1462→      except Exception as e:
+  1463→          print(f"获取基准数据时发生错误: {e}")
+  1464→          # 返回空数据
+  1465→          return {
+  1466→              'close': pd.Series(),
+  1467→              'returns': pd.Series(),
+  1468→              'net_value': pd.Series(),
+  1469→              'total_return': 0,
+  1470→              'annual_return': 0
+  1471→          }
+  1472→
+  1473→  def calculate_daily_statistics(df, benchmark_data, initial_capital=100000, fee_rate=0.0003):
+  1474→      """
+  1475→      计算每日的回测统计指标序列
+  1476→      输入：
+  1477→          df: 包含价格数据、买卖信号的DataFrame
+  1478→          benchmark_data: 基准数据字典
+  1479→          initial_capital: 初始资金
+  1480→          fee_rate: 手续费率（双边）
+  1481→      输出：包含每日统计指标的DataFrame
+  1482→      """
+  1483→      # 初始化变量
+  1484→      capital = initial_capital
+  1485→      position = 0  # 持仓数量
+  1486→      rest_cash = capital  # 剩余现金
+  1487→      hold = False  # 是否持仓
+  1488→      
+  1489→      # 创建结果列表
+  1490→      daily_stats = []
+  1491→      open_count = 0  # 累计开仓次数
+  1492→      close_count = 0  # 累计平仓次数
+  1493→      win_count = 0  # 累计盈利交易次数
+  1494→      trade_records = []  # 交易记录
+  1495→      
+  1496→      # 获取基准数据
+  1497→      benchmark_close = benchmark_data['close']
+  1498→      benchmark_net_value = benchmark_data['net_value']
+  1499→      
+  1500→      # 确保基准数据与策略数据时间对齐
+  1501→      if len(benchmark_close) != len(df):
+  1502→          print(f"警告：基准数据长度({len(benchmark_close)})与策略数据长度({len(df)})不一致")
+  1503→          # 这里简单处理，取相同长度的数据
+  1504→          min_len = min(len(benchmark_close), len(df))
+  1505→          benchmark_close = benchmark_close.iloc[:min_len]
+  1506→          benchmark_net_value = benchmark_net_value.iloc[:min_len]
+  1507→          df = df.iloc[:min_len]
+  1508→      
+  1509→      # 遍历数据执行交易
+  1510→      for i in range(len(df)):
+  1511→          current_price = df['close'].iloc[i]
+  1512→          buy_signal = df['buyxh'].iloc[i] if i < len(df) else 0
+  1513→          sell_signal = df['sellxh'].iloc[i] if i < len(df) else 0
+  1514→          
+  1515→          # 记录交易前的状态
+  1516→          pre_open_count = open_count
+  1517→          pre_close_count = close_count
+  1518→          pre_win_count = win_count
+  1519→          
+  1520→          # 金叉买入信号
+  1521→          if buy_signal == 1 and not hold:
+  1522→              # 计算可买整百股数量
+  1523→              max_shares = int(rest_cash / current_price / 100) * 100
+  1524→              if max_shares > 0:
+  1525→                  # 计算手续费
+  1526→                  trade_amount = max_shares * current_price
+  1527→                  fee = trade_amount * fee_rate
+  1528→                  
+  1529→                  # 执行买入
+  1530→                  position = max_shares
+  1531→                  rest_cash = rest_cash - trade_amount - fee
+  1532→                  hold = True
+  1533→                  open_count += 1
+  1534→                  
+  1535→                  # 记录交易
+  1536→                  trade_records.append({
+  1537→                      'date': df.index[i],
+  1538→                      'type': 'buy',
+  1539→                      'price': current_price,
+  1540→                      'shares': position,
+  1541→                      'fee': fee
+  1542→                  })
+  1543→          
+  1544→          # 死叉卖出信号
+  1545→          elif sell_signal == 1 and hold:
+  1546→              # 计算卖出金额
+  1547→              trade_amount = position * current_price
+  1548→              fee = trade_amount * fee_rate
+  1549→              
+  1550→              # 执行卖出
+  1551→              rest_cash = rest_cash + trade_amount - fee
+  1552→              position = 0
+  1553→              hold = False
+  1554→              close_count += 1
+  1555→              
+  1556→              # 检查交易是否盈利
+  1557→              if len(trade_records) > 0 and trade_records[-1]['type'] == 'buy':
+  1558→                  buy_price = trade_records[-1]['price']
+  1559→                  if current_price > buy_price:
+  1560→                      win_count += 1
+  1561→              
+  1562→              # 记录交易
+  1563→              trade_records.append({
+  1564→                  'date': df.index[i],
+  1565→                  'type': 'sell',
+  1566→                  'price': current_price,
+  1567→                  'shares': position,
+  1568→                  'fee': fee
+  1569→              })
+  1570→          
+  1571→          # 计算当日市值和净值
+  1572→          if hold:
+  1573→              daily_value = rest_cash + position * current_price
+  1574→          else:
+  1575→              daily_value = rest_cash
+  1576→
+  1577→          daily_net_value = daily_value / initial_capital
+  1578→
+  1579→          # 计算胜率（到当前日期为止）
+  1580→          total_trades_to_date = open_count + close_count
+  1581→          win_rate_to_date = (win_count / total_trades_to_date * 100) if total_trades_to_date > 0 else 0
+  1582→
+  1583→          # 计算年化收益率（到当前日期为止）
+  1584→          if i > 0:
+  1585→              total_return_to_date = daily_net_value - 1
+  1586→              trading_days_to_date = i + 1
+  1587→              annual_return_to_date = (1 + total_return_to_date) ** (252 / trading_days_to_date) - 1 if trading_days_to_date > 0 else 0
+  1588→          else:
+  1589→              annual_return_to_date = 0
+  1590→
+  1591→          # 获取基准净值（使用真实的基准数据）
+  1592→          if i < len(benchmark_net_value):
+  1593→              current_benchmark_net_value = benchmark_net_value.iloc[i]
+  1594→          else:
+  1595→              current_benchmark_net_value = 1.0
+  1596→
+  1597→          # 计算基准年化收益率（到当前日期为止）
+  1598→          if i > 0 and i < len(benchmark_net_value):
+  1599→              benchmark_total_return_to_date = current_benchmark_net_value - 1
+  1600→              benchmark_annual_return_to_date = (1 + benchmark_total_return_to_date) ** (252 / (i + 1)) - 1 if i > 0 else 0
+  1601→          else:
+  1602→              benchmark_annual_return_to_date = 0
+  1603→
+  1604→          # 计算贝塔值（到当前日期为止）
+  1605→          if i > 1:
+  1606→              # 计算策略收益率序列
+  1607→              strategy_returns = []
+  1608→              for j in range(i + 1):
+  1609→                  if j == 0:
+  1610→                      strategy_returns.append(0)
+  1611→                  else:
+  1612→                      prev_capital = daily_stats[j-1]['capital'] if j > 0 else initial_capital
+  1613→                      curr_capital = daily_value if j == i else daily_stats[j]['capital']
+  1614→                      strategy_return = (curr_capital / prev_capital) - 1
+  1615→                      strategy_returns.append(strategy_return)
+  1616→
+  1617→              # 计算基准收益率序列
+  1618→              benchmark_returns_to_date = benchmark_close.iloc[:i+1].pct_change().fillna(0).values
+  1619→
+  1620→              # 计算协方差和方差
+  1621→              if len(strategy_returns) > 1 and len(benchmark_returns_to_date) > 1:
+  1622→                  cov_matrix = np.cov(strategy_returns, benchmark_returns_to_date)
+  1623→                  beta = cov_matrix[0, 1] / cov_matrix[1, 1] if cov_matrix[1, 1] != 0 else 1.0
+  1624→              else:
+  1625→                  beta = 1.0
+  1626→          else:
+  1627→              beta = 1.0
+  1628→
+  1629→          # 收集每日统计数据
+  1630→          daily_stats.append({
+  1631→              'date': df.index[i],
+  1632→              'capital': daily_value,
+  1633→              'net_value': daily_net_value,
+  1634→              'open_count': open_count,
+  1635→              'close_count': close_count,
+  1636→              'win_rate': win_rate_to_date,
+  1637→              'annual_return': annual_return_to_date * 100,
+  1638→              'benchmark_net_value': current_benchmark_net_value,
+  1639→              'benchmark_annual_return': benchmark_annual_return_to_date * 100,
+  1640→              'beta': beta,
+  1641→              'position': position,  # 持仓量
+  1642→              'hold': hold
+  1643→          })
+  1644→
+  1645→      # 转换为DataFrame
+  1646→      stats_df = pd.DataFrame(daily_stats)
+  1647→      stats_df.set_index('date', inplace=True)
+  1648→
+  1649→      # 计算最大回撤序列
+  1650→      if len(stats_df) > 0:
+  1651→          stats_df['rolling_max'] = stats_df['net_value'].cummax()
+  1652→          stats_df['drawdown'] = (stats_df['net_value'] - stats_df['rolling_max']) / stats_df['rolling_max']
+  1653→          stats_df['max_drawdown'] = stats_df['drawdown'].cummin()
+  1654→
+  1655→      # 计算夏普比率序列
+  1656→      if len(stats_df) > 1:
+  1657→          # 计算策略收益率
+  1658→          returns_list = []
+  1659→          for i in range(len(stats_df)):
+  1660→              if i == 0:
+  1661→                  returns_list.append(0)
+  1662→              else:
+  1663→                  prev_capital = stats_df['capital'].iloc[i-1]
+  1664→                  curr_capital = stats_df['capital'].iloc[i]
+  1665→                  returns_list.append((curr_capital / prev_capital) - 1)
+  1666→
+  1667→          stats_df['returns'] = returns_list
+  1668→
+  1669→          # 计算滚动夏普比率
+  1670→          sharpe_list = []
+  1671→          for i in range(len(stats_df)):
+  1672→              if i == 0:
+  1673→                  sharpe_list.append(0)
+  1674→              else:
+  1675→                  returns_to_date = stats_df['returns'].iloc[:i+1]
+  1676→                  # 使用2%作为无风险利率
+  1677→                  risk_free_rate = 0.02
+  1678→                  excess_returns = returns_to_date - risk_free_rate/252
+  1679→                  sharpe = excess_returns.mean() * math.sqrt(252) / returns_to_date.std() if returns_to_date.std() != 0 else 0
+  1680→                  sharpe_list.append(sharpe)
+  1681→          stats_df['sharpe_ratio'] = sharpe_list
+  1682→
+  1683→      return stats_df, trade_records
+  1684→
+  1685→  # ==================== 主程序 ====================
+  1686→  def main():
+  1687→      # 初始化TQ
+  1688→      tq.initialize(__file__)
+  1689→
+  1690→      # 股票列表（示例）
+  1691→      stocks = ['688800.SH', '688318.SH', '688981.SH']
+  1692→      # 基准品种代码
+  1693→      benchmark_code = '000300.SH'
+  1694→
+  1695→      # 使用for循环遍历股票列表
+  1696→      for stock_code in stocks:
+  1697→          print(f"处理股票: {stock_code}")
+  1698→          print("-" * 50)
+  1699→
+  1700→          try:
+  1701→              # 获取股票市场数据
+  1702→              market_data = tq.get_market_data(
+  1703→                  field_list=['Open', 'High', 'Low', 'Close'],
+  1704→                  stock_list=[stock_code],
+  1705→                  period='1d',
+  1706→                  count=60,
+  1707→                  dividend_type='front'  # 前复权数据
+  1708→              )
+  1709→
+  1710→              # 构建DataFrame
+  1711→              df = pd.DataFrame({
+  1712→                  'open': market_data['Open'][stock_code],
+  1713→                  'high': market_data['High'][stock_code],
+  1714→                  'low': market_data['Low'][stock_code],
+  1715→                  'close': market_data['Close'][stock_code]
+  1716→              })
+  1717→
+  1718→              print("原始K线数据前5行:")
+  1719→              print(df.head())
+  1720→              print("-" * 50)
+  1721→
+  1722→              # 计算技术指标
+  1723→              df['ma5'] = calculate_ma(df['close'], 5)
+  1724→              df['ma10'] = calculate_ma(df['close'], 10)
+  1725→
+  1726→              # 计算金叉信号
+  1727→              df['buyxh'] = calculate_cross_signal(df['ma5'], df['ma10'])
+  1728→              df['sellxh'] = calculate_cross_signal(df['ma10'], df['ma5'])
+  1729→
+  1730→              print("添加技术指标与信号后的数据前15行:")
+  1731→              print(df[['close', 'ma5', 'ma10', 'buyxh', 'sellxh']].head(15))
+  1732→              print("-" * 50)
+  1733→
+  1734→              # 获取基准数据
+  1735→              print(f"获取基准品种 {benchmark_code} 数据...")
+  1736→              benchmark_data = get_benchmark_data(benchmark_code, count=len(df))
+  1737→
+  1738→              if len(benchmark_data['close']) == 0:
+  1739→                  print("警告：未能获取基准数据，使用简化计算")
+  1740→                  # 使用简化基准计算
+  1741→                  benchmark_close = df['close']
+  1742→                  benchmark_returns = benchmark_close.pct_change().fillna(0)
+  1743→                  benchmark_net_value = (1 + benchmark_returns).cumprod()
+  1744→                  benchmark_data = {
+  1745→                      'close': benchmark_close,
+  1746→                      'returns': benchmark_returns,
+  1747→                      'net_value': benchmark_net_value,
+  1748→                      'total_return': benchmark_net_value.iloc[-1] - 1 if len(benchmark_net_value) > 0 else 0,
+  1749→                      'annual_return': 0
+  1750→                  }
+  1751→
+  1752→              print(f"基准数据获取成功，共{len(benchmark_data['close'])}个交易日")
+  1753→              print(f"基准总收益率: {benchmark_data['total_return']*100:.2f}%")
+  1754→              print(f"基准年化收益率: {benchmark_data['annual_return']*100:.2f}%")
+  1755→              print("-" * 50)
+  1756→
+  1757→              # 计算每日回测统计指标序列
+  1758→              stats_df, trade_records = calculate_daily_statistics(
+  1759→                  df, 
+  1760→                  benchmark_data,
+  1761→                  initial_capital=100000, 
+  1762→                  fee_rate=0.0003  # 0.03%手续费
+  1763→              )
+  1764→
+  1765→              # 输出最后一天的统计结果
+  1766→              if len(stats_df) > 0:
+  1767→                  last_stats = stats_df.iloc[-1]
+  1768→                  print("最终回测统计指标:")
+  1769→                  print(f"开仓次数: {last_stats['open_count']}")
+  1770→                  print(f"平仓次数: {last_stats['close_count']}")
+  1771→                  print(f"单位净值: {last_stats['net_value']:.4f}")
+  1772→                  print(f"基准净值: {last_stats['benchmark_net_value']:.4f}")
+  1773→                  print(f"胜率: {last_stats['win_rate']:.2f}%")
+  1774→                  print(f"年化收益率: {last_stats['annual_return']:.2f}%")
+  1775→                  print(f"基准年化收益率: {last_stats['benchmark_annual_return']:.2f}%")
+  1776→                  print(f"贝塔值: {last_stats['beta']:.4f}")
+  1777→                  print(f"最大回撤: {last_stats['max_drawdown']*100:.2f}%")
+  1778→                  print(f"夏普比率: {last_stats['sharpe_ratio']:.4f}")
+  1779→                  print(f"持仓量: {last_stats['position']}股")
+  1780→                  print("-" * 50)
+  1781→
+  1782→              # 准备发送给TQ的数据
+  1783→              time_list = df.index.strftime('%Y%m%d').tolist()
+  1784→              # print(time_list)
+  1785→              # 扩展data_list，包含所有需要的指标（每日序列）
+  1786→              data_list = []
+  1787→              for i, (_, row) in enumerate(df.iterrows()):
+  1788→                  # 基础技术指标
+  1789→                  ma5_value = row['ma5'] if not pd.isna(row['ma5']) else 0.0
+  1790→                  ma10_value = row['ma10'] if not pd.isna(row['ma10']) else 0.0
+  1791→                  buyxh_value = row['buyxh'] if not pd.isna(row['buyxh']) else 0
+  1792→                  sellxh_value = row['sellxh'] if not pd.isna(row['sellxh']) else 0
+  1793→
+  1794→                  # 获取该日期的回测指标
+  1795→                  if i < len(stats_df):
+  1796→                      daily_stats = stats_df.iloc[i]
+  1797→                      open_count_val = daily_stats['open_count']
+  1798→                      close_count_val = daily_stats['close_count']
+  1799→                      net_value_val = daily_stats['net_value']
+  1800→                      benchmark_net_val = daily_stats['benchmark_net_value']
+  1801→                      win_rate_val = daily_stats['win_rate']
+  1802→                      annual_return_val = daily_stats['annual_return']
+  1803→                      benchmark_annual_val = daily_stats['benchmark_annual_return']
+  1804→                      beta_val = daily_stats['beta']
+  1805→                      max_drawdown_val = daily_stats['max_drawdown'] * 100  # 转换为百分比
+  1806→                      sharpe_val = daily_stats['sharpe_ratio'] if 'sharpe_ratio' in daily_stats else 0
+  1807→                      capital_val = daily_stats['capital']
+  1808→                      position_val = daily_stats['position']  # 持仓量
+  1809→                  else:
+  1810→                      # 默认值
+  1811→                      open_count_val = 0
+  1812→                      close_count_val = 0
+  1813→                      net_value_val = 1.0
+  1814→                      benchmark_net_val = 1.0
+  1815→                      win_rate_val = 0
+  1816→                      annual_return_val = 0
+  1817→                      benchmark_annual_val = 0
+  1818→                      beta_val = 1.0
+  1819→                      max_drawdown_val = 0
+  1820→                      sharpe_val = 0
+  1821→                      capital_val = 100000
+  1822→                      position_val = 0
+  1823→
+  1824→                  # 构建数据条目
+  1825→                  formatted_entry = [
+  1826→                      f"{ma5_value:.2f}",                    # ID 1: MA5
+  1827→                      f"{ma10_value:.2f}",                   # ID 2: MA10
+  1828→                      str(int(buyxh_value)),                 # ID 3: 买入信号
+  1829→                      str(int(sellxh_value)),                # ID 4: 卖出信号
+  1830→                      f"{open_count_val}",                   # ID 5: 开仓次数（累计到当前日期）
+  1831→                      f"{close_count_val}",                  # ID 6: 平仓次数（累计到当前日期）
+  1832→                      f"{net_value_val:.4f}",                # ID 7: 单位净值（当前日期）
+  1833→                      f"{benchmark_net_val:.4f}",            # ID 8: 基准净值（当前日期）
+  1834→                      f"{win_rate_val:.2f}",                 # ID 9: 胜率（累计到当前日期）
+  1835→                      f"{annual_return_val:.2f}",            # ID 10: 年化收益率（累计到当前日期）
+  1836→                      f"{benchmark_annual_val:.2f}",         # ID 11: 基准年化收益率（累计到当前日期）
+  1837→                      f"{beta_val:.4f}",                     # ID 12: 贝塔值
+  1838→                      f"{max_drawdown_val:.2f}",             # ID 13: 最大回撤（累计到当前日期）
+  1839→                      f"{sharpe_val:.4f}",                   # ID 14: 夏普比率（累计到当前日期）
+  1840→                      f"{capital_val:.2f}",                  # ID 15: 每日资金
+  1841→                      f"{position_val}"                      # ID 16: 持仓量（每日持仓数量）
+  1842→                  ]
+  1843→                  data_list.append(formatted_entry)
+  1844→
+  1845→              print(f"准备发送的data_list (前5个周期，共{len(data_list)}个周期):")
+  1846→              for i in range(min(5, len(data_list))):
+  1847→                  print(f"日期 {time_list[i]}: {data_list[i]}")
+  1848→              print("-" * 50)
+  1849→
+  1850→              # 发送回测数据到TQ
+  1851→              bt_data = tq.send_bt_data(
+  1852→                  stock_code,
+  1853→                  time_list=time_list,
+  1854→                  data_list=data_list,
+  1855→                  count=60
+  1856→              )
+  1857→              print("发送回测数据结果:")
+  1858→              print(bt_data)
+  1859→              print("-" * 50)
+  1860→              
+  1861→              # 输出交易记录
+  1862→              if trade_records:
+  1863→                  print("交易记录:")
+  1864→                  for record in trade_records:
+  1865→                      print(f"{record['date']}: {record['type']} {record['shares']}股 @ {record['price']:.2f}, 手续费: {record['fee']:.2f}")
+  1866→              
+  1867→              print(f"股票 {stock_code} 处理完成！")
+  1868→              print("=" * 60)
+  1869→              
+  1870→          except Exception as e:
+  1871→              print(f"处理股票 {stock_code} 时发生错误: {e}")
+  1872→              print("跳过该股票，继续处理下一个...")
+  1873→              print("-" * 50)
+  1874→              continue
+  1875→
+  1876→      # 关闭TQ连接
+  1877→      tq.close()
+  1878→      print("所有股票处理完毕！")
+  1879→      print("程序执行完毕。")
+  1880→
+  1881→      # ==================== 通达信公式使用提示 ====================
+  1882→      print("\n" + "="*60)
+  1883→      print("通达信公式管理器中使用提示:")
+  1884→      print("="*60)
+  1885→      print("""
+  1886→  将数据发送到TQ策略界面后，您可以在通达信公式管理器中创建技术指标公式，
+  1887→  使用 SIGNALS_TQ(ID, TYPE) 函数来引用这些序列数据并在K线上展示。
+  1888→
+  1889→  例如，创建一个名为"TQMA510"的公式，代码可以如下：
+  1890→
+  1891→  MA5:SIGNALS_TQ(1,0);        {引用ID=1的数据(MA5)}
+  1892→  MA10:SIGNALS_TQ(2,0);       {引用ID=2的数据(MA10)}
+  1893→
+  1894→  {交易信号}
+  1895→  BUY_SIGNAL:=SIGNALS_TQ(3,0); {买入信号}
+  1896→  SELL_SIGNAL:=SIGNALS_TQ(4,0);{卖出信号}
+  1897→
+  1898→  {回测指标展示 - 这些指标会随着时间轴移动而动态变化}
+  1899→  开仓次数:SIGNALS_TQ(5,0),COLORRED;
+  1900→  平仓次数:SIGNALS_TQ(6,0),COLORGREEN;
+  1901→  单位净值:SIGNALS_TQ(7,0),COLORWHITE;
+  1902→  基准净值:SIGNALS_TQ(8,0),COLORYELLOW;
+  1903→  胜率:SIGNALS_TQ(9,0),COLORMAGENTA;
+  1904→  年化收益率:SIGNALS_TQ(10,0),COLORCYAN;
+  1905→  基准年化收益率:SIGNALS_TQ(11,0),COLORLIBLUE;
+  1906→  贝塔值:SIGNALS_TQ(12,0),COLORBROWN;
+  1907→  最大回撤:SIGNALS_TQ(13,0),COLORGRAY;
+  1908→  夏普比率:SIGNALS_TQ(14,0),COLORLIMAGENTA;
+  1909→  每日资金:SIGNALS_TQ(15,0),COLORLIGRAY;
+  1910→  持仓量:SIGNALS_TQ(16,0),COLORLIRED;  {显示每日持仓量}
+  1911→
+  1912→  {绘制交易信号图标}
+  1913→  DRAWICON(BUY_SIGNAL, LOW, 1);
+  1914→  DRAWICON(SELL_SIGNAL, HIGH, 2);
+  1915→
+  1916→
+  1917→  函数说明：
+  1918→  SIGNALS_TQ(ID, TYPE)
+  1919→      ID: TQ数据中的序号 (1-16)，对应data_list子列表中的位置。
+  1920→      TYPE: 处理方式。
+  1921→          1 - 平滑处理，没有自定义数据的周期返回上一周期的值。
+  1922→          0 - 不做平滑处理。
+  1923→          2 - 没有数据则为0。
+  1924→      """)
+  1925→      print("="*60)
+  1926→
+  1927→  if __name__ == "__main__":
+  1928→      main()
+  1929→  ```
+  1930→- **涉及 API**: `tq.initialize` / `tq.get_market_data` / `tq.send_bt_data` / `tq.close` + 公式侧 `SIGNALS_TQ(ID, TYPE)`
+  1931→
+  1932→#### 6.5 sendfile.py / sendfilepdf.py —— 文件推送
+  1933→
+  1934→- **业务流程**: 调 `tq.send_file(path)` 把本地 txt / pdf 推送到通达信客户端打开
+  1935→- **完整代码**:
+  1936→  ```python
+  1937→  #sendfile.py
+  1938→  import numpy as np 
+  1939→  import pandas as pd 
+  1940→  from tqcenter import tq
+  1941→  import time
+  1942→  import json
+  1943→  """
+  1944→      这里是tq的简单使用示例
+  1945→      使用时请确保已经启动通达信客户端并登录
+  1946→      取消对应注释即可运行对应功能
+  1947→  """
+  1948→  #初始化
+  1949→  tq.initialize(__file__) #所有策略连接通达信客户端都必须调用此函数进行初始化
+  1950→  file = "513100.txt"
+  1951→  tq.send_file(file)
+  1952→  ```
+  1953→  ```python
+  1954→  #sendfilepdf.py
+  1955→  import numpy as np 
+  1956→  import pandas as pd 
+  1957→  from tqcenter import tq
+  1958→  import time
+  1959→  import json
+  1960→  """
+  1961→      这里是tq的简单使用示例
+  1962→      使用时请确保已经启动通达信客户端并登录
+  1963→      取消对应注释即可运行对应功能
+  1964→  """
+  1965→  #初始化
+  1966→  tq.initialize(__file__) #所有策略连接通达信客户端都必须调用此函数进行初始化
+  1967→  file = "min.pdf"
+  1968→  tq.send_file(file)
+  1969→  ```
+  1970→- **涉及 API**: `tq.send_file`
+  1971→
+  1972→---
+  1973→
+  1974→### FAQ 关键问题汇总
+  1975→
+  1976→#### Q1: 同一个选股公式，`formula_process_mul_xg` 选股结果比客户端条件选股少？
+  1977→**解决方案**: 检查 `count` 参数是否合理。`count` 必须满足公式计算所需的数据量。客户端条件选股使用了全部本地数据；`count` 太小会导致公式无法算出有效值。
+  1978→- 提示：MACD 至少需要 100 根 K 线；UPN('3') 至少需要 5 根；如不确定，全市场回测用 `count=100` 起步。
+  1979→
+  1980→#### Q2: 如何选出分钟内主力净额排名靠前的股票？
+  1981→**解决方案**: 用一定时间间隔（如 3 分钟）调 `formula_process_mul_zb` 取主力净额最新值 → 用本次值减上次值的差额排序 → 取前 5 名。需要先在客户端建自定义指标 `ZLJE`：
+  1982→- 自定义指标公式（写入客户端公式管理器）:
+  1983→  ```
+  1984→  {ZLJE 自定义指标}
+  1985→  超B:=L2_AMO(0,0)/10000.0;
+  1986→  大B:=L2_AMO(1,0)/10000.0;
+  1987→  中B:=L2_AMO(2,0)/10000.0;
+  1988→  小B:=L2_AMO(3,0)/10000.0;
+  1989→  超S:=L2_AMO(0,1)/10000.0;
+  1990→  大S:=L2_AMO(1,1)/10000.0;
+  1991→  中S:=L2_AMO(2,1)/10000.0;
+  1992→  小S:=L2_AMO(3,1)/10000.0;
+  1993→  主力净额:(超B+大B)-(超S+大S),NODRAW;
+  1994→  ```
+  1995→- 完整代码:
+  1996→  ```python
+  1997→  import sys
+  1998→  import time
+  1999→
+  2000→  sys.path.append('C:/new_tdx_test2025/PYPlugins/user')
+
+[showing lines 1-2000 of 8847; use offset=2001 with limit to continue reading]

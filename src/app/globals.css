@@ -241,6 +241,48 @@
 }
 .ticker-enter { animation: quant-ticker-up 0.4s ease-out; }
 
+/* ====================== 信号中心：新信号高亮 ====================== */
+/* 新信号 (1 分钟内) 左侧琥珀色边框 + 微弱 glow */
+.signal-row-new {
+  position: relative;
+  box-shadow: inset 3px 0 0 0 var(--quant-primary);
+  background: color-mix(in srgb, var(--quant-primary) 5%, transparent) !important;
+  animation: signal-new-glow 2.4s ease-out 1;
+}
+.signal-row-new > td:first-child {
+  position: relative;
+}
+@keyframes signal-new-glow {
+  0% {
+    box-shadow: inset 3px 0 0 0 var(--quant-primary),
+      0 0 12px 1px color-mix(in srgb, var(--quant-primary) 40%, transparent);
+  }
+  60% {
+    box-shadow: inset 3px 0 0 0 var(--quant-primary),
+      0 0 6px 0 color-mix(in srgb, var(--quant-primary) 15%, transparent);
+  }
+  100% {
+    box-shadow: inset 3px 0 0 0 var(--quant-primary),
+      0 0 0 0 transparent;
+  }
+}
+
+/* ====================== 表单 focus ring (琥珀色，覆盖默认蓝色) ====================== */
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[data-slot="input"]:focus-visible,
+[data-slot="textarea"]:focus-visible,
+[data-slot="select-trigger"]:focus-visible,
+[data-slot="switch"]:focus-visible {
+  border-color: color-mix(in srgb, var(--quant-primary) 50%, transparent) !important;
+  outline: none;
+}
+[data-slot="input"]:focus-visible,
+[data-slot="textarea"]:focus-visible {
+  --tw-ring-color: color-mix(in srgb, var(--quant-primary) 40%, transparent);
+}
+
 /* ====================== 文本颜色工具类 ====================== */
 .text-up { color: var(--quant-up); }
 .text-down { color: var(--quant-down); }

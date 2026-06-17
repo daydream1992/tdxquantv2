@@ -7,13 +7,14 @@ import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { cn } from '@/lib/utils'
 import { useThemeMode } from '@/lib/theme'
-import { monitorAPI, configAPI, strategyAPI, type MonitorStatusDTO } from '@/lib/api'
+import { monitorAPI, configAPI, strategyAPI, channelAPI, type MonitorStatusDTO } from '@/lib/api'
 import { toast } from 'sonner'
 import { Dashboard } from '@/components/quant/Dashboard'
 import { StrategyManager } from '@/components/quant/StrategyManager'
 import { SelectionResults } from '@/components/quant/SelectionResults'
 import { SignalCenter } from '@/components/quant/SignalCenter'
 import { SectorManager } from '@/components/quant/SectorManager'
+import { ChannelSettingsDialog } from '@/components/quant/ChannelSettingsDialog'
 
 const TABS = [
   { value: 'dashboard', label: '实时大屏', icon: Activity },
@@ -29,6 +30,8 @@ export default function Home() {
   const [status, setStatus] = React.useState<MonitorStatusDTO | null>(null)
   const [reloadSpin, setReloadSpin] = React.useState(false)
   const [runningAll, setRunningAll] = React.useState(false)
+  const [settingsOpen, setSettingsOpen] = React.useState(false)
+  const [channelErrors, setChannelErrors] = React.useState(0)
 
   // 拉取监控状态用于顶部状态指示
   React.useEffect(() => {
@@ -46,6 +49,29 @@ export default function Home() {
       clearInterval(t)
     }
   }, [])
+
+  // 拉取通道错误数 (用于设置按钮红点提示)
+  React.useEffect(() => {
+    let mounted = true
+    const fetchChannels = async () => {
+      try {
+        const data = await channelAPI.list()
+        const total = (data.channels || []).reduce(
+          (s, c) => s + (c.errors?.length || 0),
+          0
+        )
+        if (mounted) setChannelErrors(total)
+      } catch {
+        /* noop */
+      }
+    }
+    fetchChannels()
+    const t = setInterval(fetchChannels, 60_000)
+    return () => {
+      mounted = false
+      clearInterval(t)
+    }
+  }, [settingsOpen])
 
   const handleReloadConfig = async () => {
     setReloadSpin(true)
@@ -190,11 +216,17 @@ export default function Home() {
               <Button
                 variant="ghost"
                 size="icon"
-                className="size-9"
-                title="设置（占位）"
-                onClick={() => toast.info('设置功能将在 P2 阶段实现')}
+                className="size-9 relative hover:bg-amber-500/10"
+                title={channelErrors > 0 ? `通道有 ${channelErrors} 个错误，点击配置` : '推送通道配置'}
+                onClick={() => setSettingsOpen(true)}
               >
                 <Settings className="size-4" />
+                {channelErrors > 0 && (
+                  <span
+                    className="absolute top-1.5 right-1.5 size-2 rounded-full bg-red-500 ring-2 ring-background"
+                    aria-label={`${channelErrors} 个错误`}
+                  />
+                )}
               </Button>
             </div>
           </div>
@@ -256,6 +288,12 @@ export default function Home() {
           </div>
         </div>
       </footer>
+
+      {/* ===== Settings Dialog (推送通道配置) ===== */}
+      <ChannelSettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+      />
     </div>
   )
 }

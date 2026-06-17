@@ -39,6 +39,8 @@ export interface StockTableProps<T> {
   emptyText?: string
   pageSize?: number
   className?: string
+  /** 自定义行 className (基于数据) */
+  rowClassName?: (row: T) => string
 }
 
 export function StockTable<T>({
@@ -53,6 +55,7 @@ export function StockTable<T>({
   emptyText = '暂无数据',
   pageSize = 50,
   className,
+  rowClassName,
 }: StockTableProps<T>) {
   const [sortKey, setSortKey] = React.useState<string | null>(null)
   const [sortDir, setSortDir] = React.useState<SortDir>(null)
@@ -169,9 +172,10 @@ export function StockTable<T>({
                 <React.Fragment key={key}>
                   <tr
                     className={cn(
-                      'cursor-default transition-colors',
+                      'cursor-default transition-colors hover:bg-amber-500/5',
                       onRowClick && 'cursor-pointer',
-                      expanded && 'bg-[var(--quant-primary)]/5'
+                      expanded && 'bg-[var(--quant-primary)]/5',
+                      rowClassName?.(row)
                     )}
                     onClick={() => onRowClick?.(row)}
                   >

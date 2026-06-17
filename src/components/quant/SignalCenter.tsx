@@ -2,14 +2,17 @@
 
 /**
  * 信号中心
- * - 信号流表格：时间/类型/策略/股票/内容/推送状态
+ * - 信号流表格：时间/类型/策略/股票/内容/推送通道/状态/操作
  * - 筛选：类型/策略/日期
  * - 统计：今日各类型信号数
+ * - 行末"重推"按钮: channelAPI.repush(signalId)
+ * - 新信号 (1 分钟内) 左侧琥珀色边框 + glow
  */
 
 import * as React from 'react'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import {
   Select,
   SelectContent,
@@ -19,16 +22,31 @@ import {
 } from '@/components/ui/select'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Bell, TrendingUp, TrendingDown, Sparkles, Settings, Filter } from 'lucide-react'
+import {
+  Bell,
+  TrendingUp,
+  TrendingDown,
+  Sparkles,
+  Settings,
+  Filter,
+  CheckCircle2,
+  AlertCircle,
+  XCircle,
+  Clock,
+  RefreshCw,
+} from 'lucide-react'
 import { StockTable, type Column } from './StockTable'
 import { LoadingState } from './LoadingState'
 import { EmptyState } from './EmptyState'
 import {
   signalAPI,
   strategyAPI,
+  channelAPI,
   type SignalDTO,
   type StrategyDTO,
 } from '@/lib/api'
+import { toast } from 'sonner'
+import { cn } from '@/lib/utils'
 
 const TYPE_META: Record<
   SignalDTO['type'],
@@ -41,6 +59,29 @@ const TYPE_META: Record<
   system: { icon: Settings, color: 'var(--quant-flat)', label: '系统' },
 }
 
+// 推送状态元信息
+const PUSH_STATUS_META: Record<
+  SignalDTO['push_status'],
+  { icon: React.ElementType; color: string; label: string }
+> = {
+  success: { icon: CheckCircle2, color: 'var(--quant-down)', label: '成功' },
+  partial: { icon: AlertCircle, color: 'var(--quant-primary)', label: '部分' },
+  failed: { icon: XCircle, color: 'var(--quant-up)', label: '失败' },
+  pending: { icon: Clock, color: 'var(--quant-flat)', label: '待推' },
+}
+
+// 通道徽章元信息 (颜色与简称)
+const CHANNEL_BADGE_META: Record<string, { color: string; label: string }> = {
+  csv_log: { color: 'var(--quant-flat)', label: 'CSV' },
+  websocket: { color: '#06b6d4', label: 'WS' },
+  tdx_warn: { color: '#a855f7', label: 'TDX' },
+  feishu: { color: 'var(--quant-down)', label: '飞书' },
+  email: { color: '#f59e0b', label: '邮件' },
+}
+
+// 新信号判定阈值 (1 分钟)
+const NEW_SIGNAL_THRESHOLD_MS = 60 * 1000
+
 export function SignalCenter() {
   const [signals, setSignals] = React.useState<SignalDTO[]>([])
   const [strategies, setStrategies] = React.useState<StrategyDTO[]>([])
@@ -49,6 +90,10 @@ export function SignalCenter() {
   const [strategyFilter, setStrategyFilter] = React.useState<string>('all')
   const [startDate, setStartDate] = React.useState<string>('')
   const [endDate, setEndDate] = React.useState<string>('')
+  // 正在重推的 signal id 集合
+  const [repushing, setRepushing] = React.useState<Set<string>>(new Set())
+  // 用于刷新新信号判定
+  const [, setTick] = React.useState(0)
 
   React.useEffect(() => {
     strategyAPI.list().then(setStrategies).catch(() => {})
@@ -76,6 +121,12 @@ export function SignalCenter() {
     load()
   }, [load])
 
+  // 每 30 秒刷新一次"新信号"标记 (避免时间过去了还显示)
+  React.useEffect(() => {
+    const t = setInterval(() => setTick((n) => n + 1), 30_000)
+    return () => clearInterval(t)
+  }, [])
+
   // 按类型统计
   const stats = React.useMemo(() => {
     const m: Record<string, number> = {}
@@ -84,6 +135,54 @@ export function SignalCenter() {
     })
     return m
   }, [signals])
+
+  // 重推信号
+  const handleRepush = React.useCallback(async (signal: SignalDTO) => {
+    setRepushing((prev) => new Set(prev).add(signal.id))
+    const toastId = toast.loading(`正在重新推送信号 ${signal.id.slice(0, 8)}...`)
+    try {
+      const r = await channelAPI.repush(signal.id)
+      if (r.ok && r.fired.length > 0) {
+        toast.success(`已重推到 ${r.fired.join(', ')}`, {
+          id: toastId,
+          description: r.results
+            .map((x) => `${x.channel}: ${x.ok ? '✓' : '✗'}`)
+            .join(' · '),
+        })
+      } else if (r.ok && r.fired.length === 0) {
+        toast.warning('未推送到任何通道', {
+          id: toastId,
+          description: r.results
+            .map((x) => `${x.channel}: ${x.message}`)
+            .join(' · ') || '请检查通道是否已启用',
+        })
+      } else {
+        toast.error('重推失败', {
+          id: toastId,
+          description: r.results
+            .map((x) => `${x.channel}: ${x.message}`)
+            .join(' · '),
+        })
+      }
+    } catch (e) {
+      toast.error('重推失败', {
+        id: toastId,
+        description: (e as Error).message,
+      })
+    } finally {
+      setRepushing((prev) => {
+        const next = new Set(prev)
+        next.delete(signal.id)
+        return next
+      })
+    }
+  }, [])
+
+  // 判断是否新信号 (1 分钟内)
+  const isNewSignal = React.useCallback((s: SignalDTO) => {
+    const ts = new Date(s.time).getTime()
+    return Date.now() - ts < NEW_SIGNAL_THRESHOLD_MS
+  }, [])
 
   const columns: Column<SignalDTO>[] = [
     {
@@ -110,10 +209,11 @@ export function SignalCenter() {
         const Icon = meta.icon
         return (
           <span
-            className="text-xs px-1.5 py-0.5 rounded inline-flex items-center gap-1"
+            className="text-xs px-1.5 py-0.5 rounded inline-flex items-center gap-1 border"
             style={{
               color: meta.color,
-              backgroundColor: `color-mix(in srgb, ${meta.color} 12%, transparent)`,
+              backgroundColor: `color-mix(in srgb, ${meta.color} 10%, transparent)`,
+              borderColor: `color-mix(in srgb, ${meta.color} 30%, transparent)`,
             }}
           >
             <Icon className="size-3" />
@@ -125,27 +225,53 @@ export function SignalCenter() {
     {
       key: 'strategy',
       header: '策略',
-      width: '7rem',
-      render: (s) => (
-        <span className="text-xs text-muted-foreground truncate">
-          {s.strategy_name || '—'}
-        </span>
-      ),
+      width: '8rem',
+      render: (s) => {
+        // 优先 strategy_name; 若只有 strategy_id 显示 id; 都没有显示 —
+        const name = s.strategy_name
+        const sid = s.strategy_id
+        if (!name && !sid) {
+          return <span className="text-xs text-muted-foreground">—</span>
+        }
+        // 反查策略 emoji (若信号本身没带)
+        const strategy = strategies.find((x) => x.strategy_id === sid)
+        const emoji = strategy?.strategy_emoji || ''
+        return (
+          <span className="text-xs text-foreground/80 truncate inline-flex items-center gap-1">
+            {emoji && <span className="shrink-0">{emoji}</span>}
+            <span className="truncate">{name || sid}</span>
+          </span>
+        )
+      },
     },
     {
       key: 'stock',
       header: '股票',
-      width: '8rem',
-      render: (s) => (
-        <span className="text-xs font-mono text-foreground/80">
-          {s.stock_code ? `${s.stock_code} ${s.stock_name || ''}` : '—'}
-        </span>
-      ),
+      width: '9rem',
+      render: (s) => {
+        if (!s.stock_code && !s.stock_name) {
+          return <span className="text-xs text-muted-foreground">—</span>
+        }
+        return (
+          <span className="text-xs font-mono text-foreground/80 inline-flex items-center gap-1">
+            {s.stock_name && (
+              <span className="text-foreground/90">{s.stock_name}</span>
+            )}
+            {s.stock_code && (
+              <span className="text-muted-foreground">({s.stock_code})</span>
+            )}
+          </span>
+        )
+      },
     },
     {
       key: 'content',
       header: '内容',
-      render: (s) => <span className="text-xs text-foreground/90">{s.content}</span>,
+      render: (s) => (
+        <span className="text-xs text-foreground/90 line-clamp-2">
+          {s.content}
+        </span>
+      ),
     },
     {
       key: 'channels',
@@ -157,14 +283,26 @@ export function SignalCenter() {
           {s.pushed_channels.length === 0 ? (
             <span className="text-xs text-muted-foreground">—</span>
           ) : (
-            s.pushed_channels.map((ch) => (
-              <span
-                key={ch}
-                className="text-[10px] px-1 py-0.5 rounded bg-muted text-muted-foreground"
-              >
-                {ch}
-              </span>
-            ))
+            s.pushed_channels.map((ch) => {
+              const meta = CHANNEL_BADGE_META[ch] || {
+                color: 'var(--quant-flat)',
+                label: ch,
+              }
+              return (
+                <span
+                  key={ch}
+                  className="text-[10px] px-1.5 py-0.5 rounded border font-medium"
+                  style={{
+                    color: meta.color,
+                    backgroundColor: `color-mix(in srgb, ${meta.color} 10%, transparent)`,
+                    borderColor: `color-mix(in srgb, ${meta.color} 30%, transparent)`,
+                  }}
+                  title={ch}
+                >
+                  {meta.label}
+                </span>
+              )
+            })
           )}
         </div>
       ),
@@ -175,32 +313,60 @@ export function SignalCenter() {
       align: 'center',
       width: '5rem',
       render: (s) => {
-        const color =
-          s.push_status === 'success'
-            ? 'var(--quant-down)'
-            : s.push_status === 'partial'
-            ? 'var(--quant-primary)'
-            : s.push_status === 'failed'
-            ? 'var(--quant-up)'
-            : 'var(--quant-flat)'
+        const meta = PUSH_STATUS_META[s.push_status]
+        const Icon = meta.icon
         return (
           <span
-            className="text-[10px] inline-flex items-center gap-1 px-1.5 py-0.5 rounded"
+            className="text-[10px] inline-flex items-center gap-1 px-1.5 py-0.5 rounded border"
             style={{
-              color,
-              backgroundColor: `color-mix(in srgb, ${color} 12%, transparent)`,
+              color: meta.color,
+              backgroundColor: `color-mix(in srgb, ${meta.color} 10%, transparent)`,
+              borderColor: `color-mix(in srgb, ${meta.color} 30%, transparent)`,
             }}
           >
-            <span
-              className="inline-block size-1.5 rounded-full"
-              style={{ backgroundColor: color }}
-            />
-            {s.push_status}
+            <Icon className="size-3" />
+            {meta.label}
           </span>
         )
       },
     },
+    {
+      key: 'actions',
+      header: '操作',
+      align: 'center',
+      width: '4rem',
+      render: (s) => {
+        const isRepushing = repushing.has(s.id)
+        return (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-xs hover:bg-amber-500/10 hover:text-amber-400"
+            disabled={isRepushing}
+            onClick={(e) => {
+              e.stopPropagation()
+              handleRepush(s)
+            }}
+            title="重新推送到所有启用通道"
+          >
+            <RefreshCw className={cn('size-3', isRepushing && 'animate-spin')} />
+            <span className="hidden lg:inline">{isRepushing ? '推送中' : '重推'}</span>
+          </Button>
+        )
+      },
+    },
   ]
+
+  // 行样式: 新信号左侧琥珀色边框 + glow
+  const rowClassName = React.useCallback(
+    (s: SignalDTO) => {
+      if (isNewSignal(s)) {
+        return 'signal-row-new'
+      }
+      return ''
+    },
+    [isNewSignal]
+  )
 
   return (
     <div className="space-y-4">
@@ -316,6 +482,18 @@ export function SignalCenter() {
         </div>
       </Card>
 
+      {/* 图例提示 */}
+      <div className="flex flex-wrap items-center gap-3 text-[10px] text-muted-foreground">
+        <span className="flex items-center gap-1">
+          <span className="inline-block w-3 h-0.5 bg-amber-400 rounded" />
+          新信号 (1 分钟内)
+        </span>
+        <span className="flex items-center gap-1">
+          <RefreshCw className="size-3" />
+          点击行末"重推"可重新推送到所有启用通道
+        </span>
+      </div>
+
       {/* 表格 */}
       {loading ? (
         <LoadingState rows={10} />
@@ -330,6 +508,7 @@ export function SignalCenter() {
           rowKey={(s) => s.id}
           maxHeight="32rem"
           pageSize={30}
+          rowClassName={rowClassName}
         />
       )}
     </div>

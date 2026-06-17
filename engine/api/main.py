@@ -28,6 +28,8 @@ from fastapi.responses import JSONResponse
 
 from engine.api import state as engine_state_mod
 from engine.api.routes import (
+    backtest as backtest_routes,
+    channels as channels_routes,
     config as config_routes,
     monitor as monitor_routes,
     sectors as sectors_routes,
@@ -210,6 +212,8 @@ def create_app() -> FastAPI:
     app.include_router(signals_routes.router, prefix="/api/signals")
     app.include_router(config_routes.router, prefix="/api/config")
     app.include_router(theme_routes.router, prefix="/api/theme")
+    app.include_router(channels_routes.router, prefix="/api/channels")
+    app.include_router(backtest_routes.router, prefix="/api/backtest")
 
     return app
 
