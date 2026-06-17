@@ -9999,3 +9999,63 @@ Stage Summary:
   6. 通知中心 localStorage 持久化
   7. WebSocket 服务部署（:3003）
   8. 回测 + K 线接真实数据
+
+---
+Task ID: R8-交接文档强化
+Agent: main
+Task: 强化交接文档：加 AI 基本提示词 + Windows 运行匹配 + 策略因子扩展专档
+
+Work Log:
+- 用户反馈：交接文档不清晰，AI 跑起来像无头苍蝇；需补 Windows 运行匹配 + 策略因子扩展步骤
+- 核实代码（确保文档准确，不凭印象）：
+  * engine/data_adapter/real_adapter.py 第 50-120 行：tqcenter try-import 容错 + initialize() 双模式设计
+  * engine/data_adapter/factory.py：按 app.adapter_mode 自动切换 Mock/Real
+  * engine/factors/base.py：Factor ABC（factor_id/name/category + calculate + get_required_fields + get_default_params）
+  * engine/factors/registry.py：FactorRegistry 自动扫描 engine/factors/*.py
+  * engine/factors/momentum.py：真实因子示例（Momentum5DFactor）
+  * engine/channels/base.py：BaseChannel ABC（name + enabled + send + validate_config + status）
+  * engine/channels/csv_log.py：真实通道示例（CsvLogChannel force_enabled）
+  * engine/expression/evaluator.py：simpleeval 白名单（clip/abs/min/max/sum/round/...）
+  * strategies/strategy_dbqzt.yaml：factors[] + scoring.formula（clip 多维度）+ monitor.alert_conditions
+  * docs/maintenance/STRATEGY_LOGIC.md 目录：12 步选股 + 5 策略 4 维度
+  * package.json/next.config.ts：确认纯 Web 应用（无 electron/tauri）
+- 重写 docs/PROJECT_HANDOVER.md（767→779 行）：
+  * 新增第二章「AI 基本提示词」：7 条核心行为准则 + 标准动作流程 + 禁止清单 + 不确定情况处理
+  * 新增第三章「Windows 运行匹配」：代码不用改的依据 + 8 步部署 + 启动脚本待补 + 常见问题速查
+  * 强化第六章：策略因子扩展简版 + 指向专档
+  * 新增第十章：接手 Checklist
+- 新增 docs/STRATEGY_FACTOR_EXTENSION.md（~700 行）：
+  * 5 种扩展场景（调阈值/加策略/加因子/加通道/加导出）
+  * 每场景完整 Step-by-Step + 代码示例
+  * 评分公式与表达式引擎详解（白名单函数 + clip 结构）
+  * 因子公式实现依据对照表（26 因子 vs STRATEGY_LOGIC.md 章节）
+  * 完整示例：从零实现「放量突破」策略
+  * 验证 QA 清单 + 常见陷阱
+- 文档间交叉引用：HANDOVER ↔ STRATEGY_FACTOR_EXTENSION ↔ ARCHITECTURE ↔ STRATEGY_LOGIC ↔ worklog
+
+Stage Summary:
+- 已完成:
+  1. PROJECT_HANDOVER.md 强化：加 AI 基本提示词（7 准则 + 流程 + 禁忌）+ Windows 运行匹配（代码不改的依据 + 8 步部署 + 速查）
+  2. STRATEGY_FACTOR_EXTENSION.md 新增：5 扩展场景完整步骤 + 26 因子补全对照表 + 表达式引擎详解 + 完整示例
+  3. 解决用户「无头苍蝇」痛点：AI 基本提示词明确「先读后写/配置驱动/最小改动/QA 必做/worklog 必填/不动核心代码」
+  4. 解决用户「Windows 运行」疑问：明确纯浏览器交互 + 后端代码已双模式适配 + 只需改配置+环境+启动脚本
+  5. 解决用户「策略因子步骤」需求：专档含决策流程图 + 每场景代码示例 + 公式依据对照表
+- 文件变更:
+  修改 (1 个文件):
+    docs/PROJECT_HANDOVER.md          # 重写，强化 AI 提示词 + Windows 章节
+  新增 (1 个文件):
+    docs/STRATEGY_FACTOR_EXTENSION.md # ~700 行，策略因子扩展专档
+- 未解决问题:
+  1. Windows 启动脚本（start_all.bat/stop_all.bat/start_engine.ps1）尚未创建，文档已标注「待补」
+  2. 26 因子多为骨架实现，补全需对照 STRATEGY_LOGIC.md 逐个实现（工作量较大，建议分轮次）
+  3. 因子注册当前需重启 FastAPI（不热加载），未来可考虑热扫描
+  4. 文档未在 page.tsx 提供 UI 入口，用户需直接访问 docs/ 路径
+- 下一阶段建议 (R8+):
+  1. 创建 Windows 启动脚本（start_all.bat / stop_all.bat / start_engine.ps1）
+  2. 对照 STRATEGY_LOGIC.md 补全 26 因子公式（分轮次，每轮 3-5 个）
+  3. 在 page.tsx header 加「帮助」按钮，链接 USER_GUIDE + HANDOVER
+  4. 统一版本号为 1.0.0
+  5. package.json name 改为 tdxquant
+  6. 通知中心 localStorage 持久化
+  7. WebSocket 服务部署（:3003）
+  8. 回测 + K 线接真实数据

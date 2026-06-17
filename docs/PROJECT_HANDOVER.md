@@ -1,188 +1,403 @@
-# TdxQuant 量化交易系统 — 项目移交文档（AI 接手指南）
+# TdxQuant 量化交易系统 — 项目移交文档（AI 接手必读）
 
-> **文档定位**：本文档是 **AI 维护者接手项目时的操作手册**，详细说明如何快速启动、修改初始接口、调整项目配置。
-> **适用对象**：新接手的 AI 开发助手 / 自动化 cron 任务（webDevReview）
-> **阅读顺序**：先读本文档 → 再读 `docs/maintenance/ARCHITECTURE.md` → 最后按需读 `worklog.md`
+> **本文档是接手 AI 的第一手资料。任何动作前，请完整阅读本文档「第二章 AI 基本提示词」。**
+> **若按本文档操作时发现与实际代码不符，以代码为准，并回填修正本文档。**
 >
-> **最后更新**：R7 轮次
+> **最后更新**：R8 轮次（交接文档强化 + Windows 运行匹配 + 策略因子扩展方案）
+> **配套文档**：
+> - `docs/STRATEGY_FACTOR_EXTENSION.md` — 策略与因子扩展完整步骤（本文档第六章的详尽版）
+> - `docs/maintenance/ARCHITECTURE.md` — 5 层架构深度说明
+> - `docs/maintenance/STRATEGY_LOGIC.md` — 5 策略公式与阈值唯一依据
+> - `docs/PROJECT_MAINTENANCE.md` — 运维 / 部署 / 常见问题
+> - `docs/USER_GUIDE.md` — 终端用户使用说明
+> - `worklog.md` — AI 开发全程记录（按轮次归档，最后 2 轮必读）
 
 ---
 
 ## 目录
 
-1. [移交概述](#一移交概述)
-2. [快速启动（5 分钟）](#二快速启动5-分钟)
-3. [权限说明](#三权限说明)
-4. [关键配置文件位置](#四关键配置文件位置)
+1. [项目是什么 / 不是什么](#一项目是什么--不是什么)
+2. [AI 基本提示词（接手第一件事）](#二ai-基本提示词接手第一件事)
+3. [Windows 运行匹配指南](#三windows-运行匹配指南)
+4. [关键配置文件位置与修改步骤](#四关键配置文件位置与修改步骤)
 5. [修改初始接口指南](#五修改初始接口指南)
-6. [调整项目配置指南](#六调整项目配置指南)
-7. [常见修改场景 Step-by-Step](#七常见修改场景-step-by-step)
-8. [AI 维护者工作流规范](#八ai-维护者工作流规范)
-9. [质量门禁与验证清单](#九质量门禁与验证清单)
-10. [风险与禁忌](#十风险与禁忌)
+6. [策略与因子扩展（简版，详见专档）](#六策略与因子扩展简版详见专档)
+7. [AI 维护者工作流规范](#七ai-维护者工作流规范)
+8. [质量门禁与验证清单](#八质量门禁与验证清单)
+9. [风险与禁忌](#九风险与禁忌)
+10. [接手 Checklist](#十接手-checklist)
 
 ---
 
-## 一、移交概述
+## 一、项目是什么 / 不是什么
 
-### 1.1 项目当前状态
+### 1.1 一句话定义
+
+TdxQuant 是一套 **B/S 架构的 A 股量化选股 / 监控 / 回测系统**：
+- **后端**：Python 3.13 + FastAPI（:8000），通过 `tqcenter` 调通达信终端
+- **前端**：Next.js 16（:3000），用户用 **Chrome / Edge 浏览器**操作
+- **不是**桌面 exe、不是 Electron、不是通达信插件
+
+### 1.2 运行形态
+
+```
+Windows 生产环境：
+  通达信金融终端（必须预启动登录）
+        ↑ tqcenter API
+  FastAPI :8000（后端引擎）
+        ↑ HTTP
+  Next.js :3000（前端 Web 服务）
+        ↑ HTTP
+  Chrome / Edge 浏览器 ← 用户在这里操作
+
+Linux 沙箱开发环境：
+  Mock 适配器（读 V8 CSV 样本）替代通达信
+  其余同上 + Caddy :81 网关（沙箱对外唯一出口）
+```
+
+**关键结论**：用户端**永远是浏览器**，开发者要启动的是后端 + 前端两个进程。
+
+### 1.3 当前项目状态（R7 末）
 
 | 维度 | 状态 |
 |------|------|
-| **稳定性** | P1++++ 极度稳定，lint 0 错误，全 API 200 |
-| **已完成轮次** | R1–R7（7 轮迭代） |
-| **后端** | FastAPI :8000，10 路由模块，4 推送通道，26 因子，5 策略 |
-| **前端** | Next.js :3000，5 Tab，24 量化组件，通知中心，全局搜索 |
-| **数据** | Mock 模式（沙箱）/ Real 模式（Windows 生产） |
-| **待办** | 因子插件补全 / K 线真实数据 / 回测真实数据 / WebSocket 服务 |
-
-### 1.2 移交核心原则
-
-1. **配置驱动**：阈值 / 路径 / 端口 / 开关全部在 YAML，**绝不硬编码**到代码
-2. **变与不变分离**：修改前先判断属于 5 层架构的哪一层（见 `ARCHITECTURE.md` §二）
-3. **前端优先**：开发时先写前端让用户可见，再写后端
-4. **渐进迁移**：不搞大重构，逐文件逐功能推进
-5. **worklog 必填**：每轮工作必须 append 到 `worklog.md`，`---` 分隔
-
-### 1.3 必读文档清单（按优先级）
-
-| 优先级 | 文档 | 用途 |
-|--------|------|------|
-| ★★★★★ | `worklog.md`（最后 2 轮章节） | 了解前序进展与未决事项 |
-| ★★★★★ | 本文档 | 快速启动与修改规范 |
-| ★★★★☆ | `docs/maintenance/ARCHITECTURE.md` | 5 层架构 + 目录结构深度说明 |
-| ★★★☆☆ | `docs/PROJECT_MAINTENANCE.md` | 运维 / 部署 / 常见问题 |
-| ★★★☆☆ | `docs/USER_GUIDE.md` | 用户视角功能说明 |
-| ★★☆☆☆ | `docs/maintenance/STRATEGY_LOGIC.md` | 策略公式（改策略时必读） |
-| ★☆☆☆☆ | `docs/tdx-quant/` | 通达信原始 API 文档（接 Real 模式时查） |
+| 稳定性 | P1++++ 极度稳定，lint 0 错误，全 API 200 |
+| 已完成轮次 | R1–R7（7 轮迭代） |
+| 后端 | FastAPI :8000，10 路由，4 通道，26 因子，5 策略 |
+| 前端 | Next.js :3000，5 Tab，24 量化组件 |
+| 数据 | Mock 模式（沙箱）/ Real 模式（Windows 生产） |
+| 待办 | 因子公式补全 / K 线真实数据 / 回测真实数据 |
 
 ---
 
-## 二、快速启动（5 分钟）
+## 二、AI 基本提示词（接手第一件事）
 
-### 2.1 前置检查
+> ⚠️ **这是本文档最重要的一章。接手 AI 必须把下面这段作为「系统提示词」严格执行，避免「无头苍蝇」式乱改。**
 
-```bash
-# 1. 确认在项目根目录
-cd /home/z/my-project
+### 2.1 核心行为准则（必须遵守）
 
-# 2. 确认 Python venv
-ls /home/z/.venv/bin/python3   # 应存在
+```
+你是 TdxQuant 项目的 AI 维护者。你的所有动作必须遵循以下准则：
 
-# 3. 确认 bun
-which bun                       # 应输出路径
+【准则 1：先读后写】
+任何代码修改前，必须先读 worklog.md 最后 2 个轮次章节 + 本文档对应章节。
+不确定的事，先用 Read/Grep 工具核实，不要凭印象改。
 
-# 4. 确认关键目录
-ls engine/ src/ config/ strategies/ data/ docs/ scripts/
+【准则 2：配置驱动优先】
+遇到「改阈值 / 改开关 / 改路径 / 改端口」需求，第一反应是改 YAML，不是改代码。
+判断流程：
+  - 改阈值/开关 → config/*.yaml 或 strategies/*.yaml（L5 层，热加载）
+  - 增删策略 → strategies/ 加/删 YAML（L4 层，热加载）
+  - 新增因子 → engine/factors/ 加 .py 插件（L3 层，自动扫描注册）
+  - 新增通道 → engine/channels/ 加 .py 插件（L3 层，自动扫描注册）
+  - 改选股流程 → engine/pipeline/（L2 层，慎重，影响全部策略）
+  - 换数据库/API → engine/data_adapter/（L1 层，极少）
+
+【准则 3：前端优先】
+开发新功能时，先写前端组件让用户可见，再写后端 API。
+后端 API 要通过 Next.js route.ts 代理，不要让前端直连 :8000。
+
+【准则 4：最小改动】
+一次只解决一个问题。不要顺手重构无关代码。
+改 1 个文件能解决的事，不要改 10 个文件。
+
+【准则 5：QA 必做】
+每轮工作结束前必须：
+  - bun run lint（0 错误）
+  - curl 核心 API（全 200）
+  - tail dev.log（无 Fatal/Error）
+  - agent-browser 打开 / 路由验证渲染
+四项任一不过，不许报告「完成」。
+
+【准则 6：worklog 必填】
+每轮工作必须 append 到 worklog.md（--- 分隔 + Task ID + Stage Summary）。
+禁止覆盖已有内容。禁止省略 Task ID。
+
+【准则 7：不动核心代码（除非必要）】
+以下代码已经稳定，无明确理由不要动：
+  - engine/data_adapter/real_adapter.py（双模式设计已完备）
+  - engine/config/loader.py（ConfigLoader 单例 + mtime 监听）
+  - engine/factors/registry.py（自动扫描机制）
+  - engine/channels/registry.py（自动扫描机制）
+  - src/lib/api-proxy.ts（tryFastAPI 三件套）
+  - Caddyfile（沙箱网关，Windows 不用）
 ```
 
-### 2.2 启动全栈
+### 2.2 接手后的标准动作流程
 
-```bash
-# 方式 A：一键启动（推荐）
-bash scripts/start_all.sh
-#   → 自动 pkill 旧进程
-#   → 后台启动 FastAPI :8000
-#   → 后台启动 Next.js :3000（日志 → dev.log）
+```
+第 1 步：环境确认（5 分钟）
+  ├─ cd /home/z/my-project
+  ├─ 读 worklog.md 最后 400 行
+  ├─ 读本文档第二、三、四章
+  └─ ps aux | grep -E "uvicorn|next dev"  确认进程在
 
-# 方式 B：分别启动（调试用）
-/home/z/.venv/bin/python -m uvicorn engine.api.main:app --host 0.0.0.0 --port 8000 --reload &
-bun run dev &
+第 2 步：健康检查（2 分钟）
+  ├─ curl :8000/health
+  ├─ curl :8000/api/strategies
+  ├─ curl :3000/api
+  └─ tail dev.log
+
+第 3 步：理解任务（明确前不动手）
+  ├─ 任务是修 Bug？→ 复现 → 定位文件 → 最小修复 → QA
+  ├─ 任务是新功能？→ 判断层数 → 前端优先 → 后端 → QA
+  └─ 任务不明确？→ 在 worklog 写「待确认」，不要瞎猜
+
+第 4 步：执行（前端优先）
+  ├─ 写前端组件
+  ├─ 写后端 API + Schema
+  ├─ 写 Next.js route.ts 代理
+  └─ 同步 src/lib/api.ts 的 DTO 类型
+
+第 5 步：QA 验证（四项全过才报告完成）
+  ├─ bun run lint
+  ├─ curl 全 API
+  ├─ tail dev.log
+  └─ agent-browser 端到端
+
+第 6 步：归档
+  └─ append worklog.md（--- + Task ID + Work Log + Stage Summary）
 ```
 
-### 2.3 验证启动成功
+### 2.3 禁止行为清单
 
-```bash
-# 1. 进程检查
-ps aux | grep -E "uvicorn|next dev" | grep -v grep
-# 应看到 2 个进程
-
-# 2. FastAPI 健康
-curl http://127.0.0.1:8000/health
-# → {"status":"ok","uptime_seconds":N,"adapter":"mock",...}
-
-# 3. Next.js 代理
-curl http://127.0.0.1:3000/api
-# → 健康检查 JSON
-
-# 4. 核心 API 冒烟
-curl http://127.0.0.1:8000/api/strategies           # 策略列表
-curl http://127.0.0.1:8000/api/monitor?action=status # 监控状态
-curl http://127.0.0.1:8000/api/signals?limit=1       # 信号
-
-# 5. 前端页面（通过 Caddy 网关）
-# 沙箱预览面板自动访问 :81 → :3000
-```
-
-### 2.4 停止服务
-
-```bash
-pkill -f "uvicorn engine.api.main"
-pkill -f "next dev"
-```
-
-### 2.5 重启（配置变更后通常不需要）
-
-```bash
-# 配置 YAML 改动 → 热加载即可，无需重启
-curl -X POST http://127.0.0.1:8000/api/config/reload
-
-# 代码改动才需要重启
-pkill -f "uvicorn engine.api.main" && \
-/home/z/.venv/bin/python -m uvicorn engine.api.main:app --host 0.0.0.0 --port 8000 --reload &
-# Next.js 自动热重载，无需手动重启
-```
-
----
-
-## 三、权限说明
-
-### 3.1 文件系统权限
-
-| 路径 | 权限 | 说明 |
-|------|------|------|
-| `/home/z/my-project/` | 读写 | AI 维护者完全控制 |
-| `/home/z/.venv/` | 只读 | Python venv，**不可修改**，只能 `pip install` |
-| `data/duckdb/quant.db` | 读写 | DuckDB 单文件，**同一时间只能一个 FastAPI 进程写入** |
-| `docs/v8-data/` | 只读 | V8 样本数据（Mock 数据源），**不可修改** |
-| `Caddyfile` | 读写 | 网关配置，修改后需 `caddy reload`（沙箱自动） |
-
-### 3.2 端口权限
-
-| 端口 | 服务 | 可否修改 |
+| 禁止 | 后果 | 正确做法 |
 |------|------|----------|
-| `3000` | Next.js | ✗ 固定（沙箱约定） |
-| `8000` | FastAPI | ✓ 改 `config/app.yaml` `server.port` |
-| `81` | Caddy | ✗ 固定（外部唯一入口） |
-| `3003` | WebSocket（规划） | ✓ 预留 |
+| 凭印象改代码 | 引入 Bug | 先 Read/Grep 核实 |
+| 一次改多个无关文件 | 难以回滚 | 一次一个问题 |
+| 跳过 QA 报告完成 | 用户看到白屏 | 四项全过才报告 |
+| 覆盖 worklog.md | 丢开发历史 | append 模式 |
+| 改 real_adapter.py「优化」 | 破坏双模式 | 已稳定，别动 |
+| 直接访问 localhost:3000 | 用户无法访问 | 走 Caddy :81（沙箱） |
+| bun run build（沙箱） | OOM 卡死 | 仅 bun run dev |
+| API URL 写端口号 | Caddy 不转发 | 用 ?XTransformPort=N |
+| 硬编码阈值到代码 | 无法热加载 | 全走 YAML |
+| 删启用中的策略 | 运行中策略异常 | 先 disable 再删 |
 
-> **禁止**在 API 请求 URL 中写端口号（包括 WebSocket），必须用 `?XTransformPort=N` query param 走 Caddy 转发。
+### 2.4 遇到不确定情况怎么办
 
-### 3.3 进程权限
+```
+情况 1：任务描述模糊（如「优化一下系统」）
+  → 不要瞎猜。在 worklog 写「任务待澄清」，列出你理解的 3 种可能方向，
+    等待用户确认。宁可不动，不要乱动。
 
-- AI 维护者可启动 / 停止 FastAPI 和 Next.js
-- **禁止** `bun run build`（沙箱环境，仅 `bun run dev`）
-- **禁止**直接访问 `localhost:3000` / `127.0.0.1:8000`（内部地址），用户只能通过 Caddy `:81` 预览面板访问
+情况 2：改了代码但 QA 不过
+  → 不要硬凑。回滚改动，重新分析根因。
+    worklog 如实记录「QA 未过，已回滚，待重新方案」。
 
-### 3.4 数据权限
+情况 3：发现历史代码有「问题」
+  → 不要顺手修。先判断是否真的影响当前功能。
+    不影响 → 记录到 worklog「已知技术债」，留给后续轮次。
+    影响 → 走最小修复流程。
 
-| 数据 | 可读 | 可写 | 可删 |
-|------|------|------|------|
-| `data/duckdb/quant.db` | ✓ | ✓（引擎自动） | ⚠️ 需先备份 |
-| `data/csv/*.csv` | ✓ | ✓（引擎自动） | ✓ |
-| `data/excel/*.xlsx` | ✓ | ✓（引擎自动） | ✓ |
-| `logs/signals.csv` | ✓ | ✓（CSV Log 通道追加） | ⚠️ 删后丢历史 |
-| `strategies/*.yaml` | ✓ | ✓ | ✓（禁删启用中的策略，后端 409 拦截） |
-| `config/*.yaml` | ✓ | ✓ | ✗ 删除会导致启动失败 |
+情况 4：webDevReview cron 触发的任务
+  → cron 每 15 分钟触发一次，任务描述见 cron 工具。
+    按本文档流程执行，每轮只做 1-2 个明确的事，不要贪多。
+```
 
 ---
 
-## 四、关键配置文件位置
+## 三、Windows 运行匹配指南
+
+> **核心结论：后端代码已为 Windows 做好适配，无需改 Python 代码。需要改的是配置 + 环境 + 启动脚本。**
+
+### 3.1 两种环境对比
+
+| 维度 | Linux 沙箱（开发） | Windows（生产） |
+|------|-------------------|-----------------|
+| 适配器模式 | `mock`（V8 CSV 样本） | `real`（tqcenter API） |
+| 通达信终端 | 不需要 | **必须预启动登录** |
+| tqcenter 包 | 不安装 | **必须安装** |
+| 网关 | Caddy :81（对外唯一出口） | **不需要 Caddy**，直接访问 :3000 |
+| 访问方式 | Caddy 预览面板 | `http://localhost:3000` |
+| 板块回写 | 仅内存模拟 | **真实回写通达信** |
+| 推送通道 | CSV + Web | 全部可用（含 tdx_warn） |
+| 启动脚本 | `scripts/*.sh` | 需 `scripts/*.bat` / `.ps1`（待补） |
+| `bun run build` | ❌ 禁止 | ✅ 可用（生产提速） |
+
+### 3.2 后端代码为什么不用改？
+
+核实 `engine/data_adapter/real_adapter.py` 第 50-120 行：
+
+```python
+# tqcenter 可选导入（沙箱导入失败也能实例化，调用时报错）
+_tqcenter_available = False
+try:
+    from tqcenter import tq as _tq
+    from tqcenter import tqconst as _tqconst
+    _tqcenter_available = True
+except Exception:
+    pass
+
+def initialize(self) -> bool:
+    if not _tqcenter_available:
+        return False
+    _tq.initialize(init_arg)
+    self._initialized = True
+```
+
+`engine/data_adapter/factory.py` 按 `config/app.yaml` 的 `app.adapter_mode` 自动切换：
+- `mock` → `MockAdapter`（读 CSV）
+- `real` → `RealAdapter`（调 tqcenter）
+
+**设计已是「Windows 生产 + Linux 开发」双模式，改配置即可，不动代码。**
+
+### 3.3 Windows 部署完整步骤
+
+#### Step 1：环境准备（一次性）
+
+```powershell
+# 1.1 安装 Python 3.13（勾选 Add to PATH）
+# 验证
+python --version  # → Python 3.13.x
+
+# 1.2 安装 Node.js 20+ 和 bun
+# Node.js: https://nodejs.org/
+powershell -c "irm bun.sh/install.ps1 | iex"
+bun --version
+
+# 1.3 安装通达信金融终端 + tqcenter
+# 通达信终端：券商提供
+# tqcenter：通达信终端自带，或 pip install tqcenter
+pip install tqcenter
+```
+
+#### Step 2：获取项目 + 安装依赖
+
+```powershell
+cd D:\tdxquant  # 假设项目放这里
+
+# 后端依赖
+pip install -r requirements.txt
+
+# 前端依赖
+bun install
+```
+
+#### Step 3：切换适配器模式（关键）
+
+编辑 `config/app.yaml`：
+
+```yaml
+app:
+  adapter_mode: real    # ← 从 mock 改成 real
+```
+
+> ⚠️ 适配器模式变更**不支持热加载**，必须重启 FastAPI。
+
+#### Step 4：初始化数据库（首次）
+
+```powershell
+python scripts\init_db.py
+```
+
+#### Step 5：启动通达信终端（必须）
+
+> ⚠️ Real 模式下，通达信金融终端必须先启动并登录，否则 `tq.initialize()` 失败。
+> 保持终端窗口运行，不要最小化到托盘（部分版本会断连）。
+
+#### Step 6：启动后端 FastAPI
+
+PowerShell 窗口 A：
+
+```powershell
+cd D:\tdxquant
+python scripts\start_engine.py --reload
+# 或：python -m uvicorn engine.api.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+看到 `Uvicorn running on http://0.0.0.0:8000` 即成功。
+
+**验证 tqcenter 连通**：
+```powershell
+curl http://127.0.0.1:8000/api/monitor?action=status
+# 应返回 adapter: real, subscribed: N
+# 若仍是 mock，说明 app.yaml 没改或没重启
+```
+
+#### Step 7：启动前端 Next.js
+
+PowerShell 窗口 B：
+
+```powershell
+cd D:\tdxquant
+bun run dev
+```
+
+看到 `Local: http://localhost:3000` 即成功。
+
+#### Step 8：访问系统
+
+Windows 生产**不需要 Caddy**，浏览器直接访问：
+
+| 入口 | 地址 |
+|------|------|
+| 前端 UI | `http://localhost:3000` |
+| 后端 API 文档 | `http://localhost:8000/docs` |
+| 健康检查 | `http://localhost:8000/health` |
+
+### 3.4 Windows 启动脚本（待补，建议接手 AI 创建）
+
+当前 `scripts/` 只有 `.sh`，Windows 需要补：
+
+| 待创建文件 | 对应 Linux | 功能 |
+|------------|-----------|------|
+| `scripts/start_all.bat` | `start_all.sh` | 一键启动 FastAPI + Next.js |
+| `scripts/stop_all.bat` | 无 | 停止两个进程 |
+| `scripts/start_engine.ps1` | `start_engine.py` | PowerShell 版引擎启动 |
+
+`start_all.bat` 示例（接手 AI 可参考）：
+```bat
+@echo off
+cd /d %~dp0\..
+echo Starting TdxQuant FastAPI...
+start "TdxQuant-Engine" cmd /k "python scripts\start_engine.py --reload"
+timeout /t 5 /nobreak >nul
+echo Starting TdxQuant Next.js...
+start "TdxQuant-Web" cmd /k "bun run dev"
+echo Both services started. Access http://localhost:3000
+```
+
+### 3.5 Windows 常见问题速查
+
+| 问题 | 原因 | 解决 |
+|------|------|------|
+| `ModuleNotFoundError: tqcenter` | tqcenter 未装 | `pip install tqcenter` 或从通达信终端路径安装 |
+| `tq.initialize()` 报「终端未连接」 | 终端未启动/未登录 | 启动通达信终端并登录，保持前台 |
+| `database is locked` | 多 FastAPI 实例 | `tasklist \| findstr python` 杀多余进程 |
+| 端口 8000/3000 占用 | 旧进程未退 | `netstat -ano \| findstr :8000` + `taskkill /PID <pid> /F` |
+| 选股结果空 | 非交易时段 / 筛选过严 | 交易时段运行；检查 universe/pool |
+| 板块回写失败 | 终端未启动 | 启动通达信终端 |
+| YAML 路径反斜杠 | 单 `\` 转义 | 用 `/` 或 `\\` |
+| 飞书推送不生效 | webhook 没配 | 编辑 channels.yaml + 热加载 + 测试 |
+
+### 3.6 Windows 生产构建（可选提速）
+
+```powershell
+# 沙箱禁止，Windows 可用
+bun run build    # 生成 .next/standalone/
+bun run start    # NODE_ENV=production 运行
+```
+
+### 3.7 Windows 开机自启（可选）
+
+用 [NSSM](https://nssm.cc/) 把 FastAPI 注册为 Windows 服务：
+```powershell
+nssm install TdxQuant-Engine "D:\tdxquant\.venv\Scripts\python.exe" "scripts\start_engine.py"
+nssm set TdxQuant-Engine AppDirectory "D:\tdxquant"
+nssm start TdxQuant-Engine
+```
+
+或用「任务计划程序」+ 批处理实现开机自启。
+
+---
+
+## 四、关键配置文件位置与修改步骤
 
 ### 4.1 配置文件地图
 
 ```
-/home/z/my-project/
+/home/z/my-project/（沙箱） / D:\tdxquant\（Windows）
 ├── config/
 │   ├── app.yaml                 ★★★ 全局配置（适配器 / 端口 / 路径）
 │   ├── channels.yaml            ★★★ 推送通道（4 通道开关与参数）
@@ -196,7 +411,7 @@ pkill -f "uvicorn engine.api.main" && \
 │   ├── _template.yaml           ★★★ 策略模板（复制即用）
 │   └── strategy_*.yaml          ★★★ 5 个策略定义
 ├── prisma/schema.prisma         ★   Prisma schema（仅 User/Post 脚手架）
-├── Caddyfile                    ★★  网关配置（:81）
+├── Caddyfile                    ★★  网关配置（仅沙箱 :81，Windows 不用）
 ├── .env                         ★   DATABASE_URL（Prisma）
 ├── package.json                 ★★★ 前端依赖 + scripts
 ├── requirements.txt             ★★★ 后端依赖
@@ -209,11 +424,11 @@ pkill -f "uvicorn engine.api.main" && \
 
 ```yaml
 app:
-  adapter_mode: mock          # ★ mock(沙箱) / real(生产)
+  adapter_mode: mock       # ★ mock(沙箱) / real(Windows 生产)
   log_level: INFO
 server:
   host: 0.0.0.0
-  port: 8000                  # ★ FastAPI 端口
+  port: 8000               # ★ FastAPI 端口
 paths:
   duckdb: ./data/duckdb/quant.db
   csv_output: ./data/csv
@@ -247,18 +462,32 @@ channels:
 
 #### `strategies/strategy_*.yaml`（策略）
 
-关键字段（详见 `_template.yaml` 注释）：
+关键字段（详见 `_template.yaml` 注释 + 第六 + `STRATEGY_FACTOR_EXTENSION.md`）：
 - `strategy_id` / `strategy_name` / `strategy_emoji` / `enabled`
-- `sector.code`（命名规则 `ZD_<拼音大写><两位序号>`）/ `sector.name`
+- `sector.code`（`ZD_<拼音大写><两位序号>`）/ `sector.name`
 - `universe`（股票池筛选：ST/停牌/新股/市场）
 - `pool.expression`（策略专属筛选表达式）
 - `cleaning.rules_file`（引用 `cleaning_rules.yaml`）
 - `factors[]`（因子组合，`factor_id` + `weight` + `params`）
-- `scoring.expression`（评分公式，必须含 `clip`）
+- `scoring.formula`（评分公式，必须含 `clip`）
 - `monitor.alert_conditions[]`（预警条件 + `channels`）
 - `export`（CSV/Excel/板块回写）
 
-### 4.3 代码入口位置
+### 4.3 配置修改标准流程
+
+```
+编辑 YAML 文件
+    ↓
+（等待 2s 自动重载）或 手动 POST /api/config/reload
+    ↓
+验证：GET /api/strategies 或 GET /api/channels
+    ↓
+前端 UI 自动刷新（轮询 / 手动刷新）
+```
+
+**例外**：`app.adapter_mode` 和 `server.port` 变更需重启 FastAPI（不热加载）。
+
+### 4.4 代码入口位置
 
 | 层 | 入口文件 | 关键函数 / 类 |
 |----|----------|---------------|
@@ -278,17 +507,15 @@ channels:
 
 ## 五、修改初始接口指南
 
-### 5.1 「初始接口」的定义
-
-本文档中「初始接口」指：
+### 5.1 「初始接口」定义
 
 1. **后端 API 端点**：`engine/api/routes/*.py` 中的 FastAPI 路由
 2. **前端 API 客户端**：`src/lib/api.ts` 中的 `xxxAPI` 命名空间
 3. **前端 API 代理**：`src/app/api/*/route.ts` 中的 Next.js Route Handlers
-4. **Pydantic Schema**：`engine/api/schemas.py` 中的请求 / 响应模型
+4. **Pydantic Schema**：`engine/api/schemas.py`
 5. **前端 DTO 类型**：`src/lib/api.ts` 中的 `*DTO` 类型
 
-### 5.2 新增一个 API 端点的完整流程
+### 5.2 新增 API 端点完整流程（6 步）
 
 以「新增 `GET /api/example/hello`」为例：
 
@@ -351,22 +578,17 @@ export async function GET() {
 }
 ```
 
-> **注意**：`tryFastAPI` 服务端转发到 `http://127.0.0.1:8000`，3s 超时，失败返回 `null`（调用方降级到 mock）。
+> **`tryFastAPI`**：服务端转发到 `http://127.0.0.1:8000`，3s 超时，失败返回 `null`（调用方降级到 mock）。
 
 #### Step 6：验证
 
 ```bash
-# 后端直连
-curl http://127.0.0.1:8000/api/example/hello
-
-# 前端代理
-curl http://127.0.0.1:3000/api/example/hello
-
-# 网关（带 XTransformPort 直达后端）
-curl "http://127.0.0.1:81/api/example/hello?XTransformPort=8000"
+curl http://127.0.0.1:8000/api/example/hello           # 后端直连
+curl http://127.0.0.1:3000/api/example/hello           # 前端代理
+curl "http://127.0.0.1:81/api/example/hello?XTransformPort=8000"  # 网关直达
 ```
 
-### 5.3 修改现有接口的规范
+### 5.3 接口修改规范
 
 1. **向后兼容**：新增字段用可选（`field?: type`），不删字段
 2. **Schema 同步**：后端 `schemas.py` 改了，前端 `api.ts` DTO 必须同步
@@ -374,406 +596,243 @@ curl "http://127.0.0.1:81/api/example/hello?XTransformPort=8000"
 4. **错误码规范**：
    - `400` 请求参数错误
    - `404` 资源不存在
-   - `409` 冲突（如策略已存在 / 启用中禁止删除）
+   - `409` 冲突（策略已存在 / 启用中禁止删除）
    - `422` Pydantic 校验失败
    - `500` 服务端错误
    - `503` FastAPI 不可用（前端代理降级）
 
-### 5.4 前端 API 代理规范（`src/lib/api-proxy.ts`）
-
-```typescript
-// 服务端转发工具（仅 Next.js Route Handler 使用）
-export async function tryFastAPI<T>(path: string, options?: RequestInit): Promise<T | null> {
-  // 走 http://127.0.0.1:8000，3s 超时
-  // 失败返回 null，调用方降级到 mock
-}
-
-export function ok<T>(data: T, status = 200) { /* 成功响应 */ }
-export function err(message: string, status = 500) { /* 错误响应 */ }
-```
-
-**三件套用法**：
-```typescript
-export async function GET() {
-  const data = await tryFastAPI<MyDTO>('/api/my-endpoint');
-  if (!data) return err('FastAPI unavailable', 503);
-  return ok(data);
-}
-```
-
 ---
 
-## 六、调整项目配置指南
+## 六、策略与因子扩展（简版，详见专档）
 
-### 6.1 配置热加载机制
+> 📖 **完整步骤见 `docs/STRATEGY_FACTOR_EXTENSION.md`**，本章是速查版。
 
-ConfigLoader（`engine/config/loader.py`）特性：
+### 6.1 三种扩展场景速查
 
-1. **单例模式**：`ConfigLoader()` 全局唯一
-2. **mtime 监听**：每 2s 检查 `config/*.yaml` + `strategies/*.yaml` 的修改时间，变更自动重载
-3. **手动触发**：`POST /api/config/reload` 或 `python scripts/reload_config.py`
-4. **失败容错**：单个 YAML 解析失败跳过并告警，不影响其他配置
+| 场景 | 改什么 | 生效方式 | 难度 |
+|------|--------|----------|------|
+| **调策略阈值** | `strategies/strategy_*.yaml` 的 `factors[].params` 或 `scoring.formula` | 热加载（2s） | ⭐ |
+| **新增策略** | 复制 `_template.yaml` → 编辑 → 保存 | 热加载（2s） | ⭐⭐ |
+| **新增因子** | `engine/factors/` 加 `.py` 插件 | 重启 FastAPI | ⭐⭐⭐ |
+| **新增通道** | `engine/channels/` 加 `.py` 插件 | 重启 FastAPI | ⭐⭐⭐ |
 
-### 6.2 修改配置的标准流程
+### 6.2 新增因子最小示例
 
-```
-编辑 YAML 文件
-    ↓
-（等待 2s 自动重载）或 手动 POST /api/config/reload
-    ↓
-验证：GET /api/strategies 或 GET /api/channels
-    ↓
-前端 UI 自动刷新（轮询 / 手动刷新）
-```
+`engine/factors/my_factor.py`：
 
-### 6.3 配置修改场景速查
+```python
+from typing import Any
+import pandas as pd
+from engine.factors.base import Factor
 
-| 场景 | 文件 | 修改字段 | 生效方式 |
-|------|------|----------|----------|
-| 切换 Mock/Real | `config/app.yaml` | `app.adapter_mode` | 重启 FastAPI |
-| 改 FastAPI 端口 | `config/app.yaml` | `server.port` | 重启 FastAPI + Caddyfile |
-| 开关推送通道 | `config/channels.yaml` | `channels[].enabled` | 热加载 |
-| 配置飞书 webhook | `config/channels.yaml` | `feishu.config.webhook_url/secret` | 热加载 |
-| 新增策略 | `strategies/strategy_xxx.yaml` | 全字段 | 热加载（2s 自动） |
-| 启用/禁用策略 | `strategies/strategy_xxx.yaml` | `enabled: true/false` | 热加载 |
-| 调整策略阈值 | `strategies/strategy_xxx.yaml` | `factors[].params` / `scoring.expression` | 热加载 |
-| 改数据清洗规则 | `config/cleaning_rules.yaml` | rules | 热加载 |
-| 改监控预警条件 | `config/monitor_rules.yaml` | conditions | 热加载 |
-| 改 DuckDB 路径 | `config/app.yaml` | `paths.duckdb` | 重启 FastAPI |
-| 改导出格式 | `config/export.yaml` | columns | 热加载 |
-| 改主题色 | `config/theme.yaml` | colors | 热加载 + 前端刷新 |
+class MyFactor(Factor):
+    factor_id = "my_factor"            # 全局唯一，策略 YAML 引用此 ID
+    factor_name = "我的因子"
+    factor_category = "momentum"       # momentum/breakout/valuation/volume/limit_up/trend/reversal/turnover
+    factor_description = "示例因子"
 
-### 6.4 策略 YAML 修改规范
+    def get_required_fields(self) -> list[str]:
+        return ["ZAF"]                 # 声明依赖的数据列
 
-#### 新增策略
+    def get_default_params(self) -> dict[str, Any]:
+        return {"window": 5}
 
-```bash
-# 方式 1：复制模板（命令行）
-cp strategies/_template.yaml strategies/strategy_mystr.yaml
-# 编辑 strategy_mystr.yaml：strategy_id / name / sector / factors / scoring / enabled: true
-
-# 方式 2：前端 UI（推荐）
-# 策略管理 Tab → 选源策略 → 点 Copy 按钮 → 填新 ID/名/emoji → 确认
-# 后端 POST /api/config/strategies 自动创建
+    def calculate(self, df: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+        params = {**self.get_default_params(), **params}
+        # 纯函数：不修改 df，无内部状态
+        return pd.to_numeric(df["ZAF"], errors="coerce") * params["window"]
 ```
 
-**命名规则**：
-- 文件名：`strategy_<拼音首字母小写>.yaml`（如 `strategy_dbqzt.yaml`）
-- `strategy_id`：拼音首字母小写（如 `dbqzt`），2–30 字符，`[a-zA-Z0-9_]`
-- `sector.code`：`ZD_<拼音大写><两位序号>`（如 `ZD_DBQZT01`）
-- `sector.name`：`<中文名>选股`（如 `打板求涨停选股`）
-
-#### 删除策略
-
-```bash
-# 前端 UI：策略管理 Tab → 点 Trash2 按钮 → 输入策略 ID 确认
-# 后端 DELETE /api/config/strategies/{id}
-# 限制：启用中的策略不可删（409），先 disable 再删
+**注册**：`FactorRegistry` 启动时自动扫描 `engine/factors/*.py`，**无需手动注册**。
+**使用**：策略 YAML 引用：
+```yaml
+factors:
+  - factor_id: my_factor
+    weight: 1.0
+    params:
+      window: 10
 ```
 
-#### 修改策略阈值
+### 6.3 新增策略最小示例
 
-直接编辑 `strategies/strategy_xxx.yaml` 的 `factors[].params` 或 `scoring.expression`，2s 自动热加载。
-
-> **重要**：评分公式必须含 `clip` 限制上限，防止累加超限。公式语法见 `engine/expression/evaluator.py`（simpleeval）。
-
-### 6.5 通道配置修改
-
-#### 开启飞书推送
+复制 `strategies/_template.yaml` → `strategies/strategy_mystr.yaml`，改：
 
 ```yaml
-# config/channels.yaml
-- channel_id: feishu
-  enabled: true                          # 改为 true
-  config:
-    webhook_url: "https://open.feishu.cn/..."  # 填入机器人 webhook
-    secret: "your_sign_secret"           # 填入签名密钥
-    msg_type: interactive
-    at_users: ["user_id_1"]              # @ 用户
-    at_all: false
+strategy_id: mystr                    # 拼音首字母小写，2-30 字符
+strategy_name: 我的策略
+strategy_emoji: "🚀"
+enabled: true                         # 复制后改 true
+sector:
+  code: ZD_MYSTR01                    # ZD_<拼音大写><两位序号>
+  name: 我的策略选股
+# factors[] / scoring.formula 按需调整
 ```
 
-热加载后，策略 YAML `monitor.alert_conditions[].channels` 引用 `feishu` 即可推送。
+**生效**：2s 自动热加载，或 `POST /api/config/reload`。
 
-#### 测试通道
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/channels/feishu/test
-# → 发送测试消息到飞书
-```
+> 📖 **因子公式实现的真实依据见 `docs/maintenance/STRATEGY_LOGIC.md`**（5 策略 4 维度评分公式）。补全因子时必须对照此文档，不要自己编公式。
 
 ---
 
-## 七、常见修改场景 Step-by-Step
+## 七、AI 维护者工作流规范
 
-### 场景 1：新增一个前端页面 Tab
-
-1. **创建组件**：`src/components/quant/MyTab.tsx`
-2. **注册到 page.tsx**：在 `TABS` 数组添加 `{ id: 'mytab', label: '我的 Tab', icon: ... }`
-3. **在 main 区域渲染**：`{tab === 'mytab' && <MyTab />}`
-4. **（如需后端）**：按 §5.2 新增 API
-5. **验证**：agent-browser 打开页面，点击新 Tab
-
-### 场景 2：新增一个因子插件
-
-1. **创建文件**：`engine/factors/my_factor.py`
-2. **实现接口**：继承 `BaseFactor`，实现 `compute(df) -> pd.Series`
-3. **注册**：`FactorRegistry` 自动扫描 `engine/factors/*.py`（无需手动注册）
-4. **策略引用**：`strategies/strategy_xxx.yaml` `factors[].factor_id: my_factor`
-5. **验证**：`GET /api/strategies` 应包含新因子；运行策略选股检查输出
-
-### 场景 3：新增一个推送通道
-
-1. **创建文件**：`engine/channels/my_channel.py`
-2. **实现接口**：继承 `NotificationChannel`，实现 `send(payload) -> ChannelResult`
-3. **注册**：`ChannelRegistry` 自动扫描（无需手动注册）
-4. **配置**：`config/channels.yaml` 添加 `channels[]` 条目
-5. **策略引用**：`monitor.alert_conditions[].channels: [my_channel]`
-6. **验证**：`POST /api/channels/my_channel/test` 发测试消息
-
-### 场景 4：切换 Mock → Real 模式
-
-```bash
-# 1. 编辑配置
-sed -i 's/adapter_mode: mock/adapter_mode: real/' config/app.yaml
-
-# 2. 确认通达信终端已启动登录（Windows）
-
-# 3. 重启 FastAPI（适配器模式不热加载）
-pkill -f "uvicorn engine.api.main"
-/home/z/.venv/bin/python -m uvicorn engine.api.main:app --host 0.0.0.0 --port 8000 --reload &
-
-# 4. 验证
-curl http://127.0.0.1:8000/api/monitor?action=status
-# → 应返回 adapter: real, subscribed: N
-```
-
-### 场景 5：修改 DuckDB 表结构
-
-1. **编辑 SQL**：`config/duckdb_schema.sql`
-2. **重建数据库**（⚠️ 会丢数据，先备份）：
-   ```bash
-   cp data/duckdb/quant.db data/duckdb/quant.db.bak
-   rm data/duckdb/quant.db
-   python scripts/init_db.py
-   ```
-3. **或增量迁移**：写 `scripts/migrate_xxx.py` 用 `ALTER TABLE` / `CREATE TABLE IF NOT EXISTS`
-
-### 场景 6：修改网关路由
-
-```bash
-# 1. 编辑 Caddyfile
-vim Caddyfile
-
-# 2. 重载 Caddy（沙箱自动，或手动）
-caddy reload --config Caddyfile
-
-# 3. 验证
-curl "http://127.0.0.1:81/api/strategies?XTransformPort=8000"
-```
-
----
-
-## 八、AI 维护者工作流规范
-
-### 8.1 每轮开发的标准流程
+### 7.1 每轮标准流程
 
 ```
-1. 读取 worklog.md（最后 2 轮章节）
-   ↓
-2. 拆解 todos（TodoWrite）
-   ↓
+1. 读 worklog.md 最后 2 轮 + 本文档第二章
+2. TodoWrite 拆解任务
 3. 评估项目状态（curl /health + agent-browser QA）
-   ↓
-4. 有 Bug → 优先修复
-   无 Bug → 推进新功能
-   ↓
-5. 前端优先开发（让用户可见）
-   ↓
+4. 有 Bug → 优先修复（最小改动）
+   无 Bug → 推进 1-2 个新功能（不贪多）
+5. 前端优先开发
 6. 后端 API 开发
-   ↓
-7. QA 验证（lint + curl + agent-browser）
-   ↓
-8. append worklog.md（--- 分隔 + Task ID + Stage Summary）
-   ↓
-9. 更新 PROJECT_HANDOVER.md / PROJECT_MAINTENANCE.md（如有架构变更）
+7. QA 验证（lint + curl + agent-browser，四项全过）
+8. append worklog.md（--- + Task ID + Stage Summary）
+9. 架构变更同步更新本文档 + ARCHITECTURE.md
 ```
 
-### 8.2 worklog.md 写作规范
-
-每轮工作 **必须** append 一个 section，格式：
+### 7.2 worklog.md 写作规范
 
 ```markdown
 ---
-Task ID: <轮次>-<子任务，如 R7-A>
-Agent: <agent 名称，如 full-stack-developer / main>
+Task ID: <轮次>-<子任务，如 R8-A>
+Agent: <agent 名称>
 Task: <任务简述>
 
 Work Log:
 - <具体步骤 1>
 - <具体步骤 2>
-- ...
 
 Stage Summary:
 - 已完成: <列出>
-- 文件变更: <后端 N 个 / 前端 N 个，列文件名>
+- 文件变更: <后端 N 个 / 前端 N 个>
 - 未解决问题: <列出>
 - 下一阶段建议: <列出>
 ```
 
-**禁止**：
-- 覆盖已有 worklog 内容（必须 append）
-- 省略 `---` 分隔符
-- 省略 Task ID
+**禁止**：覆盖已有内容 / 省略 `---` / 省略 Task ID。
 
-### 8.3 TodoWrite 规范
+### 7.3 Subagent 委派规范
 
-- 每个 todo 有唯一 `id`（数字或 `数字-字母` 表示并行）
-- `status`：pending → in_progress → completed
-- 同时只允许 1 个 `in_progress`
-- 能并行的工作拆成 `2-a` / `2-b`，分配给不同 subagent
-
-### 8.4 Subagent 委派规范
-
-当任务复杂时，用 `Task` 工具委派 subagent：
-
-- **必传参数**：`Task ID` / 任务描述 / 要求返回内容
+复杂任务用 `Task` 工具委派：
+- **必传**：Task ID / 任务描述 / 要求返回内容
 - **必读 worklog**：告诉 subagent 先读 `/home/z/my-project/worklog.md`
 - **必写 worklog**：告诉 subagent 完成后 append worklog
 - **并行**：能并行的工作在**单条消息**里发多个 `Task` 调用
 
 ---
 
-## 九、质量门禁与验证清单
+## 八、质量门禁与验证清单
 
-### 9.1 每轮开发必须通过的质量门禁
+### 8.1 每轮必须通过
 
 | 门禁 | 命令 | 通过标准 |
 |------|------|----------|
-| **ESLint** | `bun run lint` | EXIT=0，0 错误 0 警告 |
-| **FastAPI 健康** | `curl :8000/health` | 200 + `status: ok` |
-| **核心 API** | `curl :8000/api/strategies` 等 | 全 200 |
-| **前端代理** | `curl :3000/api/strategies` | 200（透传或降级 mock） |
-| **dev.log** | `tail dev.log` | 无 Fatal / Error |
-| **agent-browser** | 打开 `/` 路由 | 页面渲染 + 核心交互可用 |
+| ESLint | `bun run lint` | EXIT=0，0 错误 0 警告 |
+| FastAPI 健康 | `curl :8000/health` | 200 + `status: ok` |
+| 核心 API | `curl :8000/api/strategies` 等 | 全 200 |
+| 前端代理 | `curl :3000/api/strategies` | 200（透传或降级 mock） |
+| dev.log | `tail dev.log` | 无 Fatal / Error |
+| agent-browser | 打开 `/` 路由 | 页面渲染 + 核心交互可用 |
 
-### 9.2 agent-browser 验证步骤
+### 8.2 agent-browser 验证步骤
 
 ```bash
-# 1. 查看可用命令
-agent-browser --help
-
-# 2. 打开页面
-agent-browser navigate <预览面板 URL>
-
-# 3. 截图
-agent-browser screenshot
-
-# 4. 点击 / 输入
-agent-browser click <selector>
-agent-browser type <selector> <text>
-
-# 5. 检查控制台
-agent-browser console
+agent-browser --help              # 查看命令
+agent-browser navigate <URL>      # 打开页面
+agent-browser screenshot          # 截图
+agent-browser click <selector>    # 点击
+agent-browser console             # 检查控制台
 ```
 
-**必验交互**：
-- 5 个 Tab 切换
-- 策略管理：启用/禁用/运行/复制/删除
-- 信号中心：行点击抽屉
-- 全局搜索：Cmd+K
-- 通知中心：Bell 按钮
-- 推送通道配置 Dialog
+**必验交互**：5 Tab 切换 / 策略启停运行 / 信号抽屉 / 全局搜索 / 通知中心 / 通道配置。
 
-### 9.3 回归测试
-
-每次修改后确认未破坏既有功能：
+### 8.3 回归测试
 
 ```bash
-# 策略 CRUD
-curl :8000/api/strategies
-curl -X POST :8000/api/config/strategies -d '{"strategy_id":"test","yaml_content":"..."}'
-curl -X DELETE :8000/api/config/strategies/test
-
-# 监控
-curl :8000/api/monitor?action=status
-curl :8000/api/monitor?action=quotes
-curl :8000/api/monitor/flow-ranking
-
-# 信号
-curl :8000/api/signals
-curl :8000/api/signals/stats
-
-# 通道
-curl :8000/api/channels
-
-# 回测
-curl :8000/api/backtest/history
-curl :8000/api/backtest/leaderboard
+curl :8000/api/strategies           # 策略列表
+curl :8000/api/monitor?action=status # 监控状态
+curl :8000/api/signals?limit=1      # 信号
+curl :8000/api/channels             # 通道
+curl :8000/api/backtest/history     # 回测
 ```
 
 ---
 
-## 十、风险与禁忌
+## 九、风险与禁忌
 
-### 10.1 绝对禁忌（DO NOT）
+### 9.1 绝对禁忌
 
 | 禁忌 | 后果 | 正确做法 |
 |------|------|----------|
-| `bun run build` | 沙箱 OOM / 卡死 | 仅用 `bun run dev` |
-| 直接访问 `localhost:3000` / `:8000` | 用户无法访问 | 走 Caddy `:81` |
-| API URL 写端口号（含 WebSocket） | Caddy 不转发 | 用 `?XTransformPort=N` |
+| `bun run build`（沙箱） | OOM 卡死 | 仅 `bun run dev` |
+| 直接访问 `localhost:3000`（沙箱） | 用户无法访问 | 走 Caddy `:81` |
+| API URL 写端口号 | Caddy 不转发 | 用 `?XTransformPort=N` |
 | 硬编码阈值到代码 | 无法热加载 | 全走 YAML |
-| 多个 FastAPI 实例同时写 DuckDB | `database is locked` | 确保单实例 |
-| 删除启用中的策略 YAML | 运行中策略异常 | 先 disable 再删 |
-| `z-ai-web-dev-sdk` 在客户端调用 | 密钥泄露 | 仅后端使用 |
-| 覆盖 worklog.md | 丢失开发历史 | append 模式 |
-| 省略 Task ID | 追踪困难 | 每轮必填 |
-| 跳过 QA 直接报告完成 | 用户看到白屏 | 必须 agent-browser 验证 |
+| 多 FastAPI 实例写 DuckDB | `database is locked` | 单实例 |
+| 删启用中的策略 | 运行中策略异常 | 先 disable 再删 |
+| `z-ai-web-dev-sdk` 在客户端 | 密钥泄露 | 仅后端 |
+| 覆盖 worklog.md | 丢历史 | append 模式 |
+| 跳过 QA 报告完成 | 用户看白屏 | 四项全过才报告 |
+| 改 `real_adapter.py`「优化」 | 破坏双模式 | 已稳定，别动 |
 
-### 10.2 高风险操作
+### 9.2 高风险操作
 
-| 操作 | 风险 | 缓解措施 |
-|------|------|----------|
+| 操作 | 风险 | 缓解 |
+|------|------|------|
 | 删 `data/duckdb/quant.db` | 丢全部业务数据 | 先备份 `.bak` |
 | 改 `Caddyfile` | 全站不可访问 | 改后 `caddy reload` + 验证 |
-| 改 `prisma/schema.prisma` | Prisma 客户端不匹配 | `bun run db:generate` |
 | 改 `engine/api/main.py` lifespan | 引擎启动失败 | 充分测试 |
-| 升级 `next` / `react` 大版本 | 全前端可能崩 | 锁版本 + 全量回归 |
-| 升级 `fastapi` / `pydantic` | API 行为变化 | 检查 v1→v2 迁移 |
+| 升级 `next`/`react` 大版本 | 全前端可能崩 | 锁版本 + 全量回归 |
+| 升级 `fastapi`/`pydantic` | API 行为变化 | 检查 v1→v2 迁移 |
 
-### 10.3 已知限制
+### 9.3 已知限制
 
 | 限制 | 说明 | 规划 |
 |------|------|------|
-| 通知中心仅内存 | 刷新页面清空 | R8 加 localStorage 持久化 |
-| WebSocket 通道未部署 | 用 HTTP 轮询替代 | R8 部署 `:3003` 服务 |
-| 回测用 mock 价格 | 确定性 hash 生成 | R8 接 `tq.get_market_data` |
-| K 线图 mock 数据 | 非真实行情 | R8 接真实数据 |
-| Prisma schema 是脚手架 | 仅 User/Post | 业务数据用 DuckDB，Prisma 预留 |
-| 版本号不一致 | 4 处版本未对齐 | 规划统一为 1.0.0 |
-| `package.json` name 是脚手架名 | `nextjs_tailwind_shadcn_ts` | 规划改 `tdxquant` |
+| 通知中心仅内存 | 刷新清空 | localStorage 持久化 |
+| WebSocket 通道未部署 | HTTP 轮询替代 | 部署 :3003 服务 |
+| 回测用 mock 价格 | 确定性 hash 生成 | 接 `tq.get_market_data` |
+| K 线图 mock 数据 | 非真实行情 | 接真实数据 |
+| Prisma schema 是脚手架 | 仅 User/Post | 业务数据用 DuckDB |
+| 版本号不一致 | 4 处未对齐 | 统一 1.0.0 |
+| `package.json` name 是脚手架名 | `nextjs_tailwind_shadcn_ts` | 改 `tdxquant` |
+| Windows 启动脚本缺失 | 只有 `.sh` | 待补 `.bat`/`.ps1` |
 
 ---
 
-## 附录：快速启动 Checklist
+## 十、接手 Checklist
 
-接手项目时按此清单逐项确认：
+```
+□ cd /home/z/my-project（沙箱）/ D:\tdxquant（Windows）
+□ 读 worklog.md 最后 2 轮章节
+□ 读本文档第二、三、四章
+□ ps aux | grep -E "uvicorn|next dev"（沙箱）确认进程
+□ curl :8000/health 确认 FastAPI
+□ curl :3000/api 确认 Next.js 代理
+□ curl :8000/api/strategies 确认策略加载
+□ tail dev.log 确认无错误
+□ agent-browser 打开 / 确认页面渲染
+□ 点击 5 个 Tab 确认切换正常
+□ bun run lint 确认 0 错误
+```
 
-- [ ] `cd /home/z/my-project`
-- [ ] 读 `worklog.md` 最后 2 轮章节
-- [ ] 读本文档 §二 §四 §五
-- [ ] `ps aux | grep -E "uvicorn|next dev"` 确认进程
-- [ ] `curl :8000/health` 确认 FastAPI
-- [ ] `curl :3000/api` 确认 Next.js 代理
-- [ ] `curl :8000/api/strategies` 确认策略加载
-- [ ] `tail dev.log` 确认无错误
-- [ ] agent-browser 打开 `/` 确认页面渲染
-- [ ] 点击 5 个 Tab 确认切换正常
-- [ ] `bun run lint` 确认 0 错误
-
-全部通过 → 项目健康，可开始本轮开发。
+全部通过 → 项目健康，按第二章准则开始本轮开发。
 
 ---
 
-**文档结束** · 有疑问先查 `worklog.md` + `ARCHITECTURE.md`，仍无解联系上一轮 AI 维护者（见 worklog 最后 section）。
+## 附录：文档索引
+
+| 文档 | 用途 | 何时读 |
+|------|------|--------|
+| **本文档** | AI 接手必读 | 每轮开发前 |
+| `docs/STRATEGY_FACTOR_EXTENSION.md` | 策略与因子扩展完整步骤 | 改策略 / 加因子时 |
+| `docs/maintenance/ARCHITECTURE.md` | 5 层架构深度说明 | 改架构 / 不确定层数时 |
+| `docs/maintenance/STRATEGY_LOGIC.md` | 5 策略公式唯一依据 | 实现因子公式时 |
+| `docs/PROJECT_MAINTENANCE.md` | 运维 / 部署 / 常见问题 | 部署 / 排错时 |
+| `docs/USER_GUIDE.md` | 终端用户使用说明 | 回答用户功能问题时 |
+| `worklog.md` | 开发全程记录 | 每轮开始前读最后 2 轮 |
+
+---
+
+**文档结束** · 有疑问先查 `worklog.md` + `ARCHITECTURE.md`，仍无解按第二章「不确定情况怎么办」处理。**宁可不动，不要乱动。**
