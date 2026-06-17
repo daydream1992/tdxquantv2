@@ -1,0 +1,101 @@
+strategy_id: cslx
+strategy_name: 错杀低吸
+strategy_emoji: 🩹
+version: '1.0'
+enabled: true
+sector:
+  code: ZD_CSLX01
+  name: 错杀低吸选股
+  auto_update: true
+  update_mode: replace
+universe:
+  exclude_st: true
+  exclude_suspended: true
+  exclude_new_listing_days: 5
+  market_list:
+  - SH
+  - SZ
+  - BJ
+  exclude_codes: []
+  include_only: []
+  next_day_confirm: "总分<55 跳过；否则按当日跌幅分支:\n  ZAF<=-5: 开盘不创新低+竞价不低开\n  其他: 开盘>前日最低+竞价有买单\n"
+pool:
+  expression: ZAF < -3 or (ZAF < -1 and ZAFPre20 < -8) or (ZAF < -1 and ZAFPre60 <
+    -15)
+  description: 当日明显下跌 OR 中期超跌+当日下跌 OR 长期超跌+当日下跌
+cleaning:
+  rules_file: cleaning_rules.yaml
+  custom_rules: []
+factors:
+- factor_id: panic_depth
+  weight: 1.0
+  params:
+    zaf_field: ZAF
+    zaf20_field: ZAFPre20
+    zaf60_field: ZAFPre60
+    max_score: 30.0
+- factor_id: support_strength
+  weight: 1.0
+  params:
+    ratio_field: 大买占比
+    inflow_field: Zjl
+    max_score: 30.0
+- factor_id: panic_volume
+  weight: 1.0
+  params:
+    hsl_field: fHSL
+    zaf_field: ZAF
+    field: 恐慌量
+- factor_id: catalyst_score
+  weight: 1.0
+  params:
+    ind_zt_rate_field: 行业涨停率
+    wtb_field: Wtb
+    max_score: 20.0
+scoring:
+  formula: clip(panic_depth, 0, 30) + clip(support_strength, 0, 30) + clip((panic_volume>=100)*20
+    + (panic_volume>=50 and panic_volume<100)*16 + (panic_volume>=30 and panic_volume<50)*12
+    + (panic_volume>=15 and panic_volume<30)*6, 0, 20) + clip(catalyst_score, 0, 20)
+  normalization: none
+  penalties:
+  - condition: panic_volume < 0
+    multiplier: 0.0
+    reason: 已反弹的股票不算错杀（ZAF>3，由 panic_volume<0 间接判断，因 panic_volume=fHSL*|ZAF| 始终 ≥0，此条件实际不会触发，真实判断需
+      ZAF 字段直读）
+  - condition: catalyst_score < 5
+    multiplier: 0.5
+    reason: 板块/量能催化不足
+output:
+  top_n: 30
+  min_score: 55
+  sort_by: total_score
+  sort_order: desc
+monitor:
+  enabled: true
+  subscribe_hq: true
+  batch_size: 50
+  alert_conditions:
+  - condition: pct_change > 0.03
+    alert_type: rebound_signal
+    channels:
+    - tdx_warn
+    - websocket
+    - feishu
+    priority: high
+  - condition: pct_change < -0.05
+    alert_type: continue_drop
+    channels:
+    - websocket
+    - feishu
+    priority: high
+  - condition: main_inflow > 1000
+    alert_type: big_buy_support
+    channels:
+    - websocket
+    priority: medium
+export:
+  csv: true
+  excel: true
+  excel_sheet_name: 🩹错杀低吸
+  duckdb: true
+  sector: true

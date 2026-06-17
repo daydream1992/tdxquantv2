@@ -1,0 +1,88 @@
+strategy_id: rzq
+strategy_name: 弱转强
+strategy_emoji: ⚡
+version: '1.0'
+enabled: true
+sector:
+  code: ZD_RZQ01
+  name: 弱转强选股
+  auto_update: true
+  update_mode: replace
+universe:
+  exclude_st: true
+  exclude_suspended: true
+  exclude_new_listing_days: 5
+  market_list:
+  - SH
+  - SZ
+  - BJ
+  exclude_codes: []
+  include_only: []
+  next_day_confirm: 竞价量比>1.5+5分钟内涨幅>1%
+pool:
+  expression: VOpenZAF > 1 and ZAFYesterday < 0
+  description: 竞价涨幅>1% AND 前日涨幅<0
+cleaning:
+  rules_file: cleaning_rules.yaml
+  custom_rules: []
+factors:
+- factor_id: momentum_5d
+  weight: 0.0
+  params:
+    window: 5
+- factor_id: momentum_20d
+  weight: 0.0
+  params:
+    window: 20
+- factor_id: volume_ratio
+  weight: 1.0
+  params:
+    field: Wtb
+    invalid_to_nan: true
+- factor_id: year_limit_days
+  weight: 1.0
+  params:
+    field: YearZTDay
+scoring:
+  formula: clip(0, 0, 30) + clip(0, 0, 25) + clip((volume_ratio>=3)*8 + (volume_ratio>=2
+    and volume_ratio<3)*5 + (volume_ratio>=1.5 and volume_ratio<2)*3, 0, 25) + clip((year_limit_days>=5)*10
+    + (year_limit_days>=2 and year_limit_days<5)*6, 0, 20)
+  normalization: none
+  penalties:
+  - condition: year_limit_days < 0
+    multiplier: 0.0
+    reason: 占位（真实判断需读 是否涨停 字段；涨停股清 0）
+output:
+  top_n: 30
+  min_score: 50
+  sort_by: total_score
+  sort_order: desc
+monitor:
+  enabled: true
+  subscribe_hq: true
+  batch_size: 50
+  alert_conditions:
+  - condition: pct_change > 0.03
+    alert_type: rzq_ignite
+    channels:
+    - tdx_warn
+    - websocket
+    - feishu
+    priority: high
+  - condition: pct_change < -0.03
+    alert_type: rzq_fail
+    channels:
+    - websocket
+    - feishu
+    priority: high
+  - condition: volume_ratio > 2
+    alert_type: volume_surge
+    channels:
+    - websocket
+    priority: low
+export:
+  csv: true
+  excel: true
+  excel_sheet_name: ⚡弱转强
+  duckdb: true
+  sector: true

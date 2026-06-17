@@ -1,0 +1,64 @@
+# =====================================================================
+# TdxQuant 策略 ↔ 板块映射 (config/sector_mapping.yaml)
+# =====================================================================
+# 5 策略各自对应一个自定义板块，选股结果自动回写到对应板块。
+# 板块 Code 命名规则: ZD_<拼音首字母大写><两位序号>（ZD=自定义 Zhiding 板块）
+# 修改后无需重启，调用 POST /api/config/reload 或 scripts/reload_config.py 热加载。
+# 详见: docs/maintenance/ARCHITECTURE.md §四（5 策略与板块命名规范）
+# =====================================================================
+
+# ---- 策略选股板块（5 个，自动回写） ----
+mappings:
+  dbqzt:
+    sector_code: ZD_DBQZT01
+    sector_name: 打板求涨停选股
+    auto_update: true              # 选股结果自动回写板块
+    update_mode: replace           # replace(清空重写) / append(追加)
+    strategy_id: dbqzt             # 关联策略 ID（与 strategies/strategy_dbqzt.yaml 一致）
+
+  qszsl:
+    sector_code: ZD_QSZSL01
+    sector_name: 趋势主升浪选股
+    auto_update: true
+    update_mode: replace
+    strategy_id: qszsl
+
+  cslx:
+    sector_code: ZD_CSLX01
+    sector_name: 错杀低吸选股
+    auto_update: true
+    update_mode: replace
+    strategy_id: cslx
+
+  rzq:
+    sector_code: ZD_RZQ01
+    sector_name: 弱转强选股
+    auto_update: true
+    update_mode: replace
+    strategy_id: rzq
+
+  qzrfc:
+    sector_code: ZD_QZRFC01
+    sector_name: 强转弱反抽选股
+    auto_update: true
+    update_mode: replace
+    strategy_id: qzrfc
+
+# ---- 监控板块（非策略选股，手动维护） ----
+# 这些板块由用户在通达信客户端手动添加股票，引擎订阅其行情做实时预警
+monitor_sectors:
+  - sector_code: ZXG
+    sector_name: 我的自选
+    alert_enabled: true            # 启用预警
+    description: 用户在通达信客户端手动维护的自选股板块
+
+  - sector_code: ZD_JJGZ01
+    sector_name: 监控重点关注
+    alert_enabled: true
+    description: 重点关注板块（手动维护，实时监控）
+
+# ---- 板块命名规则（文档化，不参与运行） ----
+# 前缀 ZD = 自定义（Zhiding）板块
+# 后缀 01 = 默认序号，同一策略的变体可用 02/03（如不同市场分别建板块）
+# 系统保留板块: ZXG(自选股) / TJG(条件股)
+# 详见 ARCHITECTURE.md §4.2 板块 Code 命名规则

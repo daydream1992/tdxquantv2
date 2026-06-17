@@ -1,0 +1,40 @@
+# TdxQuant Engine 全局应用配置
+# 所有路径 / 端口 / 阈值 / URL 都在此处声明，绝不硬编码到代码中
+# 修改后调用 POST /api/config/reload 或 scripts/reload_config.py 热加载
+
+app:
+  name: TdxQuant Engine
+  version: "1.0"
+  # 数据适配器模式: mock | real
+  # - mock : Linux 沙箱开发/测试，基于 V8 CSV 样本数据
+  # - real : Windows 生产环境，调用 tqcenter API
+  adapter_mode: mock
+  log_level: INFO
+
+server:
+  host: 0.0.0.0
+  port: 8000
+
+paths:
+  # DuckDB 单文件存储路径
+  duckdb: ./data/duckdb/quant.db
+  # CSV / Excel / 日志导出根目录
+  csv_output: ./data/csv
+  excel_output: ./data/excel
+  logs: ./data/logs
+  # 策略 YAML 目录（热加载扫描）
+  strategies_dir: ./strategies
+
+tqcenter:
+  # Real 模式下 tq.initialize(__file__) 入参，传 __file__ 字符串占位
+  initialize_file: __file__
+  # subscribe_hq 单次最多 100 只，分批 50（可配置）
+  subscribe_batch_size: 50
+  # get_market_data 单次最大 K 线条数，超出自动分批续传
+  kline_max_count: 24000
+
+mock:
+  # Mock 适配器读取 V8 CSV 样本数据的目录
+  data_dir: ./docs/v8-data/stock_selection_v8_1_standalone/data
+  # Mock subscribe_hq 模拟推送间隔（秒）
+  push_interval: 3

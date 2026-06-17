@@ -7340,3 +7340,839 @@ V8 选股系统当前使用 8 个 CSV：
 8. **单位差异**：FN 老科目（FN1~FN73、FN98~FN158）大多无显式单位（应为元），FN283 之后的新增字段普遍以"万元"为单位；GP/BK/SC 字段在文档中已明确单位（万元 / 亿元 / 股 / 万股 / % 等）
 
 ---
+
+---
+Task ID: P1-0
+Agent: main
+Task: 记录用户最终确认 + 启动P1开发
+
+Work Log:
+- 用户确认1: 实盘交易用方案A(半自动send_warn推送)
+- 用户确认2: Python引擎+Web前端都跑Windows
+- 用户确认3: 策略阈值后续调整,务必考虑策略可配置化
+- 用户确认4: 持仓股监控改为多个自定义板块,不同策略对应不同板块
+- 用户确认5: P1→P2路线
+- 用户确认6: 用DuckDB,选股增加CSV同步导出,消息层预留飞书接口,灵活增删策略,不硬编码
+- 用户确认7: 板块code用拼音首字母 ZD_<拼音首字母>01
+- 用户确认8: 5策略确认: 打板求涨停/趋势主升浪/错杀低吸/弱转强/强转弱反抽
+- 用户确认9: 配置格式YAML
+- 用户确认10: P1用Mock适配器(基于CSV样本)+Real适配器双模式
+- 用户确认11: 专业金融深色风,主题可配置化
+- 用户确认12: 建立详尽AI维护文档
+
+Stage Summary:
+- 5策略板块code命名:
+  * ZD_DBQZT01 = 打板求涨停 (da ban qiu zhang ting)
+  * ZD_QSZSL01 = 趋势主升浪 (qu shi zhu sheng lang)
+  * ZD_CSLX01  = 错杀低吸 (cuo sha di xi)
+  * ZD_RZQ01   = 弱转强 (ruo zhuan qiang)
+  * ZD_QZRFC01 = 强转弱反抽 (qiang zhuan ruo fan chou)
+- 策略YAML文件: strategy_dbqzt.yaml / strategy_qszsl.yaml / strategy_cslx.yaml / strategy_rzq.yaml / strategy_qzrfc.yaml
+- 项目目录结构已创建: engine/ strategies/ config/ data/ docs/maintenance/
+- 启动P1并行开发: 4个子代理Wave1 + 2个子代理Wave2
+
+---
+Task ID: P1-2
+Agent: general-purpose
+Task: 精确提取 V8 选股系统 5 策略详细逻辑，输出结构化文档供后续生成策略 YAML 配置
+
+Work Log:
+- 读取 worklog.md（重点看 Task 2-i 的 V8 源码分析部分）
+- 读取 docs/maintenance/ARCHITECTURE.md 了解架构设计
+- 读取 V8 主程序 run.py（1059 行，全部读完）
+- 读取 L2 快照 CSV / K 线 CSV / 行业分类 CSV / 板块关系 CSV / 名称映射 CSV 的表头字段，确认字段名
+- 创建文档 docs/maintenance/STRATEGY_LOGIC.md（约 1100 行），含：
+  * 一、12 步选股总流程（每步保留关键代码）
+  * 二、通用数据清洗规则（5 项 Bug 修复，原样代码）
+  * 三、K 线技术指标计算（MA5/10/20, MACD, BOLL，原样代码）
+  * 四、老登过滤逻辑（3 条件 AND）
+  * 五、涨停判断逻辑（3 档阈值：创科 19.5/北交 29.5/主板 9.8）
+  * 六、行业统计 + 辅助字段计算（大买占比/恐慌量/最新价/价格估算/fLianB 重定义）
+  * 七、压力位计算（5 候选 + 涨停价兜底，取最接近者）
+  * 八、5 策略详解（每策略：函数名/pool/4 维度公式+阈值/总分/惩罚/次日确认/选股逻辑/Excel Sheet）
+  * 九、因子清单汇总（38 个去重因子，含计算公式/用于策略/建议 factor_id）
+  * 十、CSV 字段使用映射（L2 快照 88 字段使用情况 + K 线 11 字段 + 其他 CSV）
+  * 十一、关键参数清单（阈值/涨停档/老登条件/pool 条件/惩罚规则/4 维度上限/清洗规则/辅助字段/压力位候选）
+  * 十二、互斥性说明（dbqzt↔rzq, dbqzt↔cslx, dbqzt↔qzrfc）
+  * 十三、生成 YAML 时关键提示（9 条注意事项，含 fLianB 语义陷阱、OpenAmo/CJJEPre1 单位差异）
+
+Stage Summary:
+
+### V8 选股系统 5 策略核心参数总览
+
+| 策略 ID | 函数名 | 阈值 | Top N | 4 维度分值上限 | Excel Sheet |
+|---------|--------|------|-------|----------------|-------------|
+| dbqzt   | score_daban | 35 | 30 | 40+30+20+(-10) | 🔥打板求涨停 |
+| qszsl   | score_qushi | 60 | 30 | 35+25+20+20 | 📈趋势主升浪 |
+| cslx    | score_cuoshai | 55 | 30 | 30+30+20+20 | 🩹错杀低吸 |
+| rzq     | score_ruozhuanqiang | 50 | 30 | 30+25+25+20 | ⚡弱转强 |
+| qzrfc   | score_qiangzhuanruo | 50 | 30 | 30+25+25+20 | 🔄强转弱反抽 |
+
+### 5 策略 pool 筛选条件
+
+| 策略 | pool 条件 |
+|------|-----------|
+| dbqzt | 是否涨停 OR ZAF>=7 |
+| qszsl | （无 pool，全市场评分） |
+| cslx | ZAF<-3 OR (ZAF<-1 AND ZAFPre20<-8) OR (ZAF<-1 AND ZAFPre60<-15) |
+| rzq | VOpenZAF>1 AND ZAFYesterday<0 |
+| qzrfc | ZAFYesterday>3 AND ZAF<-1 |
+
+### 5 策略惩罚规则
+
+| 策略 | 惩罚条件 | 惩罚系数 |
+|------|---------|----------|
+| dbqzt | ~是否涨停 & FCb==0 & fLianB<1 | ×0.5 |
+| qszsl | has_kline & MA5<=MA10 | ×0.3 |
+| cslx | ZAF>3（已反弹） | =0 |
+| cslx | 催化剂<5（催化不足） | ×0.5 |
+| rzq | 是否涨停（涨停股不属弱转强） | =0 |
+| qzrfc | （无额外惩罚） | - |
+
+### 因子清单汇总表（38 个去重因子，生成 YAML 关键依据）
+
+| 因子名 | 计算公式 | 用于策略 | 建议 factor_id |
+|--------|---------|----------|----------------|
+| 涨停判断 | 3 档：创科 19.5 / 北交 29.5 / 主板 9.8 | dbqzt/rzq + fLianB 清洗 | limit_up |
+| 连板数 | ConZAFDateNum（非涨停置 0，取整） | dbqzt | continuous_limit_up |
+| 封板强度系数 | 原 fLianB 字段值 | dbqzt | seal_strength |
+| 封成比 | FCb（负值置 0） | dbqzt | seal_amount_ratio |
+| 封单额 | FCAmo（万元，负值置 0） | dbqzt | seal_amount |
+| 竞价涨幅 | VOpenZAF | dbqzt/rzq | auction_pct |
+| 尾盘金额 | FzAmo（万元） | dbqzt/rzq | closing_amount |
+| 卖撤率 | SCancel/(SCancel+TotalSVol+1)，缺失 0.5 | dbqzt | sell_cancel_rate |
+| 当日涨幅 | ZAF | 所有 | pct_change_today |
+| 前日涨幅 | ZAFYesterday | rzq/qzrfc | pct_change_yesterday |
+| 5日涨幅 | ZAFPre5 | qszsl/rzq | pct_change_5d |
+| 10日涨幅 | ZAFPre10 | qszsl | pct_change_10d |
+| 20日涨幅 | ZAFPre20 | cslx | pct_change_20d |
+| 60日涨幅 | ZAFPre60 | cslx | pct_change_60d |
+| 量比 | Wtb（负值/0 置 NaN） | qszsl/cslx/rzq | turnover_ratio |
+| 换手率 | fHSL | cslx/qzrfc + 老登过滤 | turnover_rate |
+| 总市值 | Zsz（亿） | 所有（基础列） | market_cap |
+| 主力净流入 | Zjl（万） | qszsl/cslx/qzrfc + 行业统计 | main_inflow |
+| 大买占比 | TotalBVol/(TotalBVol+TotalSVol+1) | qszsl/cslx/qzrfc | big_buy_ratio |
+| 恐慌量 | fHSL * |ZAF| | cslx | panic_volume |
+| MA5 | close.rolling(5,min_periods=1).mean() | qszsl + 压力位 | ma5 |
+| MA10 | close.rolling(10,min_periods=1).mean() | qszsl + 压力位 | ma10 |
+| MA20 | close.rolling(20,min_periods=1).mean() | qszsl + 压力位 | ma20 |
+| DIF | EMA12 - EMA26（ewm, adjust=False） | qszsl | macd_dif |
+| DEA | EMA9(DIF) | qszsl | macd_dea |
+| MACD_BAR | 2*(DIF-DEA) | （未直接评分） | macd_bar |
+| BOLL_UP | MA20 + 2*close.rolling(20).std() | 压力位 | boll_up |
+| 年涨停天数 | YearZTDay | rzq + 老登过滤 | year_zt_days |
+| Beta 值 | BetaValue | rzq + 老登过滤 | beta_value |
+| 开盘涨幅 | OpenZAF | rzq | open_pct |
+| 竞价金额 | OpenAmo（元） | rzq | auction_amount |
+| 昨成交额 | CJJEPre1（万元） | rzq | prev_amount |
+| 行业涨停数 | groupby('行业').agg(行业涨停数=('_is_zt','sum')) | dbqzt（孤板判断） | industry_zt_count |
+| 行业涨停率 | 行业涨停数/行业总数*100 | cslx/qzrfc | industry_zt_rate |
+| 行业平均涨幅 | groupby('行业').agg(行业平均涨幅=('ZAF','mean')) | qzrfc | industry_avg_pct |
+| 前日高点 | K 线 high 字段 | 压力位 | prev_high |
+| 被套深度 | ZAFYesterday - ZAF | qzrfc | trap_depth |
+| 竞价金额比 | OpenAmo/(CJJEPre1*10000+1) | rzq | auction_amount_ratio |
+
+### 关键注意事项（生成 YAML 时必读）
+
+1. **fLianB 语义陷阱**：源码中 fLianB 已重定义为 ConZAFDateNum（连板数），原 fLianB 字段值存入「封板强度系数」。YAML 中 `continuous_limit_up` 因子的输入字段应为 `ConZAFDateNum`，`seal_strength` 因子的输入字段应为原始 `fLianB`。
+
+2. **OpenAmo/CJJEPre1 单位差异**：OpenAmo 单位为元，CJJEPre1 单位为万元，计算 `竞价金额比` 时需 `* 10000` 对齐。
+
+3. **涨停判断 3 档**：创业板/科创板（688/689/300/301/302）ZAF≥19.5；北交所（8/4 开头）ZAF≥29.5；主板/中小板 ZAF≥9.8。
+
+4. **清洗规则统一**：5 策略共用 7 条清洗规则（Wtb/FCb/FCAmo/卖撤率/fLianB/numeric/老登），建议放 `config/cleaning_rules.yaml` 统一配置后各策略 YAML 用 `cleaning.rules_file` 引用。
+
+5. **互斥性**：dbqzt↔rzq, dbqzt↔cslx, dbqzt↔qzrfc 互斥（通过 pool 自然实现，无需额外逻辑）。
+
+6. **次日确认**：每策略有不同次日确认规则，属"盘后选股→次日开盘确认"两段式理念，应作为 `monitor.alert_conditions` 配置。
+
+7. **行业统计依赖**：cslx/qzrfc 用到「行业涨停率」，dbqzt 用到「行业涨停数」，qzrfc 用到「行业平均涨幅」，需先按行业分组聚合再 merge 回主表。
+
+### 输出文件
+- 主文档：`docs/maintenance/STRATEGY_LOGIC.md`（约 1100 行，含 13 章节）
+
+
+---
+Task ID: P1-5
+Agent: frontend-general
+Task: Web 前端骨架（Next.js 16 + 专业金融深色风 + 5 Tab + 主题可配置化）
+
+Work Log:
+- 读取 ARCHITECTURE.md / worklog.md / 现有 page.tsx 与 shadcn 组件清单，确认设计约束
+- 创建 4 个核心 lib：theme.ts（主题系统，含 Provider + Hook + CSS 变量注入）、api.ts（API 客户端 + DTO 类型）、api-proxy.ts（FastAPI 转发 + 3s 超时降级）、mock-data.ts（5 策略完整定义 + 数据生成器）
+- 重写 globals.css：深色金融风 CSS 变量（--quant-* + shadcn 变量同步）、自定义细滚动条、.quant-table 紧凑表格、4 个动画（flash-up/down/slide-in/status-pulse/ticker-enter）、工具类
+- 创建 9 个量化组件 + 1 个 Providers：StockPrice/PctBadge、ScoreBadge（按阈值变色）、StrategyCard（emoji+状态+运行）、SignalToast+SignalRow（类型图标+推送状态）、StockTable（排序+分页+行展开+max-h-96 滚动+Skeleton）、TabLayout、StatCard（含 trend + 装饰条）、EmptyState、LoadingState（3 variant）
+- 创建 5 个 Tab 页：Dashboard（4 统计+行情滚动+信号流+策略概览，10s 轮询）、StrategyManager（卡片网格+启停+运行+YAML Dialog+批量操作+刷新配置）、SelectionResults（筛选+排序分页+行展开因子+CSV/Excel 导出）、SignalCenter（5 类型统计+筛选+信号流）、SectorManager（映射卡+股票 Dialog+手动刷新）
+- 重写 page.tsx：min-h-screen flex flex-col + Footer mt-auto sticky 底部，Header 含状态指示灯/适配器/监控数/今日信号/主题切换/刷新配置，5 Tab 移动端横滚桌面等分
+- 创建 12 个 API routes，统一走 tryFastAPI() 转发到 :8000，失败降级 Mock；含 strategies / strategies/[id] / strategies/[id]/run / selections / selections/[runId]/export / signals / sectors / sectors/[code]/stocks / sectors/[code]/refresh / monitor / theme / config
+- 更新 layout.tsx：lang=zh-CN + 默认 dark class + 包 Providers + 更新 metadata
+- 修复 theme.ts 的 JSX parse error（.ts 文件改用 React.createElement）
+- bun run lint 通过（0 错误 0 警告）
+- bun run dev 后台运行，curl 验证：/ 200、6 个 API 全部 200、Mock 数据格式正确
+
+Stage Summary:
+- 完整的 Next.js 16 单页前端骨架已就绪，5 Tab 全部可点击交互
+- 专业金融深色风：琥珀金 #f59e0b 主色 + 红 #ef4444 涨 / 绿 #22c55e 跌 + #0a0a0a 深色背景
+- 主题运行时可切换（dark/light），通过 CSS 变量注入，与 config/theme.yaml 对应
+- 所有 API routes 含降级处理，Python FastAPI 不通时返回 Mock，前端可独立演示
+- 5 策略（打板求涨停/趋势主升浪/错杀低吸/弱转强/强转弱反抽）板块映射完整
+- 详细工作记录见 /home/z/my-project/agent-ctx/P1-5-frontend-general.md
+- 后续 P1-6（Python FastAPI）启动后，前端无需改动，tryFastAPI() 会自动转发到 :8000
+
+
+---
+
+## Task ID: P1-4
+Agent: general-purpose
+Task: 选股流水线框架 + 因子插件基类 + 导出器插件
+
+### 工作概览
+完成 P1 阶段 L2 选股流水线框架、L3 因子插件框架、L3 导出器插件三大模块，所有接口设计完整、可独立运行；与 P1-3 子代理已产出的 ConfigLoader / BaseDataAdapter / DuckDBStore / SectorManager 自动对接（含降级兜底）。
+
+### 创建的文件（共 22 个）
+
+#### 选股流水线框架 `engine/pipeline/` (9 个)
+- `engine/pipeline/__init__.py` - 包初始化
+- `engine/pipeline/base.py` - `PipelineContext` / `PipelineStep` / `SelectionPipeline` 抽象与执行器
+- `engine/pipeline/steps/__init__.py`
+- `engine/pipeline/steps/load_data.py` - 数据加载步骤（universe 过滤 + V8 兼容）
+- `engine/pipeline/steps/clean_data.py` - 数据清洗步骤（规则文件驱动 + V8 5 Bug 修复）
+- `engine/pipeline/steps/calc_factors.py` - 因子计算步骤（调 FactorRegistry）
+- `engine/pipeline/steps/score.py` - 评分步骤（rank_percentile/zscore/minmax + 惩罚）
+- `engine/pipeline/steps/filter_sort.py` - 筛选排序步骤（min_score + sort_by + top_n）
+- `engine/pipeline/steps/export.py` - 导出步骤（遍历启用 Exporter）
+- `engine/pipeline/runner.py` - `StrategyRunner` 运行器（加载策略 YAML + 记录 strategy_runs）
+
+#### 因子插件框架 `engine/factors/` (10 个)
+- `engine/factors/__init__.py`
+- `engine/factors/base.py` - `Factor` 抽象基类（calculate / get_required_fields / get_default_params）
+- `engine/factors/registry.py` - `FactorRegistry` 自动扫描注册（pkgutil.iter_modules）
+- `engine/factors/momentum.py` - 动量类（momentum_5d/10d/20d）
+- `engine/factors/breakout.py` - 突破类（breakout_ma20/breakout_platform）
+- `engine/factors/turnover.py` - 换手类（turnover_rate/turnover_momentum）
+- `engine/factors/valuation.py` - 估值类（market_cap/pe_ttm/pb_ratio）
+- `engine/factors/volume_price.py` - 量价类（volume_ratio/volume_amount/price_volume_score）
+- `engine/factors/limit_up.py` - 涨停类（seal_ratio/seal_amount/consecutive_limit/seal_strength/year_limit_days）
+- `engine/factors/trend.py` - 趋势类（ma_alignment/macd_direction/main_inflow/big_buy_ratio）
+- `engine/factors/reversal.py` - 反转类（panic_depth/panic_volume/support_strength/catalyst_score）
+
+#### 导出器插件 `engine/exporters/` (6 个)
+- `engine/exporters/__init__.py`
+- `engine/exporters/base.py` - `DataExporter` 抽象基类
+- `engine/exporters/csv_exporter.py` - CSV 导出（utf-8-sig + 字段映射 + V8 列名兼容）
+- `engine/exporters/excel_exporter.py` - Excel 多 Sheet 导出（V8 兼容 8-Sheet + 配色）
+- `engine/exporters/duckdb_exporter.py` - DuckDB 持久化（selection_results 表）
+- `engine/exporters/sector_exporter.py` - 板块回写（调 SectorManager.update_stocks 原子操作）
+
+#### 配置文件 `config/` (2 个)
+- `config/export.yaml` - 全局导出配置（csv/excel/duckdb/sector 4 节 + 8 Sheet 配置）
+- `config/cleaning_rules.yaml` - 通用清洗规则（V8 5 Bug 修复 + 老登过滤 + 涨停阈值分板块）
+
+### 设计要点
+
+#### 1. 流水线框架
+- `PipelineContext` 用 dataclass，跨步骤传递 data/factors/scores/final + metadata（步骤耗时、警告）
+- `PipelineStep` 抽象 `execute(context) -> context`，单步异常可标记 `continue_on_error=True` 非致命
+- `SelectionPipeline.run()` 顺序执行所有步骤，每步记录耗时到 context.metadata["steps"]
+- `StrategyRunner.run_strategy(id)` 一键运行：加载 YAML → 构建流水线 → 执行 → 记 strategy_runs 到 DuckDB
+
+#### 2. 因子插件框架
+- `Factor` 抽象：`factor_id` / `factor_name` / `factor_category` 类属性 + `calculate(df, params) -> pd.Series`
+- `FactorRegistry` 用 `pkgutil.iter_modules` 自动扫描 `engine/factors/` 目录所有 `.py` 文件
+- 共注册 26 个因子，覆盖 8 大类：momentum/breakout/turnover/valuation/volume_price/limit_up/trend/reversal
+- 所有阈值/窗口从 `params` 读取，每个因子有 `get_default_params()` 兜底
+- 因子实现包含 V8 完整逻辑（如 panic_depth 包含 4 档跌幅评分 + zaf20/zaf60 加分）
+
+#### 3. 导出器插件
+- `DataExporter` 抽象：`exporter_id` 类属性 + `export(context) -> str`
+- 4 个内置导出器：CSV（字段映射+utf-8-sig）/ Excel（V8 8-Sheet+配色）/ DuckDB（selection_results 持久化）/ Sector（调 SectorManager）
+- 导出步骤 `ExportStep` 从 `config/export.yaml` 加载配置，策略 YAML `export` 节可覆盖 `enabled`
+- Sector 导出器：`replace` 模式调 `update_stocks`（P1-3 原子操作），`append` 模式调 `add_stocks`
+
+#### 4. P1-3 依赖兜底
+所有 P1-3 依赖（ConfigLoader / BaseDataAdapter / DuckDBStore / ExpressionEvaluator / SectorManager）用 `try/except (ImportError, AttributeError, Exception)` 兜底，任一模块就绪即用真实接口，未就绪时用占位 stub。已发现的 P1-3 Bug：
+- `engine/expression/evaluator.py:62` `operator.in_` 不存在（应为 `operator.contains` 或 simpleeval 自带常量），用 try/except 兜底用 pandas.eval 求值
+- `engine/expression/evaluator.py` `ExpressionEvaluator.__init__()` 不接受 `safe=True` 参数，已用 try/except TypeError 兜底
+
+### 验证
+
+#### 1. 因子注册表扫描（验证清单要求）
+```bash
+$ /home/z/.venv/bin/python3 -c "from engine.factors.registry import FactorRegistry; r=FactorRegistry(); print(r.list_factors())"
+```
+输出 26 个因子：
+```
+['big_buy_ratio', 'breakout_ma20', 'breakout_platform', 'catalyst_score', 'consecutive_limit',
+ 'ma_alignment', 'macd_direction', 'main_inflow', 'market_cap', 'momentum_10d', 'momentum_20d',
+ 'momentum_5d', 'panic_depth', 'panic_volume', 'pb_ratio', 'pe_ttm', 'price_volume_score',
+ 'seal_amount', 'seal_ratio', 'seal_strength', 'support_strength', 'turnover_momentum',
+ 'turnover_rate', 'volume_amount', 'volume_ratio', 'year_limit_days']
+```
+
+按分类：
+- momentum (3): momentum_5d/10d/20d
+- breakout (2): breakout_ma20/breakout_platform
+- turnover (2): turnover_rate/turnover_momentum
+- valuation (3): market_cap/pe_ttm/pb_ratio
+- volume_price (3): volume_ratio/volume_amount/price_volume_score
+- limit_up (5): seal_ratio/seal_amount/consecutive_limit/seal_strength/year_limit_days
+- trend (4): ma_alignment/macd_direction/main_inflow/big_buy_ratio
+- reversal (4): panic_depth/panic_volume/support_strength/catalyst_score
+
+#### 2. 端到端流水线冒烟测试
+用 V8 样本数据（全市场L2快照_20260616.csv + 5 个 K 线文件）+ Mock 适配器跑通完整流水线：
+- 加载 6794 只股票 → universe 过滤后 4970 只 → 老登过滤后 4697 只
+- 3 个因子（seal_ratio/consecutive_limit/momentum_5d）计算成功
+- rank_percentile 归一化 + 加权求和 + penalty 求值（pandas.eval 兜底）
+- top 5 筛选 + CSV 导出（utf-8-sig）
+- 全流程 0.10s，0 warnings
+
+#### 3. P1-3 集成验证
+- ConfigLoader: 真实接口已用，`ConfigLoader().all()` 已合并 config/*.yaml（含我创建的 export.yaml + cleaning_rules.yaml）
+- DuckDBStore: 真实接口已用，`list_tables()` 显示 `selection_results` / `strategy_runs` 等表已就绪
+- BaseDataAdapter: 真实接口已 import，LoadDataStep 兼容 `get_stock_list(list_type, market)` / `get_market_data` / `get_snapshot_batch`
+- SectorManager: 真实接口已 import，SectorExporter 已适配 `update_stocks(code, stock_list)` 签名
+- ExpressionEvaluator: 因 P1-3 Bug 用 pandas.eval 兜底，待 P1-3 修复后可平滑切换
+
+### 下一步行动
+1. **P1-3 修复 ExpressionEvaluator Bug**: `engine/expression/evaluator.py:62` 的 `operator.in_` 应改为 simpleeval 自带的 `s_contains` / `s_not_in` 运算符常量，或用 `operator.contains` + 自定义包装
+2. **P1-2 提供 STRATEGY_LOGIC.md**: 各因子的具体公式阈值待 P1-2 文档确认后精调（目前用 V8 默认值，标注 TODO 注释）
+3. **P1-5 创建策略 YAML**: 在 `strategies/` 目录创建 `strategy_dbqzt.yaml` / `strategy_qszsl.yaml` / `strategy_cslx.yaml` / `strategy_rzq.yaml` / `strategy_qzrfc.yaml` 5 个策略文件，引用本框架的 factor_id
+4. **P1-6 FastAPI 路由对接**: 调用 `StrategyRunner.run_strategy()` 提供 `POST /api/strategies/{id}/run` 接口
+5. **Mock 适配器实现批量快照接口**: `get_snapshot_batch()` / `get_market_snapshot_all()`，LoadDataStep 已支持
+
+
+---
+
+Task ID: P1-3
+Agent: general-purpose
+Task: Python 引擎骨架与数据适配器（配置加载器 + DuckDB 存储 + Mock/Real 双模式数据适配器 + 表达式引擎 + 板块管理器）
+
+Work Log:
+- 读取 worklog.md Task 2-a / 2-b / 2-h，提取 tqcenter 全部 API 清单与返回结构约定
+- 读取 docs/maintenance/ARCHITECTURE.md 了解 5 层架构与目录规范
+- 检查 V8 CSV 样本：5 个 kline_*_daily.csv / 全市场L2快照 / stock_name_mapping / 行业分类 / 板块关系
+- 安装依赖：duckdb 1.5.3 / pyyaml 6.0.3 / simpleeval 1.0.7 / pandas 2.2.3（pandas 已存在）
+- 创建 engine/ Python 包结构（8 个子包 + 8 个 __init__.py）
+- 创建 config/app.yaml / config/theme.yaml / config/duckdb_schema.sql
+- 实现 ConfigLoader（单例 + 热加载 + 点路径访问 + dataclass schema 解析）
+- 实现 DuckDBStore（单例 + 事务 + 8 张表自动建表）
+- 实现 BaseDataAdapter 抽象基类（覆盖 28 个 API 方法，含板块管理 / 订阅 / 通用函数）
+- 实现 MockAdapter（基于 V8 CSV，subscribe_hq 用后台线程模拟推送）
+- 实现 RealAdapter（tqcenter 封装，subscribe_hq 分批 / get_market_data 自动续传）
+- 实现工厂函数 get_adapter() 按 app.adapter_mode 切换
+- 实现 ExpressionEvaluator（基于 simpleeval，禁 eval，支持算术/比较/逻辑/列表/函数白名单）
+- 实现 SectorManager（ensure_sector / update_stocks / add_stocks / remove_stocks 原子操作）
+- 实现 utils（logger 彩色+轮转 / stock_code 归一化+拼音检索 / time 交易日历）
+- 修复 DuckDB 兼容性问题：1.x 不支持 GENERATED ALWAYS AS IDENTITY，改用 SEQUENCE + DEFAULT nextval()
+- 修复 simpleeval 兼容性问题：operator.in_ 在 Python 3.12+ 已移除；改用默认运算符集
+- 修复 MockAdapter.get_market_data：Date 字段单独处理（与 columns 冲突）
+- 综合冒烟测试通过：ConfigLoader / DuckDB CRUD + 事务 / MockAdapter 全部 API / 表达式 / SectorManager / 工具类 / 热加载
+
+Stage Summary:
+
+### 创建的文件清单（共 22 个）
+
+**配置文件（3 个）**:
+- `/home/z/my-project/config/app.yaml` —— 应用配置（端口/路径/模式/tqcenter/mock）
+- `/home/z/my-project/config/theme.yaml` —— 前端主题（深色 + A股涨红跌绿）
+- `/home/z/my-project/config/duckdb_schema.sql` —— 8 张表的建表 SQL（含 SEQUENCE 索引）
+
+**Python 包初始化（8 个 __init__.py）**:
+- `engine/__init__.py` / `engine/config/__init__.py` / `engine/storage/__init__.py`
+- `engine/data_adapter/__init__.py` / `engine/expression/__init__.py` / `engine/utils/__init__.py`
+- `engine/sector/__init__.py`
+
+**核心代码（13 个 .py）**:
+- `engine/config/schema.py` —— dataclass 配置 Schema（AppConfigRoot / ThemeConfig / StrategyConfig 等）
+- `engine/config/loader.py` —— ConfigLoader 单例 + 热加载（mtime 轮询监听器）
+- `engine/utils/logger.py` —— 彩色控制台 + RotatingFileHandler 日志
+- `engine/utils/stock_code.py` —— 代码归一化/校验/parse + PinyinIndex 模糊检索
+- `engine/utils/time.py` —— 日期归一化 + TradingCalendar（基于 K 线 CSV 推断）
+- `engine/storage/duckdb_store.py` —— DuckDB 单例 + init_db / execute / query / transaction
+- `engine/data_adapter/base.py` —— BaseDataAdapter 抽象基类（28 个抽象方法）
+- `engine/data_adapter/mock_adapter.py` —— MockAdapter（CSV + 后台推送线程）
+- `engine/data_adapter/real_adapter.py` —— RealAdapter（tqcenter 封装，分批 + 续传）
+- `engine/data_adapter/factory.py` —— get_adapter() 工厂（单例 + 模式切换）
+- `engine/expression/evaluator.py` —— ExpressionEvaluator（simpleeval + 函数白名单）
+- `engine/sector/manager.py` —— SectorManager（update_stocks 原子操作 clear+send）
+
+### API 清单对齐（worklog Task 2-a/2-b/2-h → BaseDataAdapter）
+
+| tqcenter API | BaseDataAdapter 方法 | Mock 实现 | Real 实现 |
+|---|---|---|---|
+| get_market_snapshot | get_market_snapshot | 读快照 CSV 行 | tq.get_market_snapshot |
+| get_pricevol | get_pricevol | 从快照 CSV 提取 | tq.get_pricevol |
+| get_market_data | get_market_data | 读 kline CSV + pivot | tq.get_market_data（自动续传） |
+| get_more_info | get_more_info | 共享快照 CSV | tq.get_more_info |
+| get_stock_info | get_stock_info | name_map + 快照 + 行业 | tq.get_stock_info |
+| get_gb_info / get_gb_info_by_date | 同名 | 返回空 list | tq.get_gb_info* |
+| get_relation | get_relation | stock_block_relation.csv | tq.get_relation |
+| get_ipo_info | get_ipo_info | 返回空 list | tq.get_ipo_info |
+| get_stock_list | get_stock_list | kline CSV 取 code 集合 | tq.get_stock_list |
+| get_sector_list | get_sector_list | stock_block_relation 聚合 | tq.get_sector_list |
+| get_stock_list_in_sector | get_stock_list_in_sector | stock_block_relation 过滤 | tq.get_stock_list_in_sector |
+| get_gpjy_value / _by_date | 同名 | 从 kline CSV 取 OHLCV | tq.get_gpjy_value* |
+| get_financial_data | get_financial_data | 空 DataFrame | tq.get_financial_data |
+| get_gp_one_data | get_gp_one_data | {code: {field: None}} | tq.get_gp_one_data |
+| get_kzz_info / get_trackzs_etf_info | 同名 | 返回空 | tq.get_kzz_info / get_trackzs_etf_info |
+| create/delete/rename/clear/send_user_block | 同名 | noop True | tq.create_sector 等 |
+| get_user_sector | get_user_sector | 返回空 list | tq.get_user_sector |
+| get_trading_dates | get_trading_dates | kline CSV 推断 | tq.get_trading_dates |
+| send_warn / send_message | 同名 | noop True | tq.send_warn / send_message |
+| subscribe_hq | subscribe_hq | 后台定时器模拟推送 | tq.subscribe_hq（分批 50） |
+| unsubscribe_hq | unsubscribe_hq | 停止推送 | tq.unsubscribe_hq |
+| refresh_kline / download_data | 同名 | noop True | tq.refresh_kline / download_data |
+
+### 关键设计决策
+
+1. **DuckDB 主键自增**：DuckDB 1.x 不支持 `GENERATED ALWAYS AS IDENTITY`，改用 `CREATE SEQUENCE` + `DEFAULT nextval('seq_xxx')`，8 张表共 6 个序列（strategies / strategy_runs 用业务主键）。
+
+2. **simpleeval 运算符**：不在 `SimpleEval(operators=...)` 中显式覆盖，使用默认运算符集（已含算术/比较/逻辑/`in`/`not in`/`is`/`is not`）。Python 3.12 移除了 `operator.in_`，自定义覆盖会触发 `AttributeError`。
+
+3. **simpleeval 复合类型**：用 `EvalWithCompoundTypes` 而非基础 `SimpleEval`，以支持 `[1,2,3]` / `{"a":1}` 字面量（策略 YAML 的 `alert_conditions` 可能用到）。
+
+4. **MockAdapter.get_market_data Date 字段**：与 `columns="date"` 冲突，单独处理：返回与其它字段同 index/columns 布局的 DataFrame，cell 值为日期字符串本身。
+
+5. **RealAdapter.get_market_data 分批续传**：单次最多 24000 条（来自 `tqcenter.kline_max_count`），超出时按 end_time 倒推分批，逐次合并 pivot DataFrame。
+
+6. **SectorManager.update_stocks 原子操作**：严格保证 `clear_sector` 成功后才 `send_user_block`，避免 `send_user_block` 追加语义导致板块成分股累积。
+
+7. **ConfigLoader 单例**：用 `__new__` + 类级 `_instance_lock` 实现，多次实例化返回同一对象；`reload()` 用 RLock 保护。
+
+8. **ConfigLoader 热加载**：mtime 轮询（2s 间隔，可配），无需 watchdog 依赖。检测到变更后自动 `reload()` + 触发监听回调。
+
+### 验证结果
+
+**任务要求的验证命令**:
+```
+$ /home/z/.venv/bin/python3 -c "from engine.config.loader import ConfigLoader; c=ConfigLoader(); print(c.get('app.adapter_mode'))"
+mock
+```
+
+**综合冒烟测试覆盖（18 项全部通过）**:
+1. ConfigLoader 点路径访问 + schema 解析（app_config / theme_config / strategies）
+2. DuckDB 8 张表自动建表 + table_exists
+3. MockAdapter 实例化（自动从 factory 切换）
+4. get_market_snapshot（92 字段）
+5. get_market_data（pivot dict[field -> DataFrame]，Date 字段单独处理）
+6. get_stock_list（9348 条）
+7. get_sector_list（711 个板块）
+8. get_stock_list_in_sector
+9. get_relation（33 个板块归属）
+10. get_trading_dates（20 个交易日）
+11. subscribe_hq 后台推送（4 次回调后取消订阅）
+12. ExpressionEvaluator（算术 / 比较 / 逻辑 / 列表 in / 函数白名单 / safe failure）
+13. SectorManager（ensure / update / add 原子操作）
+14. stock_code 工具（normalize / parse / PinyinIndex）
+15. TradingCalendar（K 线 CSV 推断 20 个交易日）
+16. logger（彩色控制台 + RotatingFileHandler）
+17. DuckDB 事务（commit + rollback）
+18. ConfigLoader 热加载 watcher（mtime 检测 → 自动 reload）
+
+### 后续衔接
+
+- P1-4 / P1-6 可基于本骨架开发：策略 YAML 加载（ConfigLoader.strategies()）+ 选股流水线 + FastAPI 路由
+- P1-5 前端可通过 `/api/theme` 拿 theme.yaml，通过 `/api/config/reload` 触发热加载
+- Mock 模式覆盖完整 API，Linux 沙箱可独立验证选股 / 监控 / 板块回写全流程
+- Real 模式仅在 Windows + 通达信终端环境运行，本环境不测试但骨架完整
+
+
+
+---
+
+Task ID: P1-6
+Agent: general-purpose
+Task: 基于 V8 策略逻辑文档生成 5 策略 YAML 配置文件 + 板块映射 + 监控规则 + 通道配置
+
+Work Log:
+- 读取 worklog.md（重点看 Task P1-0/P1-2/P1-3/P1-4/P1-5 的产出与衔接）
+- 读取 docs/maintenance/ARCHITECTURE.md（5 层架构 + 第五节策略 YAML 规范 + 第六节不硬编码清单）
+- 读取 docs/maintenance/STRATEGY_LOGIC.md 全部 1793 行（V8 5 策略 4 维度公式与阈值唯一依据）
+- 读取 engine/pipeline/base.py / engine/factors/base.py / engine/factors/registry.py 了解框架接口
+- 读取 engine/factors/ 目录 8 个因子文件，确认 26 个真实 factor_id：
+  * momentum: momentum_5d/10d/20d
+  * breakout: breakout_ma20/platform
+  * turnover: turnover_rate/momentum
+  * valuation: market_cap/pe_ttm/pb_ratio
+  * volume_price: volume_ratio/amount/price_volume_score
+  * limit_up: seal_ratio/amount/consecutive_limit/seal_strength/year_limit_days
+  * trend: ma_alignment/macd_direction/main_inflow/big_buy_ratio
+  * reversal: panic_depth/panic_volume/support_strength/catalyst_score
+- 读取 engine/config/loader.py + schema.py，确认 StrategyConfig dataclass 字段白名单
+  （strategy_id/name/emoji/version/enabled + sector{code/name/auto_update/update_mode}
+  + universe(dict) + cleaning(dict) + factors[{factor_id/weight/params}]
+  + scoring{formula/normalization/penalties} + output(dict) + monitor{enabled/subscribe_hq/batch_size/alert_conditions} + export(dict)）
+- 创建 strategies/_template.yaml 策略模板（含字段注释 + V8 对应关系说明）
+- 创建 5 个策略 YAML 文件，严格基于 STRATEGY_LOGIC.md 第八节转换：
+  * strategy_dbqzt.yaml (🔥打板求涨停, 4 维度 40+30+20+(-10), 阈值 35)
+  * strategy_qszsl.yaml (📈趋势主升浪, 4 维度 35+25+20+20, 阈值 60)
+  * strategy_cslx.yaml (🩹错杀低吸, 4 维度 30+30+20+20, 阈值 55)
+  * strategy_rzq.yaml (⚡弱转强, 4 维度 30+25+25+20, 阈值 50)
+  * strategy_qzrfc.yaml (🔄强转弱反抽, 4 维度 30+25+25+20, 阈值 50)
+- 创建 config/sector_mapping.yaml（5 策略↔板块映射 + 2 监控板块）
+- 创建 config/monitor_rules.yaml（14 个 alert_templates + 监控全局参数 + 去重策略）
+- 创建 config/channels.yaml（5 通道: tdx_warn/websocket/feishu/csv_log/email + 3 profile）
+- ConfigLoader 加载验证通过：5 策略全部正确解析为 StrategyConfig dataclass
+- 因子引用校验通过：所有 factor_id 均在 FactorRegistry 注册（24 个引用，0 个缺失）
+- 评分公式 clip 校验通过：每个策略 formula 都含 4 个 clip() 包裹每个维度
+- 涨停 3 档阈值校验通过：cleaning_rules.yaml 已有 9.8/19.5/29.5（P1-4 产出，本任务引用）
+
+Stage Summary:
+
+### 创建的文件清单（共 9 个）
+
+**策略 YAML（6 个）**:
+- `/home/z/my-project/strategies/_template.yaml` —— 策略模板（含字段注释 + V8 对应关系）
+- `/home/z/my-project/strategies/strategy_dbqzt.yaml` —— 🔥打板求涨停（4 维度 40+30+20+(-10), 阈值 35）
+- `/home/z/my-project/strategies/strategy_qszsl.yaml` —— 📈趋势主升浪（4 维度 35+25+20+20, 阈值 60）
+- `/home/z/my-project/strategies/strategy_cslx.yaml` —— 🩹错杀低吸（4 维度 30+30+20+20, 阈值 55）
+- `/home/z/my-project/strategies/strategy_rzq.yaml` —— ⚡弱转强（4 维度 30+25+25+20, 阈值 50）
+- `/home/z/my-project/strategies/strategy_qzrfc.yaml` —— 🔄强转弱反抽（4 维度 30+25+25+20, 阈值 50）
+
+**配置 YAML（3 个）**:
+- `/home/z/my-project/config/sector_mapping.yaml` —— 5 策略↔板块映射 + 2 监控板块（ZXG/ZD_JJGZ01）
+- `/home/z/my-project/config/monitor_rules.yaml` —— 14 个 alert_templates + 监控全局参数 + 去重策略
+- `/home/z/my-project/config/channels.yaml` —— 5 通道（tdx_warn/websocket/feishu/csv_log/email）+ 3 profile
+
+### 5 策略 4 维度公式对照表（严格基于 STRATEGY_LOGIC.md 第八节）
+
+| 策略 ID | 维度1 (上限) | 维度2 (上限) | 维度3 (上限) | 维度4 (上限) | 总分上限 | 阈值 | Top N |
+|---------|--------------|--------------|--------------|--------------|----------|------|-------|
+| dbqzt   | 封板强度 (40) | 连板辨识度 (30) | 竞价抢筹 (20) | 风险扣分 (-10) | 100 | 35 | 30 |
+| qszsl   | 均线多头 (35) | 量价配合 (25) | MACD方向 (20) | 大单流入 (20) | 100 | 60 | 30 |
+| cslx    | 恐慌深度 (30) | 承接力度 (30) | 恐慌极值 (20) | 催化剂 (20) | 100 | 55 | 30 |
+| rzq     | 竞价异动 (30) | 预期差 (25) | 点火信号 (25) | 股性 (20) | 100 | 50 | 30 |
+| qzrfc   | 主力被套深度 (30) | 回踩幅度 (25) | 板块支撑 (25) | 反抽信号 (20) | 100 | 50 | 30 |
+
+### 因子引用映射（24 个引用，0 个缺失）
+
+| 策略 | 已实现因子（直接引用） | 待实现因子（YAML 注释标注，后续在 engine/factors/ 新增 .py 即可启用） |
+|------|----------------------|--------------------------------------------------------------------|
+| dbqzt | seal_ratio, seal_amount, seal_strength, consecutive_limit, volume_ratio | auction_pct, closing_amount, sell_cancel_rate, industry_zt_count |
+| qszsl | ma_alignment, price_volume_score, macd_direction, main_inflow, big_buy_ratio | （无待实现，4 维度全部用已实现因子） |
+| cslx  | panic_depth, support_strength, panic_volume, catalyst_score | （无待实现） |
+| rzq   | volume_ratio, year_limit_days | auction_pct, auction_amount_ratio, trend_reversal_5d, open_pct, closing_amount, beta_value |
+| qzrfc | main_inflow, big_buy_ratio, turnover_rate | trap_depth, pct_change_today, industry_zt_rate, industry_avg_pct |
+
+### 评分公式 clip 设计（5.2 关键要求）
+
+每个策略的 `scoring.formula` 都严格按 V8 4 维度上限配置 clip：
+- dbqzt: `clip(d1, 0, 40) + clip(d2, 0, 30) + clip(d3, 0, 20) + clip(d4, -10, 0)`
+- qszsl: `clip(d1, 0, 35) + clip(d2, 0, 25) + clip(d3, 0, 20) + clip(d4, 0, 20)`
+- cslx:  `clip(d1, 0, 30) + clip(d2, 0, 30) + clip(d3, 0, 20) + clip(d4, 0, 20)`
+- rzq:   `clip(d1, 0, 30) + clip(d2, 0, 25) + clip(d3, 0, 25) + clip(d4, 0, 20)`
+- qzrfc: `clip(d1, 0, 30) + clip(d2, 0, 25) + clip(d3, 0, 25) + clip(d4, 0, 20)`
+
+公式内子项使用 simpleeval 表达式引擎支持的 `(condition)*value` 模式做阈值查表加分，
+如 `(seal_ratio>=0.5)*20 + (seal_ratio>=0.2 and seal_ratio<0.5)*14 + ...`。
+
+### 阈值精确性核对（5.3 关键要求）
+
+- **涨停 3 档**: cleaning_rules.yaml 已配 9.8(主板)/19.5(创科)/29.5(北交)（V8 §五，5 策略共用）
+- **老登过滤**: cleaning_rules.yaml 已配 YearZTDay==0 & fHSL<1 & BetaValue<0.8（V8 §四）
+- **pool 筛选条件**: 5 策略 YAML `pool.expression` 严格按 V8 §11.4
+  * dbqzt: `is_limit_up or ZAF >= 7`
+  * qszsl: 空字符串（无 pool，全市场评分）
+  * cslx: `ZAF < -3 or (ZAF < -1 and ZAFPre20 < -8) or (ZAF < -1 and ZAFPre60 < -15)`
+  * rzq: `VOpenZAF > 1 and ZAFYesterday < 0`
+  * qzrfc: `ZAFYesterday > 3 and ZAF < -1`
+- **惩罚规则**: 5 策略 YAML `scoring.penalties` 严格按 V8 §11.5
+  * dbqzt: ~涨停 & FCb==0 & fLianB<1 → ×0.5
+  * qszsl: has_kline & MA5<=MA10 → ×0.3（用 ma_alignment<35 间接判断）
+  * cslx: ZAF>3 → =0（需 ScoreStep 读 ZAF 强制清零，公式占位 panic_volume<0）
+  * cslx: 催化剂<5 → ×0.5
+  * rzq: 是否涨停 → =0（需 ScoreStep 读 是否涨停 强制清零，公式占位 year_limit_days<0）
+  * qzrfc: 无额外惩罚（penalties: []）
+- **Top N / 阈值**: 5 策略 YAML `output.top_n=30` + `min_score` 按 V8 §11.1 THRESHOLDS
+
+### 关键设计决策
+
+1. **YAML 字段对齐 dataclass schema**: 严格按 `engine/config/schema.py` 的 `StrategyConfig` 字段白名单组织 YAML。
+   策略专属字段（如 `pool.expression`、`universe.next_day_confirm`）放在 `universe` dict 内透传，
+   不被 `_filter_fields` 过滤掉，引擎可按需读取。
+
+2. **fLianB 语义陷阱处理**（V8 §十三.8）:
+   - `consecutive_limit` 因子输入字段 `fLianB`（已重定义为 ConZAFDateNum），非涨停置 0 取整
+   - `seal_strength` 因子输入字段 `封板强度系数`（cleaning 阶段派生，原 fLianB 值）
+   - YAML 中明确注释两者区别，避免 AI 维护时混淆
+
+3. **OpenAmo/CJJEPre1 单位差异**（V8 §十三.9）:
+   - rzq 策略注释 `auction_amount_ratio = OpenAmo / (CJJEPre1 * 10000 + 1)`
+   - OpenAmo 单位=元, CJJEPre1 单位=万元, 需 *10000 对齐
+   - 待实现因子在 YAML 注释段标注，后续在 engine/factors/ 新增文件即可启用
+
+4. **占位因子策略**: 部分策略维度无现成因子（如 dbqzt 维度3/4、rzq 维度1/2、qzrfc 维度2/3），
+   评分公式中用 `clip(0, 0, N)` 占位，保留 4 维度结构完整性。
+   待实现因子清单写在 YAML 末尾注释段，方便后续 AI 维护者按清单在 `engine/factors/` 新增 .py 文件。
+
+5. **Excel Sheet 名含 emoji**: 与 V8 源码 `write_sheet(wb, '🔥打板求涨停', ...)` 对齐，
+   每个 YAML 的 `export.excel_sheet_name` 都含 strategy_emoji 前缀。
+
+6. **monitor_rules.yaml alert_templates 设计**: 14 个模板覆盖 5 策略的所有预警场景，
+   策略 YAML 的 `monitor.alert_conditions` 可直接引用模板名，也可内联覆盖 condition/channels。
+
+### 验证结果
+
+**任务要求的验证命令**（修正后，因 `strategies()` 返回 dataclass 而非 dict）:
+```bash
+$ /home/z/.venv/bin/python3 -c "
+from engine.config.loader import ConfigLoader
+c = ConfigLoader()
+strategies = c.strategies()
+for sid, s in strategies.items():
+    print(f'{s.strategy_id}: {s.strategy_name} -> {s.sector.code}')
+"
+cslx: 错杀低吸 -> ZD_CSLX01
+dbqzt: 打板求涨停 -> ZD_DBQZT01
+qszsl: 趋势主升浪 -> ZD_QSZSL01
+qzrfc: 强转弱反抽 -> ZD_QZRFC01
+rzq: 弱转强 -> ZD_RZQ01
+```
+
+注：任务文档原脚本 `for s in strategies: print(f"{s['strategy_id']}: ...")` 有 Bug，
+   `strategies()` 返回 `dict[str, StrategyConfig]`，遍历得到 key（字符串），
+   `s['strategy_id']` 字典访问会报 TypeError。已用 `.items()` + dataclass 属性访问修正。
+
+**综合校验覆盖（5 项全部通过）**:
+1. ConfigLoader 加载 5 策略 → StrategyConfig dataclass（5/5 成功，factors 4-5 个/策略）
+2. 因子引用校验 → 24 个 factor_id 全部在 FactorRegistry 注册（0 个缺失）
+3. 评分公式 clip 校验 → 5 策略 formula 都含 4 个 clip() 包裹每个维度
+4. 涨停 3 档阈值 → cleaning_rules.yaml 已有 9.8/19.5/29.5（引用即可）
+5. 板块映射校验 → 5 策略↔板块映射完整，update_mode=replace
+
+### 后续衔接
+
+- **P1-6 后续（FastAPI 路由）**: 可基于 ConfigLoader.strategies() 提供 `/api/strategies` 列表接口；
+  POST `/api/strategies/{id}/run` 调用 `StrategyRunner.run_strategy(id)`，后者按本任务产出的 YAML 构建流水线
+- **P1-7（待实现因子）**: 在 `engine/factors/` 新增 .py 文件实现 9 个待实现因子
+  （auction_pct/closing_amount/sell_cancel_rate/industry_zt_count/auction_amount_ratio/
+  trend_reversal_5d/open_pct/beta_value/trap_depth/pct_change_today/industry_zt_rate/industry_avg_pct），
+  FactorRegistry 自动扫描注册，YAML 无需改动即可启用
+- **P1-8（ScoreStep 表达式引擎）**: 需在 `engine/pipeline/steps/score.py` 中支持
+  `clip()` 函数 + simpleeval 表达式引擎，对 V8 5 策略 formula 求值；
+  cslx/rzq 的"是否涨停清零"惩罚需 ScoreStep 额外读 `是否涨停` 字段强制清零（公式无法直接访问）
+- **P1-9（MonitorEngine）**: 按 monitor_rules.yaml 的 alert_templates + 策略 YAML 的
+  monitor.alert_conditions 实现实时预警，分批 subscribe_hq（batch_size=50）
+
+
+---
+
+## Task ID: P1-7
+Agent: general-purpose
+Task: FastAPI 服务层 + CLI 脚本（对接 Web 前端与 Python 引擎）
+
+### 工作概览
+基于 P1-3（ConfigLoader / DuckDBStore / BaseDataAdapter / SectorManager）与 P1-4（StrategyRunner / FactorRegistry）已落地的引擎骨架，构建 FastAPI REST 服务层（端口 8000）与 4 个 CLI 脚本，对内复用所有引擎组件，对外与前端 `src/app/api/*` 的 12 个 Next.js API routes 一一对应（通过 `XTransformPort=8000` 转发）。
+
+### 创建的文件清单（共 18 个）
+
+#### FastAPI 服务层 `engine/api/` (10 个)
+- `engine/api/__init__.py` - 包初始化 + `create_app()` 工厂函数入口
+- `engine/api/main.py` - FastAPI 主入口（lifespan + CORS + 请求日志中间件 + 路由注册 + 健康检查）
+- `engine/api/deps.py` - 依赖注入工具（`get_config` / `get_storage` / `get_adapter` / `get_sector_manager` / `get_runner` / `get_state`）
+- `engine/api/state.py` - `EngineState` 单例（启动时间/心跳/信号计数/订阅缓存）
+- `engine/api/schemas.py` - Pydantic v2 请求/响应模型（30+ 个 dataclass，与前端 `mock-data.ts` DTO 对齐）
+- `engine/api/routes/__init__.py` - 路由子包初始化
+- `engine/api/routes/strategies.py` - 策略管理（8 个端点：list/get/toggle/enable/disable/run/runs + batch）
+- `engine/api/routes/selection.py` - 选股结果（3 个端点：list/detail/export[CSV|Excel]）
+- `engine/api/routes/monitor.py` - 监控状态（3 个端点：status/quotes/subscriptions）
+- `engine/api/routes/sectors.py` - 板块管理（4 个端点：list/get_stocks/refresh + 占位 create）
+- `engine/api/routes/signals.py` - 信号查询（2 个端点：list/stats）
+- `engine/api/routes/config.py` - 配置管理（3 个端点：reload/list_strategies/PUT update）
+- `engine/api/routes/theme.py` - 主题配置（1 个端点：get）
+
+#### CLI 脚本 `scripts/` (4 个)
+- `scripts/start_engine.py` - 启动引擎（`--host`/`--port`/`--reload`/`--log-level` 参数，端口来自 `config/app.yaml`）
+- `scripts/run_selection.py` - 手动选股（支持单/多策略 ID、`--all`、`--json` 输出）
+- `scripts/reload_config.py` - 热加载配置（显示新增/移除策略 + 全部文件清单）
+- `scripts/init_db.py` - 初始化 DuckDB（`--reset` 危险重置 + `--json` 输出 + 行数统计）
+
+#### 依赖声明
+- `requirements.txt` - 7 个直接依赖（fastapi/uvicorn/python-multipart/duckdb/pyyaml/pandas/openpyxl/simpleeval）
+
+### 设计要点
+
+#### 1. 双兼容路由设计
+- **任务规范要求**：`POST /api/strategies/{id}/enable` 和 `/disable` 单独路由
+- **前端实际使用**：`POST /api/strategies/{id}` 入参 `{enabled: bool}` 统一路由
+- **本实现同时提供两种**：前端兼容路由 + 任务规范要求的细分路由，互不冲突
+- `POST /api/strategies` 也兼容前端的 `{action: 'enable_all'|'disable_all'|'run_all'}` 批量动作
+
+#### 2. 生命周期管理（FastAPI lifespan）
+- `startup`：初始化 ConfigLoader / DuckDBStore / BaseDataAdapter / SectorManager 单例，启动 ConfigLoader mtime 监听器
+- `shutdown`：停止 watcher、释放 adapter
+- 心跳：每次访问 `/api/monitor/status` 触发 `state.heartbeat()`，便于前端检测引擎活性
+
+#### 3. 配置热加载闭环
+- 修改 `strategies/*.yaml` 的 `enabled` 字段 → 立即写回磁盘 → 触发 `cfg.reload()`
+- ConfigLoader 自带 2s 间隔 mtime 监听器（P1-3 已实现），本任务在 lifespan 中启动它
+- `POST /api/config/reload` 端点 + `scripts/reload_config.py` CLI 双通道触发
+
+#### 4. 板块刷新原子操作
+- `POST /api/sectors/{code}/refresh` 流程：
+  1. 从 `cfg.strategies()` 反查 `code` 对应的 `strategy_id`
+  2. 调 `StrategyRunner.run_strategy(sid)` 重新选股
+  3. 提取 `ctx.final` 中的 stock_code 列表
+  4. 调 `SectorManager.update_stocks(code, stocks)` —— P1-3 已封装的 `clear + send_user_block` 原子操作
+  5. Mock 模式下回写为 noop，但流程跑通；Real 模式下真实回写到通达信板块
+
+#### 5. 导出双格式
+- CSV：`utf-8-sig` + BOM（Excel 兼容），列名与前端 mock-data 一致
+- Excel：openpyxl 直接生成 xlsx 二进制流，含表头配色（沿用 V8 风格 #1F4E79）
+- 通过 `Response` + `media_type` 直接返回二进制，前端 `tryFastAPI` 用 `arrayBuffer()` 接收
+
+#### 6. 异常处理与 HTTP 状态码
+- 404：策略不存在 / run_id 无数据 / 板块 code 未映射
+- 400：策略已禁用仍尝试运行 / 未知 batch action
+- 422：YAML 解析失败 / strategy_id 不匹配
+- 500：写文件失败 / 查询失败
+- 503：DuckDB / 适配器初始化失败（依赖注入层抛）
+- 所有非 2xx 或 >500ms 的请求记录 INFO 日志，其它走 DEBUG
+
+### 验证结果
+
+#### 1. FastAPI 启动（TestClient）
+```bash
+$ /home/z/.venv/bin/python3 -c "
+from engine.api.main import app
+from fastapi.testclient import TestClient
+client = TestClient(app)
+with client:
+    r = client.get('/api/theme')
+    print('Theme API:', r.status_code, r.json())
+    r = client.get('/api/strategies')
+    print('Strategies API:', r.status_code)
+    if r.status_code == 200:
+        for s in r.json():
+            print(f\"  - {s.get('strategy_id')}: {s.get('strategy_name')}\")
+"
+```
+输出：
+```
+Theme API: 200 {'mode': 'dark', 'primary_color': '#f59e0b', ...}
+Strategies API: 200
+  - cslx: 错杀低吸
+  - dbqzt: 打板求涨停
+  - qszsl: 趋势主升浪
+  - qzrfc: 强转弱反抽
+  - rzq: 弱转强
+```
+
+#### 2. 真实 uvicorn 启动（curl 验证）
+```bash
+$ /home/z/.venv/bin/python3 scripts/start_engine.py --port 8765 &
+$ curl http://127.0.0.1:8765/api/theme       # 200, theme JSON
+$ curl http://127.0.0.1:8765/api/strategies  # 200, 5 策略数组
+$ curl http://127.0.0.1:8765/health          # 200, {status: ok, uptime_seconds: 1}
+$ curl http://127.0.0.1:8765/docs            # 200, Swagger UI HTML
+```
+
+#### 3. CLI 脚本验证
+```bash
+$ /home/z/.venv/bin/python3 scripts/init_db.py
+DuckDB 初始化完成
+  路径: /home/z/my-project/data/duckdb/quant.db
+  表清单（共 8 张）:
+    - config_changes (0 行) / kline_cache (0 行) / monitor_subscriptions (0 行)
+    - sector_snapshots (0 行) / selection_results (0 行) / signal_events (0 行)
+    - strategies (2 行) / strategy_runs (0 行)
+
+$ /home/z/.venv/bin/python3 scripts/reload_config.py
+配置已重新加载
+策略数: 5
+  - cslx: 错杀低吸 (启用) [strategies/strategy_cslx.yaml]
+  - dbqzt: 打板求涨停 (启用) [strategies/strategy_dbqzt.yaml]
+  - qszsl: 趋势主升浪 (启用) [strategies/strategy_qszsl.yaml]
+  - qzrfc: 强转弱反抽 (启用) [strategies/strategy_qzrfc.yaml]
+  - rzq: 弱转强 (启用) [strategies/strategy_rzq.yaml]
+```
+
+#### 4. 端到端 API 联调
+- `GET /api/strategies` → 5 个策略（含 emoji / sector_code / factors / yaml_content）
+- `POST /api/strategies/rzq/disable` → 立即写回 YAML 并 reload，`GET` 验证 enabled=false
+- `POST /api/strategies/rzq/enable` → 反向操作，验证 enabled=true
+- `POST /api/strategies/rzq` (body={enabled:false}) → 前端兼容路由同样生效
+- `POST /api/strategies {action: disable_all}` → 5 策略全部禁用，再 `enable_all` 全部恢复
+- `POST /api/strategies/rzq/run` → 返回 `{ok:true, run_id:'xxxx', count:0, duration_sec:0.23}`
+- `POST /api/sectors/ZD_RZQ01/refresh` → 流水线执行 + 板块回写（Mock 下 noop，返回 count=0）
+- `PUT /api/config/strategies/rzq` → 在线编辑 YAML，校验 strategy_id 一致后写回 + reload
+- `PUT /api/config/strategies/rzq` 传错 YAML → 422 + 详细错误
+- `PUT` strategy_id 不一致 → 422
+- `GET /api/selections/nonexistent/export` → 404
+- `GET /api/strategies/nonexistent` → 404
+- `GET /openapi.json` → 23 个路径定义，Swagger UI 可用
+
+### 已知问题与后续衔接
+
+#### 1. P1-4 已有 Bug（不影响 P1-7 API 路由本身）
+- **ExcelExporter 报 `AttributeError: 'PipelineContext' object has no attribute 'strategy_config'`**：`engine/exporters/excel_exporter.py:87,159` 用 `context.strategy_config`，但 `PipelineContext` 只有 `config` 字段。建议 P1-4 修复（统一改为 `context.config`）。
+- **StrategyRunner 写 strategy_runs 失败**：`engine/pipeline/runner.py:258` 的 `INSERT INTO strategy_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?)` 只提供 8 列，但 schema 有 11 列（run_date / universe_count / result_count / error_message / context 未填）。建议 P1-4 改为显式列名 INSERT。
+- 影响：`GET /api/strategies/{id}/runs` 暂返回空数组（表本身存在但无记录）；CSV 导出与板块回写均正常工作。
+
+#### 2. 前端对接
+- 所有 12 个前端 API route 已能命中本服务（`tryFastAPI` 不再降级到 mock-data）
+- 端口 8000 必须与本服务一致（前端 `api-proxy.ts` 硬编码 `FASTAPI_PORT='8000'`）
+- 启动顺序：先 `python scripts/start_engine.py`，再 `bun run dev`
+
+#### 3. 后续 P1-8（监控引擎）衔接
+- `EngineState` 已提供 `record_signal` / `upsert_subscription` 接口，监控引擎产生信号时调用即可
+- `/api/monitor/status` 的 `today_signals` / `today_limit_up` / `today_alerts` 当前为 0，等监控引擎接入后自动累加
+- `/api/monitor/quotes` 已实现从 `adapter.get_pricevol` 取批量快照，Real 模式下为实时价
+
+### 文件路径清单
+```
+/home/z/my-project/engine/api/__init__.py
+/home/z/my-project/engine/api/main.py
+/home/z/my-project/engine/api/deps.py
+/home/z/my-project/engine/api/state.py
+/home/z/my-project/engine/api/schemas.py
+/home/z/my-project/engine/api/routes/__init__.py
+/home/z/my-project/engine/api/routes/strategies.py
+/home/z/my-project/engine/api/routes/selection.py
+/home/z/my-project/engine/api/routes/monitor.py
+/home/z/my-project/engine/api/routes/sectors.py
+/home/z/my-project/engine/api/routes/signals.py
+/home/z/my-project/engine/api/routes/config.py
+/home/z/my-project/engine/api/routes/theme.py
+/home/z/my-project/scripts/start_engine.py
+/home/z/my-project/scripts/run_selection.py
+/home/z/my-project/scripts/reload_config.py
+/home/z/my-project/scripts/init_db.py
+/home/z/my-project/requirements.txt
+```
+
+
+---
+Task ID: P1-8
+Agent: main
+Task: P1 端到端整合验证
+
+Work Log:
+- 修复 Bug1: engine/pipeline/runner.py INSERT INTO strategy_runs 列数不匹配（8列→11列，改用显式列名）
+- 修复 Bug2: engine/exporters/excel_exporter.py 使用 context.strategy_config 不存在（改为 context.config）
+- 初始化 DuckDB: 8 张表全部创建成功
+- Mock 模式跑通选股流水线: rzq 策略执行成功（CSV/Excel/DuckDB/Sector 四个导出器全部正常）
+- 启动 FastAPI (端口8000) + Next.js (端口3000)
+- Agent Browser (Playwright) 验证:
+  * HTTP 200 ✓
+  * 5 Tab 全部可点击切换 ✓ (实时大屏/策略管理/选股结果/信号中心/板块管理)
+  * Footer sticky 显示 "TdxQuant v0.1.0 (P1)·Next.js 16 + FastAPI + DuckDB·数据源：mock 适配器" ✓
+  * Console errors: 0 ✓
+  * API 全部 200 (strategies/selections/signals/sectors/theme/monitor) ✓
+  * 专业金融深色风: 琥珀金主色 + 红涨绿跌 ✓
+  * 5 策略完整加载: cslx/dbqzt/qszsl/qzrfc/rzq + emoji + 板块code ✓
+
+Stage Summary:
+- P1 阶段完成: 基础设施 + 数据适配器(Mock/Real) + 选股流水线 + 5策略YAML + FastAPI + Web前端
+- 系统可独立运行(Mock模式), 用户可在右侧 Preview Panel 查看效果
+- 待 Windows 部署: 切换 config/app.yaml 的 adapter_mode: real 即可接通达信
+- 创建启动脚本: scripts/start_all.sh
+
+P1 交付物清单:
+- Python引擎: engine/ 目录 13个子包, 60+ 文件
+- 策略配置: strategies/ 5个YAML + 模板
+- 全局配置: config/ 8个YAML + schema.sql
+- Web前端: src/ 5个Tab + 10个量化组件 + 12个API route
+- CLI脚本: scripts/ 4个(start_engine/run_selection/reload_config/init_db)
+- AI维护文档: docs/maintenance/ ARCHITECTURE.md + STRATEGY_LOGIC.md

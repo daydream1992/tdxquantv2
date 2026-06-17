@@ -1,0 +1,117 @@
+strategy_id: qszsl
+strategy_name: 趋势主升浪
+strategy_emoji: 📈
+version: '1.0'
+enabled: true
+sector:
+  code: ZD_QSZSL01
+  name: 趋势主升浪选股
+  auto_update: true
+  update_mode: replace
+universe:
+  exclude_st: true
+  exclude_suspended: true
+  exclude_new_listing_days: 5
+  market_list:
+  - SH
+  - SZ
+  - BJ
+  exclude_codes: []
+  include_only: []
+  next_day_confirm: "总分<60 跳过；否则:\n  有 KL_MA5: 开盘不破MA5({MA5值}元)+量比>0.8\n  无 KL_MA5:\
+    \ 开盘不跌破昨收+量比>0.8\n"
+pool:
+  expression: ''
+  description: 全市场评分（无 pool 筛选）
+cleaning:
+  rules_file: cleaning_rules.yaml
+  custom_rules: []
+factors:
+- factor_id: ma_alignment
+  weight: 1.0
+  params:
+    ma5_field: KL_MA5
+    ma10_field: KL_MA10
+    ma20_field: KL_MA20
+    r5_field: ZAFPre5
+    r10_field: ZAFPre10
+    full_bull_score: 35.0
+    short_bull_score: 22.0
+    no_kline_full_score: 20.0
+    no_kline_half_score: 8.0
+- factor_id: price_volume_score
+  weight: 1.0
+  params:
+    zaf_field: ZAF
+    wtb_field: Wtb
+    tiers:
+    - zaf_min: 0.0
+      wtb_min: 1.5
+      score: 25.0
+    - zaf_min: 0.0
+      wtb_min: 1.0
+      score: 18.0
+    - zaf_min: 0.0
+      wtb_min: 0.8
+      score: 10.0
+    - zaf_min: 0.0
+      wtb_min: 0.0
+      score: 4.0
+- factor_id: macd_direction
+  weight: 1.0
+  params:
+    dif_field: KL_DIF
+    dea_field: KL_DEA
+    r5_field: ZAFPre5
+- factor_id: main_inflow
+  weight: 1.0
+  params:
+    field: Zjl
+- factor_id: big_buy_ratio
+  weight: 1.0
+  params:
+    buy_field: TotalBVol
+    sell_field: TotalSVol
+    field: 大买占比
+scoring:
+  formula: clip(ma_alignment, 0, 35) + clip(price_volume_score, 0, 25) + clip(macd_direction,
+    0, 20) + clip((main_inflow>0 and big_buy_ratio>0.4)*20 + (main_inflow>0 and big_buy_ratio>0.3
+    and big_buy_ratio<=0.4)*14 + (main_inflow>0 and big_buy_ratio<=0.3)*8, 0, 20)
+  normalization: none
+  penalties:
+  - condition: ma_alignment < 35
+    multiplier: 0.3
+    reason: 短期均线空头（MA5<=MA10）
+output:
+  top_n: 30
+  min_score: 60
+  sort_by: total_score
+  sort_order: desc
+monitor:
+  enabled: true
+  subscribe_hq: true
+  batch_size: 50
+  alert_conditions:
+  - condition: pct_change > 0.05
+    alert_type: trend_accelerate
+    channels:
+    - tdx_warn
+    - websocket
+    priority: high
+  - condition: pct_change < -0.03
+    alert_type: trend_break
+    channels:
+    - websocket
+    - feishu
+    priority: high
+  - condition: volume_ratio > 2
+    alert_type: volume_surge
+    channels:
+    - websocket
+    priority: low
+export:
+  csv: true
+  excel: true
+  excel_sheet_name: 📈趋势主升浪
+  duckdb: true
+  sector: true

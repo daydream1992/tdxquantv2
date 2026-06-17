@@ -1,0 +1,23 @@
+# TdxQuant 前端主题配置
+# 通过 /api/theme 端点暴露给 Next.js 前端，支持热加载切换
+# 颜色规范：A股惯例（涨红跌绿）
+
+theme:
+  # 主题模式: dark | light
+  mode: dark
+  # 主色（琥珀金，金融风）
+  primary_color: "#f59e0b"
+  # 涨色（红，A股惯例）
+  up_color: "#ef4444"
+  # 跌色（绿）
+  down_color: "#22c55e"
+  # 平色（灰）
+  flat_color: "#6b7280"
+  # 整体背景
+  background: "#0a0a0a"
+  # 卡片背景
+  card_background: "#171717"
+  # 边框
+  border_color: "#262626"
+  # 字体栈
+  font_family: "ui-sans-serif, system-ui"

@@ -1,0 +1,1794 @@
+     1→# V8 选股系统 5 策略逻辑详解（AI 维护必读）
+     2→
+     3→> **本文档是 P1-2 任务产出，是后续生成 `strategies/strategy_*.yaml` 的唯一依据，提取自 V8.1 源码 `docs/v8-data/stock_selection_v8_1_standalone/run.py`（1059 行）。**
+     4→> **维护原则：精确提取，不概括；所有代码原样保留；阈值/系数一字不差。**
+     5→> **最后更新**：P1 阶段 Task P1-2
+     6→> **源码版本**：V8.1（6月16日盘后版）
+     7→
+     8→---
+     9→
+    10→## 一、12 步选股总流程
+    11→
+    12→V8.1 主程序 `run.py` 共分 12 个步骤，按顺序执行（对应源码 `# ========== N. xxx ==========` 注释段）。
+    13→
+    14→### 步骤 1：数据加载（L2 快照 + 名称映射）
+    15→
+    16→```python
+    17→SNAPSHOT_FILE = 'data/全市场L2快照_20260616.csv'
+    18→KLINE_FILES = [
+    19→    'data/kline_20260520_0529_daily.csv',
+    20→    'data/kline_20260601_0611_daily.csv',
+    21→    'data/kline_20260612_daily.csv',
+    22→    'data/kline_20260615_daily.csv',
+    23→    'data/kline_20260616_daily.csv',  # ★新增6月16日K线
+    24→]
+    25→NAME_FILE = 'data/stock_name_mapping.csv'
+    26→INDUSTRY_FILE = 'data/股票行业三级分类_20260616_033518.csv'
+    27→BLOCK_RELATION_FILE = 'data/stock_block_relation.csv'
+    28→OUTPUT_FILE = 'output/盘后选股模型_V8_1_20260616_盘后.xlsx'
+    29→
+    30→df = pd.read_csv(SNAPSHOT_FILE, encoding='utf-8-sig')
+    31→print(f"[1] 快照数据: {len(df)} 条, 列数: {len(df.columns)}")
+    32→print(f"    快照时间: {df['查询时间'].iloc[0] if '查询时间' in df.columns else 'N/A'}")
+    33→print(f"    行情日期: {df['HqDate'].iloc[0] if 'HqDate' in df.columns else 'N/A'}")
+    34→
+    35→name_df = pd.read_csv(NAME_FILE, encoding='utf-8-sig')
+    36→name_map = dict(zip(name_df['code'], name_df['name']))
+    37→df['股票名称'] = df['code'].map(name_map).fillna(df['code'])
+    38→```
+    39→
+    40→### 步骤 2：ST 过滤
+    41→
+    42→```python
+    43→st_mask = df['股票名称'].str.contains(r'\*?ST', case=False, na=False)
+    44→st_count = st_mask.sum()
+    45→df = df[~st_mask].copy()
+    46→print(f"[2] ST过滤: 排除 {st_count} 只, 剩余 {len(df)} 只")
+    47→```
+    48→
+    49→### 步骤 3：基础过滤
+    50→
+    51→```python
+    52→mask = (
+    53→    (df['IsT0Fund'] == 0) &
+    54→    (df['IsKzz'] == 0) &
+    55→    (df['TPFlag'] == 0) &
+    56→    (df['SafeValue'] != -1)
+    57→)
+    58→code_mask = df['code'].str.match(r'^(6|0|3|4|8)\d{5}\.(SZ|SH|BJ)$', na=False)
+    59→df_valid = df[mask & code_mask].copy()
+    60→print(f"[3] 基础过滤后: {len(df_valid)} 只")
+    61→```
+    62→
+    63→### 步骤 3.1：数据清洗（5 项 Bug 修复）— 详见本文档【二】
+    64→
+    65→### 步骤 3.2：老登过滤（剔除长期无活跃度股票）— 详见本文档【四】
+    66→
+    67→### 步骤 4：加载 K 线 + 计算技术指标 — 详见本文档【三】
+    68→
+    69→### 步骤 5：合并行业 + 板块 + K 线技术指标 + 涨停判断 + 辅助字段 — 详见本文档【五/六/七】
+    70→
+    71→### 步骤 6：压力位计算 — 详见本文档【八】
+    72→
+    73→### 步骤 7：5 策略评分（每策略 4 维度）— 详见本文档【九】
+    74→
+    75→### 步骤 8：执行评分
+    76→
+    77→```python
+    78→print("\n===== 执行五策略评分 =====")
+    79→scores_daban = score_daban(df_valid)
+    80→scores_qushi = score_qushi(df_valid)
+    81→scores_cuoshai = score_cuoshai(df_valid)
+    82→scores_ruozhuan = score_ruozhuanqiang(df_valid)
+    83→scores_qzr = score_qiangzhuanruo(df_valid)
+    84→
+    85→THRESHOLDS = {'daban': 35, 'qushi': 60, 'cuoshai': 55, 'ruozhuan': 50, 'qzr': 50}
+    86→MAX_PER_MODEL = 30
+    87→
+    88→print(f"打板≥{THRESHOLDS['daban']}: {(scores_daban['总分'] >= THRESHOLDS['daban']).sum()} 只")
+    89→print(f"趋势≥{THRESHOLDS['qushi']}: {(scores_qushi['总分'] >= THRESHOLDS['qushi']).sum()} 只")
+    90→print(f"错杀≥{THRESHOLDS['cuoshai']}: {(scores_cuoshai['总分'] >= THRESHOLDS['cuoshai']).sum()} 只")
+    91→print(f"弱转强≥{THRESHOLDS['ruozhuan']}: {(scores_ruozhuan['总分'] >= THRESHOLDS['ruozhuan']).sum()} 只")
+    92→print(f"强转弱≥{THRESHOLDS['qzr']}: {(scores_qzr['总分'] >= THRESHOLDS['qzr']).sum()} 只")
+    93→```
+    94→
+    95→**5 策略阈值表（核心参数）**：
+    96→
+    97→| 策略 ID | 函数名 | 阈值（min_score） | 最大保留数（top_n） |
+    98→|---------|--------|-------------------|---------------------|
+    99→| dbqzt   | `score_daban` | 35 | 30 |
+   100→| qszsl   | `score_qushi` | 60 | 30 |
+   101→| cslx    | `score_cuoshai` | 55 | 30 |
+   102→| rzq     | `score_ruozhuanqiang` | 50 | 30（注：使用说明 sheet 中写"≤15"，源码 `MAX_PER_MODEL=30`，以源码为准） |
+   103→| qzrfc   | `score_qiangzhuanruo` | 50 | 30 |
+   104→
+   105→### 步骤 9：构建结果（筛选 + 排序 + Top N + 压力位）
+   106→
+   107→```python
+   108→COL_RENAME = {
+   109→    'code': '股票代码', '股票名称': '股票名称', 'ZAF': '涨幅%', 'fHSL': '换手率%',
+   110→    'Wtb': '量比', 'Zsz': '总市值(亿)', 'Zjl': '主力净流入(万)',
+   111→    'FCAmo': '封单额(万)', 'FCb': '封成比', 'fLianB': '连板数',
+   112→    'VOpenZAF': '竞价涨幅%', 'OpenZAF': '开盘涨幅%', 'FzAmo': '尾盘金额(万)',
+   113→    'OpenAmo': '竞价金额', 'ZAFYesterday': '前日涨幅%',
+   114→    'ZAFPre5': '5日涨幅%', 'ZAFPre10': '10日涨幅%', 'ZAFPre20': '20日涨幅%', 'ZAFPre60': '60日涨幅%',
+   115→    'YearZTDay': '年涨停天数', '行业': '行业', '行业涨停数': '行业涨停数',
+   116→    '行业涨停率': '行业涨停率%', '行业平均涨幅': '行业平均涨幅%',
+   117→    '最新价': '最新价', '大买占比': '大买占比',
+   118→    '排名': '排名', '选股模型': '选股模型',
+   119→    '封板强度': '封板强度', '连板辨识度': '连板辨识度', '竞价抢筹': '竞价抢筹', '风险扣分': '风险扣分',
+   120→    '均线多头': '均线多头', '量价配合': '量价配合', 'MACD方向': 'MACD方向', '大单流入': '大单流入',
+   121→    '恐慌深度': '恐慌深度', '承接力度': '承接力度', '恐慌极值': '恐慌极值', '催化剂': '催化剂',
+   122→    '竞价异动': '竞价异动', '预期差': '预期差', '点火信号': '点火信号', '股性': '股性',
+   123→    '主力被套深度': '主力被套深度', '回踩幅度': '回踩幅度', '板块支撑': '板块支撑', '反抽信号': '反抽信号',
+   124→    '总分': '总分', '选股逻辑': '选股逻辑', '次日确认': '次日确认',
+   125→    '压力位': '压力位', '压力位类型': '压力位类型', '压力位幅度%': '压力位幅度%',
+   126→    '入选策略数': '入选策略数', '入选策略': '入选策略',
+   127→    '价格估算': '价格估算',
+   128→    '次日确认条件数': '次日确认条件数',
+   129→}
+   130→
+   131→BASE_COLS_MAP = {
+   132→    'daban': ['code', '股票名称', 'ZAF', 'fHSL', 'Wtb', 'Zsz', 'Zjl', 'FCAmo', 'FCb', 'fLianB', 'VOpenZAF', '行业涨停数', '最新价', '价格估算'],
+   133→    'qushi': ['code', '股票名称', 'ZAF', 'fHSL', 'Wtb', 'Zsz', 'Zjl', '行业', '最新价', '价格估算'],
+   134→    'cuoshai': ['code', '股票名称', 'ZAF', 'fHSL', 'Wtb', 'Zsz', 'Zjl', 'ZAFPre20', 'ZAFPre60', '行业', '行业涨停率', '最新价', '大买占比', '价格估算'],
+   135→    'ruozhuan': ['code', '股票名称', 'ZAF', 'fHSL', 'Wtb', 'Zsz', 'Zjl', 'VOpenZAF', 'OpenZAF', 'FzAmo', 'ZAFYesterday', 'ZAFPre5', 'YearZTDay', '最新价', '价格估算'],
+   136→    'qzr': ['code', '股票名称', 'ZAF', 'fHSL', 'Wtb', 'Zsz', 'Zjl', 'ZAFYesterday', '行业', '行业涨停率', '最新价', '大买占比', '价格估算'],
+   137→}
+   138→
+   139→def build_result(df_data, scores, model_name, threshold, strategy_key, kline_data):
+   140→    result = pd.DataFrame(index=scores.index)
+   141→    base_cols = BASE_COLS_MAP.get(strategy_key, ['code', '股票名称', 'ZAF', '最新价'])
+   142→    for col in base_cols:
+   143→        if col in df_data.columns: result[col] = df_data.loc[scores.index, col]
+   144→    score_cols = [c for c in scores.columns if c not in ['code', '股票名称', 'ZAF']]
+   145→    for col in score_cols: result[col] = scores[col]
+   146→    result = result[result['总分'] >= threshold].copy()
+   147→    result = result.sort_values('总分', ascending=False).head(MAX_PER_MODEL).reset_index(drop=True)
+   148→    result.insert(0, '排名', range(1, len(result) + 1))
+   149→    result.insert(1, '选股模型', model_name)
+   150→    if len(result) > 0:
+   151→        pv = []; pn = []
+   152→        for idx, row in result.iterrows():
+   153→            code = row['code']; close = row.get('最新价', np.nan)
+   154→            if pd.notna(close) and close > 0:
+   155→                v, n = calc_pressure_level(code, kline_data, close)
+   156→                pv.append(v); pn.append(n)
+   157→            else:
+   158→                pv.append(np.nan); pn.append('')
+   159→        result['压力位'] = pv; result['压力位类型'] = pn
+   160→        result['压力位幅度%'] = result.apply(
+   161→            lambda r: round((r['压力位'] - r['最新价']) / r['最新价'] * 100, 2)
+   162→            if pd.notna(r['压力位']) and pd.notna(r['最新价']) and r['最新价'] > 0 else np.nan, axis=1)
+   163→    result = result.rename(columns=COL_RENAME)
+   164→    return result
+   165→
+   166→result_daban = build_result(df_valid, scores_daban, '🔥打板求涨停', THRESHOLDS['daban'], 'daban', kline_latest)
+   167→result_qushi = build_result(df_valid, scores_qushi, '📈趋势主升浪', THRESHOLDS['qushi'], 'qushi', kline_latest)
+   168→result_cuoshai = build_result(df_valid, scores_cuoshai, '🩹错杀低吸', THRESHOLDS['cuoshai'], 'cuoshai', kline_latest)
+   169→result_ruozhuan = build_result(df_valid, scores_ruozhuan, '⚡弱转强', THRESHOLDS['ruozhuan'], 'ruozhuan', kline_latest)
+   170→result_qzr = build_result(df_valid, scores_qzr, '🔄强转弱反抽', THRESHOLDS['qzr'], 'qzr', kline_latest)
+   171→```
+   172→
+   173→### 步骤 10：多策略共振（≥2 策略交叉确认）
+   174→
+   175→```python
+   176→print("\n===== 多策略共振 =====")
+   177→all_selected = {}
+   178→all_next_day_confirm = {}
+   179→for name, result in [('打板', result_daban), ('趋势', result_qushi), ('错杀', result_cuoshai), ('弱转强', result_ruozhuan), ('强转弱', result_qzr)]:
+   180→    for _, r in result.iterrows():
+   181→        code = r['股票代码']
+   182→        if code not in all_selected: all_selected[code] = []
+   183→        if name not in all_selected[code]:
+   184→            all_selected[code].append(name)
+   185→        confirm = r.get('次日确认', '') if '次日确认' in r else ''
+   186→        if code not in all_next_day_confirm: all_next_day_confirm[code] = []
+   187→        if confirm: all_next_day_confirm[code].append((name, confirm))
+   188→
+   189→resonance_rows = []
+   190→for code, models in all_selected.items():
+   191→    if len(models) >= 2:
+   192→        row_data = df_valid[df_valid['code'] == code]
+   193→        if len(row_data) == 0: continue
+   194→        row = row_data.iloc[0]
+   195→        close = row.get('最新价', np.nan)
+   196→        if pd.notna(close) and close > 0: p_val, p_name = calc_pressure_level(code, kline_latest, close)
+   197→        else: p_val, p_name = np.nan, ''
+   198→        confirm_list = all_next_day_confirm.get(code, [])
+   199→        if confirm_list:
+   200→            unified_confirm = ' 且 '.join([f'[{n}]{c}' for n, c in confirm_list])
+   201→        else:
+   202→            unified_confirm = ''
+   203→        confirm_count = len(confirm_list)
+   204→        resonance_rows.append({'code': code, '股票名称': row.get('股票名称', code), 'ZAF': row.get('ZAF', 0),
+   205→                               'fHSL': row.get('fHSL', 0), 'Zjl': row.get('Zjl', 0), '行业': row.get('行业', ''),
+   206→                               '入选策略数': len(models), '入选策略': '、'.join(models),
+   207→                               '最新价': close, '压力位': p_val, '压力位类型': p_name,
+   208→                               '次日确认条件数': confirm_count,
+   209→                               '次日确认': unified_confirm})
+   210→
+   211→result_resonance = pd.DataFrame(resonance_rows)
+   212→if len(result_resonance) > 0:
+   213→    result_resonance = result_resonance.sort_values('入选策略数', ascending=False).reset_index(drop=True)
+   214→    result_resonance.insert(0, '排名', range(1, len(result_resonance) + 1))
+   215→    result_resonance = result_resonance.rename(columns=COL_RENAME)
+   216→print(f"多策略共振(≥2策略): {len(result_resonance)} 只")
+   217→```
+   218→
+   219→### 步骤 11：写入 Excel（8 Sheet）
+   220→
+   221→```python
+   222→wb = Workbook()
+   223→# ...（样式定义略）
+   224→
+   225→# 8 Sheet 输出顺序：
+   226→write_sheet(wb, '🔥打板求涨停', result_daban, f'封板+连板+竞价 (≥{THRESHOLDS["daban"]}分)')
+   227→write_sheet(wb, '📈趋势主升浪', result_qushi, f'均线+量价+MACD+大单 (≥{THRESHOLDS["qushi"]}分)')
+   228→write_sheet(wb, '🩹错杀低吸', result_cuoshai, f'恐慌+承接+极值+催化剂 (≥{THRESHOLDS["cuoshai"]}分)')
+   229→write_sheet(wb, '⚡弱转强', result_ruozhuan, f'竞价异动+预期差+点火 (≥{THRESHOLDS["ruozhuan"]}分)')
+   230→write_sheet(wb, '🔄强转弱反抽', result_qzr, f'主力被套+回踩+支撑+反抽 (≥{THRESHOLDS["qzr"]}分)')
+   231→write_sheet(wb, '多策略共振', result_resonance, '≥2策略交叉确认')
+   232→
+   233→# 还有：模型总览（Sheet 1）、模型使用方法（Sheet 8）、V8.1修复说明（Sheet 9）
+   234→# 总 Sheet 数 = 9（"模型总览"+"5策略"+"多策略共振"+"模型使用方法"+"V8.1修复说明"）
+   235→```
+   236→
+   237→**最终 Excel 8 Sheet 对应映射表**：
+   238→
+   239→| Sheet 名 | 内容来源 | 对应策略 ID |
+   240→|----------|---------|-------------|
+   241→| 模型总览 | 5 策略阈值/入选数/核心驱动 | （全局） |
+   242→| 🔥打板求涨停 | `result_daban` | dbqzt |
+   243→| 📈趋势主升浪 | `result_qushi` | qszsl |
+   244→| 🩹错杀低吸 | `result_cuoshai` | cslx |
+   245→| ⚡弱转强 | `result_ruozhuan` | rzq |
+   246→| 🔄强转弱反抽 | `result_qzr` | qzrfc |
+   247→| 多策略共振 | `result_resonance` | （跨策略） |
+   248→| 模型使用方法 | 静态文本 | （说明） |
+   249→| V8.1修复说明 | 静态文本 | （说明） |
+   250→
+   251→### 步骤 12：打印结果
+   252→
+   253→```python
+   254→def pr(result, title):
+   255→    print(f"\n{'='*80}\n{title}\n{'='*80}")
+   256→    if len(result) == 0: print("  无符合条件标的"); return
+   257→    for _, row in result.head(10).iterrows():
+   258→        print(f"  {row.get('排名','')}. {row.get('股票名称','')}({row.get('股票代码','')}) | 总分:{row.get('总分',0)}")
+   259→        print(f"     逻辑: {row.get('选股逻辑','')}")
+   260→        print(f"     次日确认: {row.get('次日确认','')}")
+   261→        print()
+   262→
+   263→pr(result_daban, '🔥打板求涨停')
+   264→pr(result_qushi, '📈趋势主升浪')
+   265→pr(result_cuoshai, '🩹错杀低吸')
+   266→pr(result_ruozhuan, '⚡弱转强')
+   267→pr(result_qzr, '🔄强转弱反抽')
+   268→print("\n===== V8.1 五策略尖刀模型 (6月16日盘后) 运行完成 =====")
+   269→```
+   270→
+   271→---
+   272→
+   273→## 二、通用数据清洗规则（5 项 Bug 修复）
+   274→
+   275→> **位置**：源码 `# ========== 3.1 数据清洗 (修复V8.1审核Bug) ==========` 段（run.py 第 70-107 行）
+   276→> **作用**：所有 5 策略共用，先清洗后评分；选股逻辑不变，但保证字段语义正确。
+   277→
+   278→### 1. Wtb 负值过滤（Bug1）
+   279→
+   280→**问题**：Wtb 量比存在大量负值 (-99.8 ~ -0.0) 和 0，均为异常值
+   281→**修复**：置 NaN，防止趋势策略误判
+   282→
+   283→```python
+   284→# Bug1: Wtb量比存在大量负值(-99.8~-0.0)和0,均为异常值,需置NaN
+   285→wtb_before = df_valid['Wtb'].copy()
+   286→df_valid['Wtb'] = pd.to_numeric(df_valid['Wtb'], errors='coerce')
+   287→wtb_invalid = ((df_valid['Wtb'] < 0) | (df_valid['Wtb'] == 0)).sum()
+   288→df_valid.loc[(df_valid['Wtb'] < 0) | (df_valid['Wtb'] == 0), 'Wtb'] = np.nan
+   289→```
+   290→
+   291→**影响策略**：qszsl（量价配合维度用 Wtb）/ cslx（催化剂维度用 Wtb）/ rzq（点火信号维度用 Wtb）
+   292→
+   293→### 2. FCb/FCAmo 负值清洗（Bug2）
+   294→
+   295→**问题**：FCb/FCAmo 存在 11 条负值
+   296→**修复**：负值置 0
+   297→
+   298→```python
+   299→# Bug2: FCb/FCAmo 存在负值,需清洗为0
+   300→fcb_neg = (pd.to_numeric(df_valid['FCb'], errors='coerce') < 0).sum()
+   301→fcamo_neg = (pd.to_numeric(df_valid['FCAmo'], errors='coerce') < 0).sum()
+   302→df_valid['FCb'] = pd.to_numeric(df_valid['FCb'], errors='coerce').where(lambda x: x >= 0, 0)
+   303→df_valid['FCAmo'] = pd.to_numeric(df_valid['FCAmo'], errors='coerce').where(lambda x: x >= 0, 0)
+   304→```
+   305→
+   306→**影响策略**：dbqzt（封板强度维度用 FCb 和 FCAmo）
+   307→
+   308→### 3. 卖撤率公式重写（Bug3）
+   309→
+   310→**问题**：原公式 `SCancel/L2OrderNum` 中位 1.30 (>1 不合理)
+   311→**修复**：改用同单位公式 `SCancel/(SCancel+TotalSVol)`，范围 [0,1]，中位约 0.77；缺失用中位 0.5 兜底
+   312→
+   313→```python
+   314→# Bug3: 卖撤率公式单位错配, 改用同单位公式 SCancel/(SCancel+TotalSVol)
+   315→#   - 原公式 SCancel/L2OrderNum 中位1.30(>1不合理)
+   316→#   - 新公式: 卖单撤单占比, 范围[0,1], 中位约0.77
+   317→sc = pd.to_numeric(df_valid['SCancel'], errors='coerce')
+   318→tsv = pd.to_numeric(df_valid['TotalSVol'], errors='coerce')
+   319→df_valid['卖撤率'] = (sc / (sc + tsv + 1)).fillna(0.5)  # 缺失用中位0.5兜底
+   320→```
+   321→
+   322→**影响策略**：dbqzt（风险扣分维度用「卖撤率」字段，新阈值 >0.95/-7、>0.90/-3）
+   323→
+   324→### 4. fLianB 语义重定义（Bug4）
+   325→
+   326→**问题**：原 fLianB 字段实为"封板强度系数"（涨停股中位 1.23，非涨停股中位 0.96），并非连板数
+   327→**修复**：
+   328→- 真正连板数取 `ConZAFDateNum`（涨停股中位 2，最小 1，最大 7）
+   329→- 保留原 fLianB 值作为「封板强度系数」（供打板策略参考）
+   330→- 非涨停股的 ConZAFDateNum 后置清洗（步骤 5.2）置 0
+   331→
+   332→```python
+   333→# Bug4: fLianB 实为"涨停系数/封板强度"(涨停股中位1.23,非涨停股中位0.96),非连板数
+   334→#   - 真正连板数应取 ConZAFDateNum (涨停股中位2,最小1,最大7)
+   335→#   - 涨停股保留 ConZAFDateNum 作为连板数;非涨停股置0
+   336→#   - 保留 fLianB 但语义改为"封板强度系数"(供打板策略参考)
+   337→df_valid['封板强度系数'] = pd.to_numeric(df_valid['fLianB'], errors='coerce').fillna(0)
+   338→df_valid['fLianB'] = pd.to_numeric(df_valid['ConZAFDateNum'], errors='coerce').fillna(0).clip(lower=0)
+   339→# 非涨停股的 ConZAFDateNum 可能是连续上涨天数(非涨停意义),置0
+   340→# 此处先保留,后面涨停判断后再清洗
+   341→```
+   342→
+   343→**后续清洗（步骤 5.2）**：
+   344→
+   345→```python
+   346→# 修复Bug4: 非涨停股的fLianB(原ConZAFDateNum)可能不代表连板数,需置0
+   347→df_valid.loc[~df_valid['是否涨停'], 'fLianB'] = 0
+   348→# fLianB现在语义为"连板数",范围[0,7]整数,需取整
+   349→df_valid['fLianB'] = df_valid['fLianB'].astype(int)
+   350→```
+   351→
+   352→**影响策略**：dbqzt（连板辨识度维度用 fLianB；封板强度维度用「封板强度系数」）
+   353→
+   354→### 5. 数值字段统一转 numeric（Bug5）
+   355→
+   356→**问题**：ZAF/Zjl/Zsz 等数值字段可能为字符串类型，影响后续计算
+   357→**修复**：统一转 numeric
+   358→
+   359→```python
+   360→# Bug5: ZAF/Zjl/Zsz 等数值字段统一转 numeric
+   361→for col in ['ZAF','Zjl','Zsz','fHSL','VOpenZAF','OpenZAF','FzAmo','OpenAmo',
+   362→            'ZAFYesterday','ZAFPre5','ZAFPre10','ZAFPre20','ZAFPre60',
+   363→            'YearZTDay','BetaValue','TotalBVol','TotalSVol','BCancel','SCancel',
+   364→            'FCAmo','FCb','CJJEPre1','L2OrderNum','MA5Value','OpenAmoPre1']:
+   365→    if col in df_valid.columns:
+   366→        df_valid[col] = pd.to_numeric(df_valid[col], errors='coerce')
+   367→
+   368→print(f"[3.1] 数据清洗: Wtb异常{wtb_invalid}只置NaN, FCb负值{fcb_neg}只, FCAmo负值{fcamo_neg}只, 卖撤率公式已重写")
+   369→```
+   370→
+   371→**转换字段清单（25 个）**：
+   372→`ZAF, Zjl, Zsz, fHSL, VOpenZAF, OpenZAF, FzAmo, OpenAmo, ZAFYesterday, ZAFPre5, ZAFPre10, ZAFPre20, ZAFPre60, YearZTDay, BetaValue, TotalBVol, TotalSVol, BCancel, SCancel, FCAmo, FCb, CJJEPre1, L2OrderNum, MA5Value, OpenAmoPre1`
+   373→
+   374→---
+   375→
+   376→## 三、K 线技术指标计算
+   377→
+   378→> **位置**：源码 `# ========== 4. 加载K线数据 ==========` 段（run.py 第 117-158 行）
+   379→> **数据源**：5 个 K 线 CSV（字段：`code,date,open,high,low,close,volume,amount,change_pct,turnover,forward_factor`）
+   380→> **去重**：按 `code,date` 去重（保留最后一条），按 `code,date` 升序排序
+   381→
+   382→```python
+   383→kline_dfs = []
+   384→for f in KLINE_FILES:
+   385→    kline_dfs.append(pd.read_csv(f, encoding='utf-8-sig'))
+   386→kline = pd.concat(kline_dfs, ignore_index=True)
+   387→kline = kline.drop_duplicates(subset=['code', 'date'], keep='last')
+   388→kline = kline.sort_values(['code', 'date']).reset_index(drop=True)
+   389→kline = kline[kline['code'].str.match(r'^(6|0|3|4|8)\d{5}\.(SZ|SH|BJ)$', na=False)].copy()
+   390→print(f"[4] K线数据: {len(kline)} 条, 日期范围: {kline['date'].min()} ~ {kline['date'].max()}")
+   391→
+   392→
+   393→def calc_technical_indicators(group):
+   394→    group = group.sort_values('date').reset_index(drop=True)
+   395→    if len(group) < 5:
+   396→        return group
+   397→    close = group['close'].astype(float)
+   398→    volume = group['volume'].astype(float)
+   399→    amount = group['amount'].astype(float)
+   400→
+   401→    # 均线：MA5 / MA10 / MA20
+   402→    group['MA5'] = close.rolling(5, min_periods=1).mean()
+   403→    group['MA10'] = close.rolling(10, min_periods=1).mean()
+   404→    group['MA20'] = close.rolling(20, min_periods=1).mean()
+   405→
+   406→    # MACD：EMA12/EMA26 → DIF → DEA(EMA9) → MACD_BAR = 2*(DIF-DEA)
+   407→    ema12 = close.ewm(span=12, adjust=False).mean()
+   408→    ema26 = close.ewm(span=26, adjust=False).mean()
+   409→    dif = ema12 - ema26
+   410→    dea = dif.ewm(span=9, adjust=False).mean()
+   411→    group['DIF'] = dif
+   412→    group['DEA'] = dea
+   413→    group['MACD_BAR'] = 2 * (dif - dea)
+   414→
+   415→    # 布林带：BOLL_MID = MA20, BOLL_UP = MA20 + 2*std
+   416→    group['BOLL_MID'] = close.rolling(20, min_periods=1).mean()
+   417→    boll_std = close.rolling(20, min_periods=1).std()
+   418→    group['BOLL_UP'] = group['BOLL_MID'] + 2 * boll_std
+   419→    return group
+   420→
+   421→
+   422→print("[4] 计算技术指标中...")
+   423→kline = kline.groupby('code', group_keys=False).apply(calc_technical_indicators)
+   424→latest_date = kline['date'].max()
+   425→kline_latest = kline[kline['date'] == latest_date].set_index('code')
+   426→print(f"[4] 最新K线日期: {latest_date}, 股票数: {len(kline_latest)}")
+   427→```
+   428→
+   429→**技术指标清单**：
+   430→- **均线**：MA5 / MA10 / MA20（min_periods=1）
+   431→- **MACD**：DIF = EMA12 - EMA26 / DEA = EMA9(DIF) / MACD_BAR = 2 * (DIF - DEA)
+   432→- **布林带**：BOLL_MID = MA20 / BOLL_UP = BOLL_MID + 2 * std(MA20)
+   433→
+   434→**注**：`volume` / `amount` 计算但未在源码后续使用（保留供未来扩展）。
+   435→
+   436→---
+   437→
+   438→## 四、老登过滤逻辑
+   439→
+   440→> **位置**：源码 `# ========== 3.1 数据清洗 ==========` 段末尾（run.py 第 109-115 行）
+   441→> **作用**：剔除长期无活跃度股票（年涨停 0 + 换手<1% + Beta<0.8）
+   442→
+   443→```python
+   444→is_laodeng = (
+   445→    (df_valid['YearZTDay'] == 0) &
+   446→    (df_valid['fHSL'] < 1) &
+   447→    (df_valid['BetaValue'] < 0.8)
+   448→)
+   449→df_valid = df_valid[~is_laodeng].copy()
+   450→print(f"[3] 老登过滤后: {len(df_valid)} 只")
+   451→```
+   452→
+   453→**3 条件 AND 逻辑**：
+   454→1. `YearZTDay == 0`（一年内 0 次涨停）
+   455→2. `fHSL < 1`（换手率 < 1%，低活跃）
+   456→3. `BetaValue < 0.8`（Beta < 0.8，弱于大盘）
+   457→
+   458→**影响**：所有 5 策略共用此过滤。
+   459→
+   460→---
+   461→
+   462→## 五、涨停判断逻辑（FCAmo 判据）
+   463→
+   464→> **位置**：源码 `# ========== 5. 合并行业+板块+K线 ==========` 段（run.py 第 176-183 行）
+   465→> **核心**：区分板块（创业板/科创板 19.5%、北交所 29.5%、主板/中小板 9.8%）
+   466→
+   467→```python
+   468→# 行业统计 (修复V8.1 Bug7: 区分板块计算涨停数)
+   469→def _is_zt_for_row(r):
+   470→    code = str(r['code'])
+   471→    zaf = float(r['ZAF']) if pd.notna(r['ZAF']) else 0
+   472→    if code.startswith(('688','689','300','301','302')): return zaf >= 19.5
+   473→    elif code.startswith(('8','4')): return zaf >= 29.5
+   474→    else: return zaf >= 9.8
+   475→df_valid['_is_zt'] = df_valid.apply(_is_zt_for_row, axis=1)
+   476→```
+   477→
+   478→**3 档涨停阈值**：
+   479→- 创业板（300/301/302）、科创板（688/689）：`ZAF >= 19.5`（20% 涨停）
+   480→- 北交所（8/4 开头）：`ZAF >= 29.5`（30% 涨停）
+   481→- 主板/中小板（其他）：`ZAF >= 9.8`（10% 涨停）
+   482→
+   483→**派生字段**：
+   484→- `df_valid['是否涨停'] = df_valid['_is_zt']`
+   485→
+   486→**后续使用**：
+   487→- dbqzt pool 筛选（`df['是否涨停']`）
+   488→- dbqzt 封板强度维度（涨停基础分 10）
+   489→- cslx 惩罚规则（已反弹不算错杀）
+   490→- rzq 惩罚规则（涨停股总分清 0）
+   491→- fLianB 非涨停股置 0
+   492→
+   493→---
+   494→
+   495→## 六、行业统计 + 辅助字段计算
+   496→
+   497→### 6.1 行业统计
+   498→
+   499→> **位置**：源码 run.py 第 161-194 行
+   500→
+   501→```python
+   502→industry_df = pd.read_csv(INDUSTRY_FILE, encoding='utf-8-sig')
+   503→industry_map = {}
+   504→for _, row in industry_df.iterrows():
+   505→    industry_map[row['stock_code']] = row.get('行业一级', '')
+   506→df_valid['行业'] = df_valid['code'].map(lambda c: industry_map.get(c, '其他'))
+   507→
+   508→block_df = pd.read_csv(BLOCK_RELATION_FILE, encoding='utf-8-sig')
+   509→block_industry = block_df[block_df['block_type'] == '行业'].copy()
+   510→block_map = {}
+   511→for _, row in block_industry.iterrows():
+   512→    if row['stock_code'] not in block_map:
+   513→        block_map[row['stock_code']] = []
+   514→    block_map[row['stock_code']].append(row['block_name'])
+   515→df_valid['所属板块'] = df_valid['code'].map(lambda c: '|'.join(block_map.get(c, [])))
+   516→
+   517→# 行业统计 (修复V8.1 Bug7: 区分板块计算涨停数)
+   518→def _is_zt_for_row(r):
+   519→    code = str(r['code'])
+   520→    zaf = float(r['ZAF']) if pd.notna(r['ZAF']) else 0
+   521→    if code.startswith(('688','689','300','301','302')): return zaf >= 19.5
+   522→    elif code.startswith(('8','4')): return zaf >= 29.5
+   523→    else: return zaf >= 9.8
+   524→df_valid['_is_zt'] = df_valid.apply(_is_zt_for_row, axis=1)
+   525→industry_stats = df_valid.groupby('行业').agg(
+   526→    行业总数=('code', 'count'),
+   527→    行业涨停数=('_is_zt', 'sum'),
+   528→    行业平均涨幅=('ZAF', 'mean'),
+   529→    行业主力净流入=('Zjl', 'sum'),
+   530→).reset_index()
+   531→industry_stats['行业涨停率'] = (industry_stats['行业涨停数'] / industry_stats['行业总数'] * 100).round(2)
+   532→df_valid = df_valid.merge(
+   533→    industry_stats[['行业', '行业总数', '行业涨停数', '行业涨停率', '行业平均涨幅', '行业主力净流入']],
+   534→    on='行业', how='left'
+   535→)
+   536→```
+   537→
+   538→**派生字段**：`行业`、`所属板块`、`行业总数`、`行业涨停数`、`行业涨停率`、`行业平均涨幅`、`行业主力净流入`
+   539→
+   540→### 6.2 合并 K 线技术指标
+   541→
+   542→```python
+   543→# 合并K线技术指标
+   544→kline_tech = kline_latest[['MA5', 'MA10', 'MA20', 'DIF', 'DEA', 'MACD_BAR', 'BOLL_UP']].copy()
+   545→kline_tech.columns = ['KL_MA5', 'KL_MA10', 'KL_MA20', 'KL_DIF', 'KL_DEA', 'KL_MACD_BAR', 'KL_BOLL_UP']
+   546→df_valid = df_valid.merge(kline_tech, left_on='code', right_index=True, how='left')
+   547→```
+   548→
+   549→**派生字段**：`KL_MA5`、`KL_MA10`、`KL_MA20`、`KL_DIF`、`KL_DEA`、`KL_MACD_BAR`、`KL_BOLL_UP`
+   550→
+   551→### 6.3 最新价计算（兜底优先级）
+   552→
+   553→```python
+   554→# 最新价 (修复V8.1 Bug5: 不再用MA5Value兌底,改为缺K线则剔除)
+   555→def get_latest_close(code):
+   556→    if code in kline_latest.index:
+   557→        row = kline_latest.loc[code]
+   558→        if isinstance(row, pd.DataFrame): row = row.iloc[0]
+   559→        return float(row['close'])
+   560→    return np.nan
+   561→
+   562→df_valid['最新价'] = df_valid['code'].apply(get_latest_close)
+   563→# 兌底优先级: 1)K线收盘价 2)快照现价(如有) 3) MA5Value (最后乲底, 标记为估算)
+   564→ma5_snap = df_valid.get('MA5Value', pd.Series(np.nan, index=df_valid.index))
+   565→# 记录哪些股票用MA5兌底(估算价)
+   566→est_price_mask = df_valid['最新价'].isna() & ma5_snap.notna() & (ma5_snap > 0)
+   567→df_valid['最新价'] = df_valid['最新价'].fillna(ma5_snap)
+   568→df_valid['价格估算'] = est_price_mask  # 后续可据此标记
+   569→```
+   570→
+   571→**派生字段**：`最新价`（K 线收盘价 → MA5Value 兜底）、`价格估算`（布尔）
+   572→
+   573→### 6.4 辅助字段计算
+   574→
+   575→```python
+   576→# 辅助字段
+   577→df_valid['大买占比'] = df_valid['TotalBVol'] / (df_valid['TotalBVol'] + df_valid['TotalSVol'] + 1)
+   578→# df_valid['卖撤率'] 已在数据清洗阶段重新计算 (SCancel/(SCancel+TotalSVol))
+   579→df_valid['恐慌量'] = df_valid['fHSL'] * df_valid['ZAF'].abs()
+   580→
+   581→# 涨停判断 (沿用 _is_zt_for_row)
+   582→df_valid['是否涨停'] = df_valid['_is_zt']
+   583→print(f"[5] 辅助计算完成, 当日涨停: {df_valid['是否涨停'].sum()} 只, 价格估算{est_price_mask.sum()}只")
+   584→
+   585→# 修复Bug4: 非涨停股的fLianB(原ConZAFDateNum)可能不代表连板数,需置0
+   586→df_valid.loc[~df_valid['是否涨停'], 'fLianB'] = 0
+   587→# fLianB现在语义为"连板数",范围[0,7]整数,需取整
+   588→df_valid['fLianB'] = df_valid['fLianB'].astype(int)
+   589→```
+   590→
+   591→**派生字段**：
+   592→- `大买占比 = TotalBVol / (TotalBVol + TotalSVol + 1)`
+   593→- `恐慌量 = fHSL * |ZAF|`
+   594→- `是否涨停`（布尔）
+   595→- `fLianB`（重定义为连板数，非涨停股置 0，取整）
+   596→
+   597→---
+   598→
+   599→## 七、压力位计算逻辑
+   600→
+   601→> **位置**：源码 run.py 第 235-256 行
+   602→> **作用**：取最接近现价的"压力位"作为参考，用于选股结果展示
+   603→
+   604→```python
+   605→def calc_pressure_level(code, kline_data, latest_close):
+   606→    if code not in kline_data.index:
+   607→        return latest_close * 1.02, '估算'
+   608→    row = kline_data.loc[code]
+   609→    if isinstance(row, pd.DataFrame): row = row.iloc[0]
+   610→    candidates = []
+   611→    prev_high = float(row.get('high', 0))
+   612→    if prev_high > latest_close * 1.005: candidates.append((prev_high, '前日高点'))
+   613→    boll_up = row.get('BOLL_UP', np.nan)
+   614→    if pd.notna(boll_up) and float(boll_up) > latest_close * 1.005: candidates.append((float(boll_up), '布林上轨'))
+   615→    for ma_key in ['MA20', 'MA10', 'MA5']:
+   616→        ma_val = row.get(ma_key, np.nan)
+   617→        if pd.notna(ma_val) and float(ma_val) > latest_close * 1.003: candidates.append((float(ma_val), ma_key))
+   618→    if not candidates:
+   619→        zt_price = latest_close * 1.10
+   620→        code_str = str(code)
+   621→        if code_str.startswith(('688','689','300','301','302')): zt_price = latest_close * 1.20
+   622→        elif code_str.startswith(('8','4')): zt_price = latest_close * 1.30
+   623→        return round(zt_price, 2), '涨停价'
+   624→    candidates.sort(key=lambda x: abs(x[0] - latest_close))
+   625→    return round(candidates[0][0], 2), candidates[0][1]
+   626→```
+   627→
+   628→**候选压力位优先级**：
+   629→1. 前日高点（`high > close*1.005`）
+   630→2. 布林上轨（`BOLL_UP > close*1.005`）
+   631→3. MA20 / MA10 / MA5（均需 `> close*1.003`）
+   632→4. 涨停价（无候选时）：主板 1.10 / 创科 1.20 / 北交 1.30
+   633→5. 无 K 线：`close*1.02`，标签"估算"
+   634→
+   635→**最终取值**：所有候选按 `|candidate - close|` 升序排序，取最接近者。
+   636→
+   637→**派生字段**：`压力位`、`压力位类型`、`压力位幅度% = (压力位 - 最新价) / 最新价 * 100`
+   638→
+   639→---
+   640→
+   641→## 八、5 策略详解
+   642→
+   643→### 策略 1: 🔥 打板求涨停 (dbqzt)
+   644→
+   645→#### 元信息
+   646→- **策略函数名**：`score_daban`
+   647→- **核心驱动**：情绪 × 流动性（合并旧打板 + 连板）
+   648→- **阈值**：≥35 分
+   649→- **Top N**：30（`MAX_PER_MODEL`）
+   650→- **Excel Sheet**：`🔥打板求涨停`（注：sheet 名含 emoji）
+   651→- **基础列**：`['code', '股票名称', 'ZAF', 'fHSL', 'Wtb', 'Zsz', 'Zjl', 'FCAmo', 'FCb', 'fLianB', 'VOpenZAF', '行业涨停数', '最新价', '价格估算']`
+   652→
+   653→#### 股票池筛选
+   654→
+   655→```python
+   656→pool = df[
+   657→    (df['是否涨停']) |
+   658→    (df['ZAF'] >= 7)
+   659→].copy()
+   660→```
+   661→
+   662→**pool 条件**：涨停股 OR 当日涨幅 ≥ 7%
+   663→
+   664→#### 评分维度 1：封板强度（0-40 分）
+   665→
+   666→**计算公式**（涨停基础分 + 封成比加成 + 封单额加成 + 封板强度系数加成）：
+   667→
+   668→```python
+   669→# (1) 封板强度(0-40) — fLianB已重定义为连板数,补充原fLianB作为封板强度系数
+   670→#     涨停基础分10 + 封成比加成(0-20) + 封单额加成(0-10) + 封板强度系数加成(0-5)
+   671→scores['封板强度'] = 0
+   672→fc_b = pool['FCb']; fc_amo = pool['FCAmo']
+   673→fcb_strength = pool.get('封板强度系数', pd.Series(0, index=pool.index))
+   674→scores.loc[pool['是否涨停'], '封板强度'] += 10
+   675→for idx in pool[pool['是否涨停']].index: lp[idx].append('涨停')
+   676→scores.loc[fc_b >= 0.5, '封板强度'] += 20
+   677→scores.loc[(fc_b >= 0.2) & (fc_b < 0.5), '封板强度'] += 14
+   678→scores.loc[(fc_b >= 0.05) & (fc_b < 0.2), '封板强度'] += 8
+   679→scores.loc[(fc_b > 0) & (fc_b < 0.05), '封板强度'] += 3
+   680→for idx in pool[fc_b >= 0.2].index: lp[idx].append('封板稳固')
+   681→scores.loc[fc_amo >= 30000, '封板强度'] += 10
+   682→scores.loc[(fc_amo >= 10000) & (fc_amo < 30000), '封板强度'] += 8
+   683→scores.loc[(fc_amo >= 5000) & (fc_amo < 10000), '封板强度'] += 5
+   684→scores.loc[(fc_amo >= 1000) & (fc_amo < 5000), '封板强度'] += 2
+   685→for idx in pool[fc_amo >= 10000].index: lp[idx].append('大封单')
+   686→# 补充: 用封板强度系数(原fLianB值)作为额外加分,阈值适配其原始分布(中位~1.0)
+   687→scores.loc[fcb_strength >= 2, '封板强度'] += 5
+   688→scores.loc[(fcb_strength >= 1.5) & (fcb_strength < 2), '封板强度'] += 3
+   689→scores['封板强度'] = scores['封板强度'].clip(0, 40)
+   690→```
+   691→
+   692→| 子项 | 字段 | 阈值 | 加分 |
+   693→|------|------|------|------|
+   694→| 涨停基础分 | `是否涨停` | True | +10 |
+   695→| 封成比 FCb | `FCb` | ≥0.5 | +20 |
+   696→| 封成比 FCb | `FCb` | [0.2, 0.5) | +14 |
+   697→| 封成比 FCb | `FCb` | [0.05, 0.2) | +8 |
+   698→| 封成比 FCb | `FCb` | (0, 0.05) | +3 |
+   699→| 封单额 FCAmo | `FCAmo` | ≥30000 | +10 |
+   700→| 封单额 FCAmo | `FCAmo` | [10000, 30000) | +8 |
+   701→| 封单额 FCAmo | `FCAmo` | [5000, 10000) | +5 |
+   702→| 封单额 FCAmo | `FCAmo` | [1000, 5000) | +2 |
+   703→| 封板强度系数 | `封板强度系数` | ≥2 | +5 |
+   704→| 封板强度系数 | `封板强度系数` | [1.5, 2) | +3 |
+   705→
+   706→**clip 上限**：40
+   707→
+   708→#### 评分维度 2：连板辨识度（0-30 分）
+   709→
+   710→**计算公式**（连板数 fLianB 分档，fLianB 已重定义为 ConZAFDateNum 整数）：
+   711→
+   712→```python
+   713→# (2) 连板辨识度(0-30) — fLianB现为真正连板数(整数), 阈值重校准
+   714→#     ≥7=30 / ≥5=26 / 4=22 / 3=18 / 2=12 / 1=6 / 0=0
+   715→scores['连板辨识度'] = 0
+   716→lb = pool['fLianB']  # 现为整数: 0=未涨停, 1=首板, 2=2连板, 3=3连板...
+   717→scores.loc[lb >= 7, '连板辨识度'] = 30
+   718→scores.loc[(lb >= 5) & (lb < 7), '连板辨识度'] = 26
+   719→scores.loc[(lb >= 4) & (lb < 5), '连板辨识度'] = 22
+   720→scores.loc[(lb == 3), '连板辨识度'] = 18
+   721→scores.loc[(lb == 2), '连板辨识度'] = 12
+   722→scores.loc[(lb == 1), '连板辨识度'] = 6
+   723→for idx in pool[lb >= 3].index: lp[idx].append(f'{lb[idx]:.0f}连板')
+   724→for idx in pool[lb == 2].index: lp[idx].append('2连板')
+   725→for idx in pool[lb == 1].index: lp[idx].append('首板')
+   726→```
+   727→
+   728→| 字段 | 阈值 | 加分 |
+   729→|------|------|------|
+   730→| `fLianB` | ≥7 | 30 |
+   731→| `fLianB` | [5, 7) | 26 |
+   732→| `fLianB` | [4, 5) | 22 |
+   733→| `fLianB` | ==3 | 18 |
+   734→| `fLianB` | ==2 | 12 |
+   735→| `fLianB` | ==1 | 6 |
+   736→| `fLianB` | ==0 | 0 |
+   737→
+   738→#### 评分维度 3：竞价抢筹（0-20 分）
+   739→
+   740→**计算公式**（竞价涨幅 VOpenZAF + 尾盘金额 FzAmo）：
+   741→
+   742→```python
+   743→# (3) 竞价抢筹(0-20) — 竞价涨幅 + 竞价金额比 + 尾盘抢筹
+   744→scores['竞价抢筹'] = 0
+   745→vopen = pool.get('VOpenZAF', pd.Series(0, index=pool.index))
+   746→fz_amo = pool['FzAmo']
+   747→scores.loc[vopen >= 3, '竞价抢筹'] += 10
+   748→scores.loc[(vopen >= 1.5) & (vopen < 3), '竞价抢筹'] += 7
+   749→scores.loc[(vopen >= 0.5) & (vopen < 1.5), '竞价抢筹'] += 4
+   750→for idx in pool[vopen >= 1.5].index: lp[idx].append('竞价抢筹')
+   751→scores.loc[fz_amo >= 2000, '竞价抢筹'] += 10
+   752→scores.loc[(fz_amo >= 500) & (fz_amo < 2000), '竞价抢筹'] += 7
+   753→scores.loc[(fz_amo >= 200) & (fz_amo < 500), '竞价抢筹'] += 4
+   754→for idx in pool[fz_amo >= 500].index: lp[idx].append('尾盘抢筹')
+   755→scores['竞价抢筹'] = scores['竞价抢筹'].clip(0, 20)
+   756→```
+   757→
+   758→| 子项 | 字段 | 阈值 | 加分 |
+   759→|------|------|------|------|
+   760→| 竞价涨幅 | `VOpenZAF` | ≥3 | +10 |
+   761→| 竞价涨幅 | `VOpenZAF` | [1.5, 3) | +7 |
+   762→| 竞价涨幅 | `VOpenZAF` | [0.5, 1.5) | +4 |
+   763→| 尾盘金额 | `FzAmo` | ≥2000 | +10 |
+   764→| 尾盘金额 | `FzAmo` | [500, 2000) | +7 |
+   765→| 尾盘金额 | `FzAmo` | [200, 500) | +4 |
+   766→
+   767→**clip 范围**：[0, 20]
+   768→
+   769→#### 评分维度 4：风险扣分（0 ~ -10 分）
+   770→
+   771→**计算公式**（卖撤率高扣分 + 孤板风险扣分）：
+   772→
+   773→```python
+   774→# (4) 风险扣分(0~-10) — 卖撤率阈值重校准(新公式中位~0.77,范围[0,1])
+   775→#     卖撤率高扣分(-7/-3) + 孤板风险(-8/-4)
+   776→scores['风险扣分'] = 0
+   777→scr = pool.get('卖撤率', pd.Series(0.5, index=pool.index))  # 新公式范围[0,1]
+   778→# 新阈值: >0.95表示几乎全部撤单(异常), >0.90明显偏高
+   779→scores.loc[scr > 0.95, '风险扣分'] -= 7
+   780→scores.loc[(scr > 0.90) & (scr <= 0.95), '风险扣分'] -= 3
+   781→for idx in pool[scr > 0.92].index: lp[idx].append('⚠卖撤率高')
+   782→for idx in pool.index:
+   783→    lb_val = lb[idx]
+   784→    ind_zt = pool.loc[idx, '行业涨停数'] if '行业涨停数' in pool.columns else 0
+   785→    # 修复Bug: 行业涨停数修复后是准确值,孤板阈值由<=1校准为<=2
+   786→    #   - 修复前(不分板块用9.8): 行业涨停数被低估,阈值<=1过严
+   787→    #   - 修复后(区分9.8/19.5/29.5): 行业涨停数准确,阈值<=2更合理
+   788→    if lb_val >= 4 and ind_zt <= 2:
+   789→        scores.loc[idx, '风险扣分'] -= 8; lp[idx].append('⚠高位孤板')
+   790→    elif lb_val >= 3 and ind_zt <= 2:
+   791→        scores.loc[idx, '风险扣分'] -= 4; lp[idx].append('⚠孤板风险')
+   792→```
+   793→
+   794→| 子项 | 字段 | 阈值 | 扣分 |
+   795→|------|------|------|------|
+   796→| 卖撤率 | `卖撤率` | >0.95 | -7 |
+   797→| 卖撤率 | `卖撤率` | (0.90, 0.95] | -3 |
+   798→| 高位孤板 | `fLianB` ≥4 且 `行业涨停数` ≤2 | - | -8 |
+   799→| 孤板风险 | `fLianB` ≥3 且 `行业涨停数` ≤2 | - | -4 |
+   800→
+   801→#### 总分公式
+   802→
+   803→```python
+   804→scores['总分'] = scores['封板强度'] + scores['连板辨识度'] + scores['竞价抢筹'] + scores['风险扣分']
+   805→```
+   806→
+   807→#### 惩罚/过滤规则
+   808→
+   809→```python
+   810→mask_weak = (~pool['是否涨停']) & (pool['FCb'] == 0) & (pool['fLianB'] < 1)
+   811→scores.loc[mask_weak, '总分'] = (scores.loc[mask_weak, '总分'] * 0.5).round(1)
+   812→```
+   813→
+   814→**惩罚条件**：未涨停 + 封成比为 0 + 连板数 < 1 → 总分 × 0.5（弱股减半）
+   815→
+   816→#### 次日确认（条件分支）
+   817→
+   818→```python
+   819→scores['次日确认'] = ''
+   820→for idx in scores.index:
+   821→    if scores.loc[idx, '总分'] < 35: continue
+   822→    fc_b_v = pool.loc[idx, 'FCb']; lb_v = pool.loc[idx, 'fLianB']
+   823→    is_zt = pool.loc[idx, '是否涨停']
+   824→    if lb_v >= 3: scores.loc[idx, '次日确认'] = '竞价不低开(>0%)+竞价量放大'
+   825→    elif is_zt and fc_b_v >= 0.2: scores.loc[idx, '次日确认'] = '竞价涨幅>1.5%+不低开'
+   826→    elif is_zt and fc_b_v > 0: scores.loc[idx, '次日确认'] = '竞价涨幅>2%+量比>1.5'
+   827→    elif is_zt: scores.loc[idx, '次日确认'] = '竞价涨幅>2%+量比>1.5'
+   828→    else: scores.loc[idx, '次日确认'] = '竞价涨幅>3%+量比>2+5分钟涨>2%'
+   829→    if lb_v >= 5 and fc_b_v < 0.1:
+   830→        scores.loc[idx, '次日确认'] += '(⚠封板弱,若低开放弃入场)'
+   831→```
+   832→
+   833→#### 选股逻辑
+   834→
+   835→```python
+   836→scores['选股逻辑'] = ''
+   837→for idx in scores.index:
+   838→    parts = lp.get(idx, [])
+   839→    if scores.loc[idx, '总分'] <= 0: continue
+   840→    if not parts: parts.append(f'涨幅{pool.loc[idx,"ZAF"]:.1f}%')
+   841→    scores.loc[idx, '选股逻辑'] = '、'.join(parts) + ' → 打板入选'
+   842→```
+   843→
+   844→---
+   845→
+   846→### 策略 2: 📈 趋势主升浪 (qszsl)
+   847→
+   848→#### 元信息
+   849→- **策略函数名**：`score_qushi`
+   850→- **核心驱动**：均线 × 筹码
+   851→- **阈值**：≥60 分
+   852→- **Top N**：30
+   853→- **Excel Sheet**：`📈趋势主升浪`
+   854→- **基础列**：`['code', '股票名称', 'ZAF', 'fHSL', 'Wtb', 'Zsz', 'Zjl', '行业', '最新价', '价格估算']`
+   855→
+   856→#### 股票池筛选
+   857→
+   858→**无 pool 筛选**，对全市场 df 评分（每只股都可入选）：
+   859→
+   860→```python
+   861→def score_qushi(df):
+   862→    scores = pd.DataFrame(index=df.index)
+   863→    scores['code'] = df['code']; scores['股票名称'] = df['股票名称']
+   864→    lp = {idx: [] for idx in df.index}
+   865→
+   866→    ma5 = df.get('KL_MA5', pd.Series(np.nan, index=df.index))
+   867→    ma10 = df.get('KL_MA10', pd.Series(np.nan, index=df.index))
+   868→    ma20 = df.get('KL_MA20', pd.Series(np.nan, index=df.index))
+   869→    has_kline = pd.notna(ma5) & pd.notna(ma10) & pd.notna(ma20)
+   870→```
+   871→
+   872→**注**：`has_kline` 标记是否有完整 K 线数据（MA5/MA10/MA20 全部非 NaN）
+   873→
+   874→#### 评分维度 1：均线多头（0-35 分）
+   875→
+   876→```python
+   877→# (1) 均线多头(0-35) — MA5>MA10>MA20=35, 部分多头按比例给分
+   878→scores['均线多头'] = 0
+   879→full_bull = has_kline & (ma5 > ma10) & (ma10 > ma20)
+   880→scores.loc[full_bull, '均线多头'] = 35
+   881→for idx in df[full_bull].index: lp[idx].append('均线多头排列')
+   882→short_bull = has_kline & (ma5 > ma10) & (ma10 <= ma20)
+   883→scores.loc[short_bull, '均线多头'] = 22
+   884→for idx in df[short_bull].index: lp[idx].append('短期均线多头')
+   885→r5 = df['ZAFPre5']; r10 = df['ZAFPre10']
+   886→scores.loc[~has_kline & (r5 > 0) & (r10 > 0), '均线多头'] = 20
+   887→scores.loc[~has_kline & (r5 > 0) & (r10 <= 0), '均线多头'] = 8
+   888→```
+   889→
+   890→| 子项 | 条件 | 加分 |
+   891→|------|------|------|
+   892→| 完整多头 | `has_kline & MA5>MA10 & MA10>MA20` | 35 |
+   893→| 短期多头 | `has_kline & MA5>MA10 & MA10≤MA20` | 22 |
+   894→| 无K线+多周期上涨 | `~has_kline & ZAFPre5>0 & ZAFPre10>0` | 20 |
+   895→| 无K线+仅短期上涨 | `~has_kline & ZAFPre5>0 & ZAFPre10≤0` | 8 |
+   896→
+   897→#### 评分维度 2：量价配合（0-25 分）
+   898→
+   899→```python
+   900→# (2) 量价配合(0-25) — 涨+量比>1.5=25, 缩量上涨扣分
+   901→scores['量价配合'] = 0
+   902→zaf = df['ZAF']; wtb = df['Wtb']
+   903→scores.loc[(zaf > 0) & (wtb > 1.5), '量价配合'] = 25
+   904→scores.loc[(zaf > 0) & (wtb > 1) & (wtb <= 1.5), '量价配合'] = 18
+   905→scores.loc[(zaf > 0) & (wtb > 0.8) & (wtb <= 1), '量价配合'] = 10
+   906→scores.loc[(zaf > 0) & (wtb <= 0.8), '量价配合'] = 4
+   907→for idx in df[(zaf > 0) & (wtb > 1.5)].index: lp[idx].append('量价齐升')
+   908→for idx in df[(zaf > 0) & (wtb <= 0.8)].index: lp[idx].append('⚠缩量上涨')
+   909→```
+   910→
+   911→| 子项 | 条件 | 加分 |
+   912→|------|------|------|
+   913→| 量价齐升 | `ZAF>0 & Wtb>1.5` | 25 |
+   914→| 量价配合 | `ZAF>0 & Wtb∈(1, 1.5]` | 18 |
+   915→| 量能温和 | `ZAF>0 & Wtb∈(0.8, 1]` | 10 |
+   916→| 缩量上涨 | `ZAF>0 & Wtb≤0.8` | 4 |
+   917→
+   918→**注**：`Wtb` 已在数据清洗阶段把负值/0 置 NaN，所以 `wtb <= 0.8` 实际只匹配 (0, 0.8]；NaN 不匹配任何条件（赋 0）
+   919→
+   920→#### 评分维度 3：MACD 方向（0-20 分）
+   921→
+   922→```python
+   923→# (3) MACD方向(0-20) — 金叉/向上发散
+   924→scores['MACD方向'] = 0
+   925→dif = df.get('KL_DIF', pd.Series(np.nan, index=df.index))
+   926→dea = df.get('KL_DEA', pd.Series(np.nan, index=df.index))
+   927→has_macd = pd.notna(dif) & pd.notna(dea)
+   928→scores.loc[has_macd & (dif > 0) & (dif > dea), 'MACD方向'] = 20
+   929→scores.loc[has_macd & (dif > 0) & (dif <= dea), 'MACD方向'] = 12
+   930→scores.loc[has_macd & (dif <= 0) & (dif > dea), 'MACD方向'] = 10
+   931→for idx in df[has_macd & (dif > 0) & (dif > dea)].index: lp[idx].append('MACD金叉')
+   932→scores.loc[~has_macd & (r5 > 3), 'MACD方向'] = 14
+   933→scores.loc[~has_macd & (r5 > 0) & (r5 <= 3), 'MACD方向'] = 8
+   934→```
+   935→
+   936→| 子项 | 条件 | 加分 |
+   937→|------|------|------|
+   938→| MACD 金叉且水上 | `has_macd & DIF>0 & DIF>DEA` | 20 |
+   939→| MACD 水上但下行 | `has_macd & DIF>0 & DIF≤DEA` | 12 |
+   940→| MACD 水下但上行 | `has_macd & DIF≤0 & DIF>DEA` | 10 |
+   941→| 无 MACD + 强涨 | `~has_macd & ZAFPre5>3` | 14 |
+   942→| 无 MACD + 弱涨 | `~has_macd & ZAFPre5∈(0, 3]` | 8 |
+   943→
+   944→#### 评分维度 4：大单流入（0-20 分）
+   945→
+   946→```python
+   947→# (4) 大单流入(0-20) — 主力净流入+大单占比
+   948→scores['大单流入'] = 0
+   949→zjl = df['Zjl']; big_ratio = df['大买占比']
+   950→scores.loc[(zjl > 0) & (big_ratio > 0.4), '大单流入'] = 20
+   951→scores.loc[(zjl > 0) & (big_ratio > 0.3) & (big_ratio <= 0.4), '大单流入'] = 14
+   952→scores.loc[(zjl > 0) & (big_ratio <= 0.3), '大单流入'] = 8
+   953→for idx in df[(zjl > 5000) & (big_ratio > 0.3)].index: lp[idx].append('大单持续流入')
+   954→```
+   955→
+   956→| 子项 | 条件 | 加分 |
+   957→|------|------|------|
+   958→| 大单强势 | `Zjl>0 & 大买占比>0.4` | 20 |
+   959→| 大单中等 | `Zjl>0 & 大买占比∈(0.3, 0.4]` | 14 |
+   960→| 大单弱势 | `Zjl>0 & 大买占比≤0.3` | 8 |
+   961→
+   962→#### 总分公式
+   963→
+   964→```python
+   965→scores['总分'] = scores['均线多头'] + scores['量价配合'] + scores['MACD方向'] + scores['大单流入']
+   966→```
+   967→
+   968→#### 惩罚/过滤规则
+   969→
+   970→```python
+   971→not_uptrend = has_kline & (ma5 <= ma10)
+   972→scores.loc[not_uptrend, '总分'] = (scores.loc[not_uptrend, '总分'] * 0.3).round(1)
+   973→```
+   974→
+   975→**惩罚条件**：有 K 线但 MA5 ≤ MA10（短期均线空头）→ 总分 × 0.3
+   976→
+   977→#### 次日确认
+   978→
+   979→```python
+   980→scores['次日确认'] = ''
+   981→for idx in scores.index:
+   982→    if scores.loc[idx, '总分'] < 60: continue
+   983→    ma5_val = ma5[idx] if pd.notna(ma5[idx]) else None
+   984→    if ma5_val: scores.loc[idx, '次日确认'] = f'开盘不破MA5({ma5_val:.2f}元)+量比>0.8'
+   985→    else: scores.loc[idx, '次日确认'] = '开盘不跌破昨收+量比>0.8'
+   986→```
+   987→
+   988→#### 选股逻辑
+   989→
+   990→```python
+   991→scores['选股逻辑'] = ''
+   992→for idx in scores.index:
+   993→    parts = lp.get(idx, [])
+   994→    if scores.loc[idx, '总分'] < 60: continue
+   995→    if not parts: parts.append('趋势向上')
+   996→    scores.loc[idx, '选股逻辑'] = '、'.join(parts) + ' → 趋势主升浪入选'
+   997→```
+   998→
+   999→---
+  1000→
+  1001→### 策略 3: 🩹 错杀低吸 (cslx)
+  1002→
+  1003→#### 元信息
+  1004→- **策略函数名**：`score_cuoshai`
+  1005→- **核心驱动**：恐慌极值 × 承接
+  1006→- **阈值**：≥55 分
+  1007→- **Top N**：30
+  1008→- **Excel Sheet**：`🩹错杀低吸`
+  1009→- **基础列**：`['code', '股票名称', 'ZAF', 'fHSL', 'Wtb', 'Zsz', 'Zjl', 'ZAFPre20', 'ZAFPre60', '行业', '行业涨停率', '最新价', '大买占比', '价格估算']`
+  1010→
+  1011→#### 股票池筛选（3 种场景 OR）
+  1012→
+  1013→```python
+  1014→def score_cuoshai(df):
+  1015→    # 修复Bug: pool 改 OR → AND,确保是"当日下跌 + 中期超跌"的真正错杀股
+  1016→    # 同时保留两种主要场景: (1)当日明显下跌(ZAF<-3) (2)中期深度超跌+当日下跌(ZAF<-1 & ZAFPre20<-8)
+  1017→    pool = df[
+  1018→        (df['ZAF'] < -3) |
+  1019→        ((df['ZAF'] < -1) & (df['ZAFPre20'] < -8)) |
+  1020→        ((df['ZAF'] < -1) & (df['ZAFPre60'] < -15))
+  1021→    ].copy()
+  1022→```
+  1023→
+  1024→| 场景 | 条件 |
+  1025→|------|------|
+  1026→| 当日明显下跌 | `ZAF < -3` |
+  1027→| 中期超跌 + 当日下跌 | `ZAF<-1 & ZAFPre20<-8` |
+  1028→| 长期超跌 + 当日下跌 | `ZAF<-1 & ZAFPre60<-15` |
+  1029→
+  1030→#### 评分维度 1：恐慌深度（0-30 分）
+  1031→
+  1032→```python
+  1033→# (1) 恐慌深度(0-30) — 当日跌+20日跌+60日跌
+  1034→scores['恐慌深度'] = 0
+  1035→zaf = pool['ZAF']; zaf20 = pool['ZAFPre20']; zaf60 = pool['ZAFPre60']
+  1036→scores.loc[zaf <= -7, '恐慌深度'] += 15
+  1037→scores.loc[(zaf > -7) & (zaf <= -5), '恐慌深度'] += 12
+  1038→scores.loc[(zaf > -5) & (zaf <= -3), '恐慌深度'] += 8
+  1039→scores.loc[(zaf > -3) & (zaf <= -1), '恐慌深度'] += 3
+  1040→for idx in pool[zaf <= -5].index: lp[idx].append('当日恐慌杀跌')
+  1041→scores.loc[zaf60 <= -25, '恐慌深度'] += 10
+  1042→scores.loc[(zaf60 > -25) & (zaf60 <= -15), '恐慌深度'] += 7
+  1043→scores.loc[(zaf20 <= -15), '恐慌深度'] += 8
+  1044→scores.loc[(zaf20 <= -8) & (zaf20 > -15), '恐慌深度'] += 5
+  1045→for idx in pool[zaf60 <= -15].index: lp[idx].append('中期超跌')
+  1046→scores['恐慌深度'] = scores['恐慌深度'].clip(0, 30)
+  1047→```
+  1048→
+  1049→| 子项 | 字段 | 阈值 | 加分 |
+  1050→|------|------|------|------|
+  1051→| 当日跌 | `ZAF` | ≤-7 | +15 |
+  1052→| 当日跌 | `ZAF` | (-7, -5] | +12 |
+  1053→| 当日跌 | `ZAF` | (-5, -3] | +8 |
+  1054→| 当日跌 | `ZAF` | (-3, -1] | +3 |
+  1055→| 60日跌 | `ZAFPre60` | ≤-25 | +10 |
+  1056→| 60日跌 | `ZAFPre60` | (-25, -15] | +7 |
+  1057→| 20日跌 | `ZAFPre20` | ≤-15 | +8 |
+  1058→| 20日跌 | `ZAFPre20` | (-15, -8] | +5 |
+  1059→
+  1060→**clip 范围**：[0, 30]
+  1061→
+  1062→#### 评分维度 2：承接力度（0-30 分）
+  1063→
+  1064→```python
+  1065→# (2) 承接力度(0-30) — 大买占比+主力净流入
+  1066→scores['承接力度'] = 0
+  1067→big_ratio = pool['大买占比']; zjl = pool['Zjl']
+  1068→scores.loc[big_ratio >= 0.5, '承接力度'] += 18
+  1069→scores.loc[(big_ratio >= 0.4) & (big_ratio < 0.5), '承接力度'] += 14
+  1070→scores.loc[(big_ratio >= 0.3) & (big_ratio < 0.4), '承接力度'] += 8
+  1071→for idx in pool[big_ratio >= 0.4].index: lp[idx].append('大单承接强')
+  1072→scores.loc[zjl >= 5000, '承接力度'] += 12
+  1073→scores.loc[(zjl >= 1000) & (zjl < 5000), '承接力度'] += 8
+  1074→scores.loc[(zjl >= 0) & (zjl < 1000), '承接力度'] += 3
+  1075→for idx in pool[zjl >= 1000].index: lp[idx].append('资金抄底')
+  1076→scores['承接力度'] = scores['承接力度'].clip(0, 30)
+  1077→```
+  1078→
+  1079→| 子项 | 字段 | 阈值 | 加分 |
+  1080→|------|------|------|------|
+  1081→| 大买占比 | `大买占比` | ≥0.5 | +18 |
+  1082→| 大买占比 | `大买占比` | [0.4, 0.5) | +14 |
+  1083→| 大买占比 | `大买占比` | [0.3, 0.4) | +8 |
+  1084→| 主力净流入 | `Zjl` | ≥5000 | +12 |
+  1085→| 主力净流入 | `Zjl` | [1000, 5000) | +8 |
+  1086→| 主力净流入 | `Zjl` | [0, 1000) | +3 |
+  1087→
+  1088→**clip 范围**：[0, 30]
+  1089→
+  1090→#### 评分维度 3：恐慌极值（0-20 分）
+  1091→
+  1092→```python
+  1093→# (3) 恐慌极值(0-20) — 换手×跌幅
+  1094→scores['恐慌极值'] = 0
+  1095→pv = pool['恐慌量']
+  1096→scores.loc[pv >= 100, '恐慌极值'] = 20
+  1097→scores.loc[(pv >= 50) & (pv < 100), '恐慌极值'] = 16
+  1098→scores.loc[(pv >= 30) & (pv < 50), '恐慌极值'] = 12
+  1099→scores.loc[(pv >= 15) & (pv < 30), '恐慌极值'] = 6
+  1100→for idx in pool[pv >= 50].index: lp[idx].append('恐慌放量')
+  1101→```
+  1102→
+  1103→**字段**：`恐慌量` = `fHSL * |ZAF|`（已在辅助字段计算）
+  1104→
+  1105→| 阈值 | 加分 |
+  1106→|------|------|
+  1107→| ≥100 | 20 |
+  1108→| [50, 100) | 16 |
+  1109→| [30, 50) | 12 |
+  1110→| [15, 30) | 6 |
+  1111→
+  1112→#### 评分维度 4：催化剂（0-20 分）
+  1113→
+  1114→```python
+  1115→# (4) 催化剂(0-20) — 行业涨停率 + 量比异常
+  1116→scores['催化剂'] = 0
+  1117→ind_zt_rate = pool['行业涨停率']; wtb = pool['Wtb']
+  1118→scores.loc[ind_zt_rate >= 5, '催化剂'] += 12
+  1119→scores.loc[(ind_zt_rate >= 2) & (ind_zt_rate < 5), '催化剂'] += 8
+  1120→scores.loc[(ind_zt_rate >= 1) & (ind_zt_rate < 2), '催化剂'] += 3
+  1121→for idx in pool[ind_zt_rate >= 2].index: lp[idx].append('板块催化')
+  1122→scores.loc[wtb >= 3, '催化剂'] += 8
+  1123→scores.loc[(wtb >= 2) & (wtb < 3), '催化剂'] += 5
+  1124→for idx in pool[wtb >= 2].index: lp[idx].append('底部放量')
+  1125→scores['催化剂'] = scores['催化剂'].clip(0, 20)
+  1126→```
+  1127→
+  1128→| 子项 | 字段 | 阈值 | 加分 |
+  1129→|------|------|------|------|
+  1130→| 行业涨停率 | `行业涨停率` | ≥5 | +12 |
+  1131→| 行业涨停率 | `行业涨停率` | [2, 5) | +8 |
+  1132→| 行业涨停率 | `行业涨停率` | [1, 2) | +3 |
+  1133→| 量比 | `Wtb` | ≥3 | +8 |
+  1134→| 量比 | `Wtb` | [2, 3) | +5 |
+  1135→
+  1136→**clip 范围**：[0, 20]
+  1137→
+  1138→#### 总分公式
+  1139→
+  1140→```python
+  1141→scores['总分'] = scores['恐慌深度'] + scores['承接力度'] + scores['恐慌极值'] + scores['催化剂']
+  1142→```
+  1143→
+  1144→#### 惩罚/过滤规则
+  1145→
+  1146→```python
+  1147→scores.loc[pool['ZAF'] > 3, '总分'] = 0  # 已反弹的股票不算错杀
+  1148→# 修复Bug: 惩罚系数0.4过严,改为0.5保留一定分数
+  1149→scores.loc[scores['催化剂'] < 5, '总分'] = (scores.loc[scores['催化剂'] < 5, '总分'] * 0.5).round(1)
+  1150→```
+  1151→
+  1152→**惩罚 1**：`ZAF > 3`（已反弹）→ 总分清 0
+  1153→**惩罚 2**：催化剂 < 5（板块/量能催化不足）→ 总分 × 0.5
+  1154→
+  1155→#### 次日确认
+  1156→
+  1157→```python
+  1158→scores['次日确认'] = ''
+  1159→for idx in scores.index:
+  1160→    if scores.loc[idx, '总分'] < 55: continue
+  1161→    zaf_val = pool.loc[idx, 'ZAF']
+  1162→    if zaf_val <= -5: scores.loc[idx, '次日确认'] = '开盘不创新低+竞价不低开'
+  1163→    else: scores.loc[idx, '次日确认'] = '开盘>前日最低+竞价有买单'
+  1164→```
+  1165→
+  1166→#### 选股逻辑
+  1167→
+  1168→```python
+  1169→scores['选股逻辑'] = ''
+  1170→for idx in scores.index:
+  1171→    parts = lp.get(idx, [])
+  1172→    if scores.loc[idx, '总分'] < 55: continue
+  1173→    if not parts: parts.append('超跌+有承接')
+  1174→    scores.loc[idx, '选股逻辑'] = '、'.join(parts) + ' → 错杀低吸入选'
+  1175→```
+  1176→
+  1177→---
+  1178→
+  1179→### 策略 4: ⚡ 弱转强 (rzq)
+  1180→
+  1181→#### 元信息
+  1182→- **策略函数名**：`score_ruozhuanqiang`
+  1183→- **核心驱动**：预期差 × 点火
+  1184→- **阈值**：≥50 分
+  1185→- **Top N**：30（使用说明 sheet 中写"≤15"，源码 `MAX_PER_MODEL=30`，以源码为准）
+  1186→- **Excel Sheet**：`⚡弱转强`
+  1187→- **基础列**：`['code', '股票名称', 'ZAF', 'fHSL', 'Wtb', 'Zsz', 'Zjl', 'VOpenZAF', 'OpenZAF', 'FzAmo', 'ZAFYesterday', 'ZAFPre5', 'YearZTDay', '最新价', '价格估算']`
+  1188→
+  1189→#### 股票池筛选
+  1190→
+  1191→```python
+  1192→def score_ruozhuanqiang(df):
+  1193→    # 修复Bug: 阈值收紧, "前日弱"应该是前日跌或平盘,而非"前日涨幅<2%"
+  1194→    pool = df[
+  1195→        (df['VOpenZAF'] > 1) &
+  1196→        (df['ZAFYesterday'] < 0)  # 前日确实下跌才算"弱"
+  1197→    ].copy()
+  1198→```
+  1199→
+  1200→**pool 条件**：竞价涨幅 > 1% AND 前日涨幅 < 0（前日确实下跌才算"弱"）
+  1201→
+  1202→#### 评分维度 1：竞价异动（0-30 分）
+  1203→
+  1204→```python
+  1205→# (1) 竞价异动(0-30) — VOpenZAF竞价涨幅 + 竞价金额比
+  1206→scores['竞价异动'] = 0
+  1207→vopen = pool['VOpenZAF']; open_amo = pool['OpenAmo']; cjjepre1 = pool['CJJEPre1']
+  1208→scores.loc[vopen >= 5, '竞价异动'] += 15
+  1209→scores.loc[(vopen >= 3) & (vopen < 5), '竞价异动'] += 12
+  1210→scores.loc[(vopen >= 2) & (vopen < 3), '竞价异动'] += 8
+  1211→scores.loc[(vopen >= 1) & (vopen < 2), '竞价异动'] += 4
+  1212→for idx in pool[vopen >= 3].index: lp[idx].append(f'竞价涨幅{vopen[idx]:.1f}%')
+  1213→# 注: OpenAmo单位=元, CJJEPre1单位=万元, 故*10000对齐为元
+  1214→open_amo_ratio = open_amo / (cjjepre1 * 10000 + 1)
+  1215→scores.loc[open_amo_ratio >= 0.01, '竞价异动'] += 15
+  1216→scores.loc[(open_amo_ratio >= 0.005) & (open_amo_ratio < 0.01), '竞价异动'] += 10
+  1217→scores.loc[(open_amo_ratio >= 0.002) & (open_amo_ratio < 0.005), '竞价异动'] += 5
+  1218→for idx in pool[open_amo_ratio >= 0.005].index: lp[idx].append('竞价放量')
+  1219→scores['竞价异动'] = scores['竞价异动'].clip(0, 30)
+  1220→```
+  1221→
+  1222→| 子项 | 字段 | 阈值 | 加分 |
+  1223→|------|------|------|------|
+  1224→| 竞价涨幅 | `VOpenZAF` | ≥5 | +15 |
+  1225→| 竞价涨幅 | `VOpenZAF` | [3, 5) | +12 |
+  1226→| 竞价涨幅 | `VOpenZAF` | [2, 3) | +8 |
+  1227→| 竞价涨幅 | `VOpenZAF` | [1, 2) | +4 |
+  1228→| 竞价金额比 | `OpenAmo / (CJJEPre1*10000+1)` | ≥0.01 | +15 |
+  1229→| 竞价金额比 | 同上 | [0.005, 0.01) | +10 |
+  1230→| 竞价金额比 | 同上 | [0.002, 0.005) | +5 |
+  1231→
+  1232→**单位说明**：`OpenAmo` 单位为元，`CJJEPre1` 单位为万元，所以 `* 10000` 对齐为元
+  1233→
+  1234→**clip 范围**：[0, 30]
+  1235→
+  1236→#### 评分维度 2：预期差（0-25 分）
+  1237→
+  1238→```python
+  1239→# (2) 预期差(0-25) — 前日弱 + 今日强
+  1240→scores['预期差'] = 0
+  1241→zaf_yest = pool['ZAFYesterday']; zaf_pre5 = pool['ZAFPre5']; zaf_now = pool['ZAF']
+  1242→scores.loc[(zaf_yest < -2) & (vopen > 3), '预期差'] += 15
+  1243→scores.loc[(zaf_yest < -2) & (vopen > 1), '预期差'] += 10
+  1244→scores.loc[(zaf_yest < 0) & (vopen > 2), '预期差'] += 10
+  1245→scores.loc[(zaf_yest >= 0) & (zaf_yest < 2) & (vopen > 3), '预期差'] += 8
+  1246→for idx in pool[(zaf_yest < -2) & (vopen > 2)].index: lp[idx].append('强预期差')
+  1247→scores.loc[(zaf_pre5 < 0) & (zaf_now > 0), '预期差'] += 10
+  1248→for idx in pool[(zaf_pre5 < 0) & (zaf_now > 0)].index: lp[idx].append('5日趋势反转')
+  1249→scores['预期差'] = scores['预期差'].clip(0, 25)
+  1250→```
+  1251→
+  1252→| 子项 | 条件 | 加分 |
+  1253→|------|------|------|
+  1254→| 前日大跌+今日强竞价 | `ZAFYesterday<-2 & VOpenZAF>3` | +15 |
+  1255→| 前日大跌+今日竞价 | `ZAFYesterday<-2 & VOpenZAF>1` | +10 |
+  1256→| 前日跌+今日强竞价 | `ZAFYesterday<0 & VOpenZAF>2` | +10 |
+  1257→| 前日微涨+今日强竞价 | `ZAFYesterday∈[0,2) & VOpenZAF>3` | +8 |
+  1258→| 5日趋势反转 | `ZAFPre5<0 & ZAF>0` | +10 |
+  1259→
+  1260→**clip 范围**：[0, 25]
+  1261→
+  1262→#### 评分维度 3：点火信号（0-25 分）
+  1263→
+  1264→```python
+  1265→# (3) 点火信号(0-25) — 开盘跳空 + 量比 + 尾盘抢筹
+  1266→scores['点火信号'] = 0
+  1267→open_zaf = pool['OpenZAF']; wtb = pool['Wtb']; fz_amo = pool['FzAmo']
+  1268→scores.loc[open_zaf >= 3, '点火信号'] += 10
+  1269→scores.loc[(open_zaf >= 1) & (open_zaf < 3), '点火信号'] += 7
+  1270→scores.loc[(open_zaf >= 0.5) & (open_zaf < 1), '点火信号'] += 3
+  1271→for idx in pool[open_zaf >= 2].index: lp[idx].append('开盘跳空')
+  1272→scores.loc[wtb >= 3, '点火信号'] += 8
+  1273→scores.loc[(wtb >= 2) & (wtb < 3), '点火信号'] += 5
+  1274→scores.loc[(wtb >= 1.5) & (wtb < 2), '点火信号'] += 3
+  1275→for idx in pool[wtb >= 2].index: lp[idx].append('量比放大')
+  1276→scores.loc[fz_amo >= 500, '点火信号'] += 7
+  1277→scores.loc[(fz_amo >= 200) & (fz_amo < 500), '点火信号'] += 4
+  1278→scores['点火信号'] = scores['点火信号'].clip(0, 25)
+  1279→```
+  1280→
+  1281→| 子项 | 字段 | 阈值 | 加分 |
+  1282→|------|------|------|------|
+  1283→| 开盘涨幅 | `OpenZAF` | ≥3 | +10 |
+  1284→| 开盘涨幅 | `OpenZAF` | [1, 3) | +7 |
+  1285→| 开盘涨幅 | `OpenZAF` | [0.5, 1) | +3 |
+  1286→| 量比 | `Wtb` | ≥3 | +8 |
+  1287→| 量比 | `Wtb` | [2, 3) | +5 |
+  1288→| 量比 | `Wtb` | [1.5, 2) | +3 |
+  1289→| 尾盘金额 | `FzAmo` | ≥500 | +7 |
+  1290→| 尾盘金额 | `FzAmo` | [200, 500) | +4 |
+  1291→
+  1292→**clip 范围**：[0, 25]
+  1293→
+  1294→#### 评分维度 4：股性（0-20 分）
+  1295→
+  1296→```python
+  1297→# (4) 股性(0-20) — 年涨停数 + Beta值
+  1298→scores['股性'] = 0
+  1299→nzt = pool.get('YearZTDay', pd.Series(0, index=pool.index))
+  1300→beta = pool.get('BetaValue', pd.Series(0, index=pool.index))
+  1301→scores.loc[nzt >= 5, '股性'] += 10
+  1302→scores.loc[(nzt >= 2) & (nzt < 5), '股性'] += 6
+  1303→for idx in pool[nzt >= 5].index: lp[idx].append('股性活跃')
+  1304→scores.loc[(beta > 1.2) & (beta <= 2), '股性'] += 10
+  1305→scores.loc[(beta > 0.8) & (beta <= 1.2), '股性'] += 5
+  1306→```
+  1307→
+  1308→| 子项 | 字段 | 阈值 | 加分 |
+  1309→|------|------|------|------|
+  1310→| 年涨停天数 | `YearZTDay` | ≥5 | +10 |
+  1311→| 年涨停天数 | `YearZTDay` | [2, 5) | +6 |
+  1312→| Beta 值 | `BetaValue` | (1.2, 2] | +10 |
+  1313→| Beta 值 | `BetaValue` | (0.8, 1.2] | +5 |
+  1314→
+  1315→**注**：无 clip，理论上限 20
+  1316→
+  1317→#### 总分公式
+  1318→
+  1319→```python
+  1320→scores['总分'] = scores['竞价异动'] + scores['预期差'] + scores['点火信号'] + scores['股性']
+  1321→```
+  1322→
+  1323→#### 惩罚/过滤规则
+  1324→
+  1325→```python
+  1326→scores.loc[pool['是否涨停'], '总分'] = 0
+  1327→```
+  1328→
+  1329→**惩罚条件**：当日涨停股 → 总分清 0（涨停股不属"弱转强"）
+  1330→
+  1331→#### 次日确认
+  1332→
+  1333→```python
+  1334→scores['次日确认'] = '竞价量比>1.5+5分钟内涨幅>1%'
+  1335→```
+  1336→
+  1337→**统一规则**（无分支判断）
+  1338→
+  1339→#### 选股逻辑
+  1340→
+  1341→```python
+  1342→scores['选股逻辑'] = ''
+  1343→for idx in scores.index:
+  1344→    parts = lp.get(idx, [])
+  1345→    if scores.loc[idx, '总分'] < 50: continue
+  1346→    if not parts: parts.append('竞价异动+预期差')
+  1347→    scores.loc[idx, '选股逻辑'] = '、'.join(parts) + ' → 弱转强入选'
+  1348→```
+  1349→
+  1350→---
+  1351→
+  1352→### 策略 5: 🔄 强转弱反抽 (qzrfc)
+  1353→
+  1354→#### 元信息
+  1355→- **策略函数名**：`score_qiangzhuanruo`
+  1356→- **核心驱动**：主力被套 × 自救
+  1357→- **阈值**：≥50 分
+  1358→- **Top N**：30
+  1359→- **Excel Sheet**：`🔄强转弱反抽`
+  1360→- **基础列**：`['code', '股票名称', 'ZAF', 'fHSL', 'Wtb', 'Zsz', 'Zjl', 'ZAFYesterday', '行业', '行业涨停率', '最新价', '大买占比', '价格估算']`
+  1361→
+  1362→#### 股票池筛选
+  1363→
+  1364→```python
+  1365→def score_qiangzhuanruo(df):
+  1366→    pool = df[
+  1367→        (df['ZAFYesterday'] > 3) &
+  1368→        (df['ZAF'] < -1)
+  1369→    ].copy()
+  1370→```
+  1371→
+  1372→**pool 条件**：前日涨幅 > 3%（昨日强势）AND 当日跌幅 < -1%（今日转弱）
+  1373→
+  1374→#### 评分维度 1：主力被套深度（0-30 分）
+  1375→
+  1376→```python
+  1377→# (1) 主力被套深度(0-30) — 昨涨-今跌 + 主力逆势流入
+  1378→scores['主力被套深度'] = 0
+  1379→zaf_yest = pool['ZAFYesterday']; zjl = pool['Zjl']; zaf = pool['ZAF']
+  1380→trap_depth = zaf_yest - zaf
+  1381→scores.loc[trap_depth >= 15, '主力被套深度'] += 20
+  1382→scores.loc[(trap_depth >= 10) & (trap_depth < 15), '主力被套深度'] += 15
+  1383→scores.loc[(trap_depth >= 6) & (trap_depth < 10), '主力被套深度'] += 10
+  1384→scores.loc[trap_depth < 6, '主力被套深度'] += 4
+  1385→for idx in pool[trap_depth >= 10].index: lp[idx].append('主力深度被套')
+  1386→scores.loc[zjl > 0, '主力被套深度'] += 10
+  1387→scores.loc[(zjl <= 0) & (zjl > -5000), '主力被套深度'] += 5
+  1388→for idx in pool[zjl > 0].index: lp[idx].append('主力逆势流入')
+  1389→scores['主力被套深度'] = scores['主力被套深度'].clip(0, 30)
+  1390→```
+  1391→
+  1392→**核心字段**：`trap_depth = ZAFYesterday - ZAF`（昨涨减今跌 = 被套深度）
+  1393→
+  1394→| 子项 | 字段 | 阈值 | 加分 |
+  1395→|------|------|------|------|
+  1396→| 被套深度 | `ZAFYesterday - ZAF` | ≥15 | +20 |
+  1397→| 被套深度 | 同上 | [10, 15) | +15 |
+  1398→| 被套深度 | 同上 | [6, 10) | +10 |
+  1399→| 被套深度 | 同上 | <6 | +4 |
+  1400→| 主力净流入 | `Zjl` | >0 | +10 |
+  1401→| 主力净流入 | `Zjl` | (-5000, 0] | +5 |
+  1402→
+  1403→**clip 范围**：[0, 30]
+  1404→
+  1405→#### 评分维度 2：回踩幅度（0-25 分）
+  1406→
+  1407→```python
+  1408→# (2) 回踩幅度(0-25) — 当日跌幅区间
+  1409→scores['回踩幅度'] = 0
+  1410→scores.loc[(zaf >= -3) & (zaf < -1), '回踩幅度'] = 10
+  1411→scores.loc[(zaf >= -5) & (zaf < -3), '回踩幅度'] = 18
+  1412→scores.loc[(zaf >= -8) & (zaf < -5), '回踩幅度'] = 25
+  1413→scores.loc[zaf < -8, '回踩幅度'] = 15
+  1414→for idx in pool[(zaf >= -5) & (zaf < -3)].index: lp[idx].append('中度回踩')
+  1415→for idx in pool[(zaf >= -8) & (zaf < -5)].index: lp[idx].append('深度回踩(反抽空间大)')
+  1416→```
+  1417→
+  1418→| 字段 | 阈值 | 加分 |
+  1419→|------|------|------|
+  1420→| `ZAF` | [-3, -1) | 10 |
+  1421→| `ZAF` | [-5, -3) | 18 |
+  1422→| `ZAF` | [-8, -5) | 25（最大） |
+  1423→| `ZAF` | <-8 | 15（深度回踩反而扣分，因跌幅过大反抽难度大） |
+  1424→
+  1425→**注**：这是赋值（=）不是累加（+=），且无 clip
+  1426→
+  1427→#### 评分维度 3：板块支撑（0-25 分）
+  1428→
+  1429→```python
+  1430→# (3) 板块支撑(0-25) — 行业涨停率 + 行业平均涨幅
+  1431→scores['板块支撑'] = 0
+  1432→ind_zt_rate = pool['行业涨停率']; ind_avg = pool['行业平均涨幅']
+  1433→scores.loc[ind_zt_rate >= 5, '板块支撑'] += 15
+  1434→scores.loc[(ind_zt_rate >= 2) & (ind_zt_rate < 5), '板块支撑'] += 10
+  1435→scores.loc[(ind_zt_rate >= 1) & (ind_zt_rate < 2), '板块支撑'] += 5
+  1436→for idx in pool[ind_zt_rate >= 2].index: lp[idx].append('板块仍强势')
+  1437→scores.loc[ind_avg > 1, '板块支撑'] += 10
+  1438→scores.loc[(ind_avg > 0) & (ind_avg <= 1), '板块支撑'] += 5
+  1439→scores['板块支撑'] = scores['板块支撑'].clip(0, 25)
+  1440→```
+  1441→
+  1442→| 子项 | 字段 | 阈值 | 加分 |
+  1443→|------|------|------|------|
+  1444→| 行业涨停率 | `行业涨停率` | ≥5 | +15 |
+  1445→| 行业涨停率 | `行业涨停率` | [2, 5) | +10 |
+  1446→| 行业涨停率 | `行业涨停率` | [1, 2) | +5 |
+  1447→| 行业平均涨幅 | `行业平均涨幅` | >1 | +10 |
+  1448→| 行业平均涨幅 | `行业平均涨幅` | (0, 1] | +5 |
+  1449→
+  1450→**clip 范围**：[0, 25]
+  1451→
+  1452→#### 评分维度 4：反抽信号（0-20 分）
+  1453→
+  1454→```python
+  1455→# (4) 反抽信号(0-20) — 大买占比 + 换手率
+  1456→scores['反抽信号'] = 0
+  1457→big_ratio = pool['大买占比']; hsl = pool['fHSL']
+  1458→scores.loc[big_ratio >= 0.4, '反抽信号'] += 12
+  1459→scores.loc[(big_ratio >= 0.3) & (big_ratio < 0.4), '反抽信号'] += 7
+  1460→for idx in pool[big_ratio >= 0.35].index: lp[idx].append('有承接单')
+  1461→scores.loc[(hsl >= 3) & (hsl <= 15), '反抽信号'] += 8
+  1462→scores.loc[(hsl >= 1) & (hsl < 3), '反抽信号'] += 4
+  1463→scores.loc[hsl > 15, '反抽信号'] += 2
+  1464→scores['反抽信号'] = scores['反抽信号'].clip(0, 20)
+  1465→```
+  1466→
+  1467→| 子项 | 字段 | 阈值 | 加分 |
+  1468→|------|------|------|------|
+  1469→| 大买占比 | `大买占比` | ≥0.4 | +12 |
+  1470→| 大买占比 | `大买占比` | [0.3, 0.4) | +7 |
+  1471→| 换手率 | `fHSL` | [3, 15] | +8 |
+  1472→| 换手率 | `fHSL` | [1, 3) | +4 |
+  1473→| 换手率 | `fHSL` | >15 | +2 |
+  1474→
+  1475→**clip 范围**：[0, 20]
+  1476→
+  1477→#### 总分公式
+  1478→
+  1479→```python
+  1480→scores['总分'] = scores['主力被套深度'] + scores['回踩幅度'] + scores['板块支撑'] + scores['反抽信号']
+  1481→```
+  1482→
+  1483→#### 惩罚/过滤规则
+  1484→
+  1485→**无额外惩罚**（直接 4 维度相加）
+  1486→
+  1487→#### 次日确认
+  1488→
+  1489→```python
+  1490→scores['次日确认'] = ''
+  1491→for idx in scores.index:
+  1492→    if scores.loc[idx, '总分'] < 50: continue
+  1493→    zaf_val = pool.loc[idx, 'ZAF']
+  1494→    if zaf_val <= -5: scores.loc[idx, '次日确认'] = '开盘>-2%+30分钟不创新低'
+  1495→    else: scores.loc[idx, '次日确认'] = '开盘>-1%+30分钟不创新低'
+  1496→```
+  1497→
+  1498→#### 选股逻辑
+  1499→
+  1500→```python
+  1501→scores['选股逻辑'] = ''
+  1502→for idx in scores.index:
+  1503→    parts = lp.get(idx, [])
+  1504→    if scores.loc[idx, '总分'] < 50: continue
+  1505→    if not parts: parts.append('昨日强今日弱')
+  1506→    scores.loc[idx, '选股逻辑'] = '、'.join(parts) + ' → 强转弱反抽入选'
+  1507→```
+  1508→
+  1509→---
+  1510→
+  1511→## 九、因子清单汇总（去重）
+  1512→
+  1513→> **此表是后续生成 `strategies/strategy_*.yaml` 中 `factors:` 段的关键依据。**
+  1514→
+  1515→| 因子名 | 计算公式 | 用于哪些策略 | 建议因子插件 | 建议因子 ID |
+  1516→|--------|---------|--------------|--------------|-------------|
+  1517→| 涨停判断 | `if code startswith (688/689/300/301/302): ZAF≥19.5 elif (8/4): ZAF≥29.5 else: ZAF≥9.8` | dbqzt/rzq（也影响所有策略的 fLianB 清洗） | `engine/factors/limit_up.py` | `limit_up` |
+  1518→| 连板数 | `fLianB = ConZAFDateNum`（非涨停股置 0，取整） | dbqzt | `engine/factors/continuous_limit_up.py` | `continuous_limit_up` |
+  1519→| 封板强度系数 | `pd.to_numeric(fLianB原始值, errors='coerce').fillna(0)`（原 fLianB 字段） | dbqzt | `engine/factors/seal_strength.py` | `seal_strength` |
+  1520→| 封成比 | `FCb`（原始字段，负值置 0） | dbqzt | `engine/factors/seal_amount_ratio.py` | `seal_amount_ratio` |
+  1521→| 封单额 | `FCAmo`（原始字段，单位：万元，负值置 0） | dbqzt | `engine/factors/seal_amount.py` | `seal_amount` |
+  1522→| 竞价涨幅 | `VOpenZAF`（原始字段） | dbqzt/rzq | `engine/factors/auction_pct.py` | `auction_pct` |
+  1523→| 尾盘金额 | `FzAmo`（原始字段，单位：万元） | dbqzt/rzq | `engine/factors/closing_amount.py` | `closing_amount` |
+  1524→| 卖撤率 | `SCancel / (SCancel + TotalSVol + 1)`，缺失用 0.5 兜底 | dbqzt | `engine/factors/sell_cancel_rate.py` | `sell_cancel_rate` |
+  1525→| 当日涨幅 | `ZAF`（原始字段） | dbqzt/cslx/qszsl/rzq/qzrfc（间接，所有策略） | `engine/factors/pct_change.py` | `pct_change_today` |
+  1526→| 前日涨幅 | `ZAFYesterday`（原始字段） | rzq/qzrfc | `engine/factors/pct_change_yesterday.py` | `pct_change_yesterday` |
+  1527→| 5日涨幅 | `ZAFPre5`（原始字段） | qszsl/rzq | `engine/factors/pct_change_5d.py` | `pct_change_5d` |
+  1528→| 10日涨幅 | `ZAFPre10`（原始字段） | qszsl | `engine/factors/pct_change_10d.py` | `pct_change_10d` |
+  1529→| 20日涨幅 | `ZAFPre20`（原始字段） | cslx | `engine/factors/pct_change_20d.py` | `pct_change_20d` |
+  1530→| 60日涨幅 | `ZAFPre60`（原始字段） | cslx | `engine/factors/pct_change_60d.py` | `pct_change_60d` |
+  1531→| 量比 | `Wtb`（原始字段，负值/0 置 NaN） | qszsl/cslx/rzq | `engine/factors/turnover_ratio.py` | `turnover_ratio` |
+  1532→| 换手率 | `fHSL`（原始字段） | cslx/qzrfc + 老登过滤 | `engine/factors/turnover_rate.py` | `turnover_rate` |
+  1533→| 总市值 | `Zsz`（原始字段，单位：亿） | 所有策略（基础列） | `engine/factors/market_cap.py` | `market_cap` |
+  1534→| 主力净流入 | `Zjl`（原始字段，单位：万） | qszsl/cslx/qzrfc + 行业统计 | `engine/factors/main_inflow.py` | `main_inflow` |
+  1535→| 大买占比 | `TotalBVol / (TotalBVol + TotalSVol + 1)` | qszsl/cslx/qzrfc | `engine/factors/big_buy_ratio.py` | `big_buy_ratio` |
+  1536→| 恐慌量 | `fHSL * |ZAF|` | cslx | `engine/factors/panic_volume.py` | `panic_volume` |
+  1537→| MA5 | `close.rolling(5, min_periods=1).mean()` | qszsl + 压力位 | `engine/factors/ma.py` | `ma5` |
+  1538→| MA10 | `close.rolling(10, min_periods=1).mean()` | qszsl + 压力位 | `engine/factors/ma.py` | `ma10` |
+  1539→| MA20 | `close.rolling(20, min_periods=1).mean()` | qszsl + 压力位 | `engine/factors/ma.py` | `ma20` |
+  1540→| DIF | `EMA12 - EMA26`（EMA: `close.ewm(span=N, adjust=False).mean()`） | qszsl | `engine/factors/macd.py` | `macd_dif` |
+  1541→| DEA | `EMA9(DIF)` | qszsl | `engine/factors/macd.py` | `macd_dea` |
+  1542→| MACD_BAR | `2 * (DIF - DEA)` | （技术指标计算，未直接用于评分） | `engine/factors/macd.py` | `macd_bar` |
+  1543→| BOLL_MID | `close.rolling(20, min_periods=1).mean()` | （技术指标计算，未直接用于评分） | `engine/factors/boll.py` | `boll_mid` |
+  1544→| BOLL_UP | `BOLL_MID + 2 * close.rolling(20).std()` | 压力位 | `engine/factors/boll.py` | `boll_up` |
+  1545→| 年涨停天数 | `YearZTDay`（原始字段） | rzq + 老登过滤 | `engine/factors/year_zt_days.py` | `year_zt_days` |
+  1546→| Beta值 | `BetaValue`（原始字段） | rzq + 老登过滤 | `engine/factors/beta.py` | `beta_value` |
+  1547→| 开盘涨幅 | `OpenZAF`（原始字段） | rzq | `engine/factors/open_pct.py` | `open_pct` |
+  1548→| 竞价金额 | `OpenAmo`（原始字段，单位：元） | rzq | `engine/factors/auction_amount.py` | `auction_amount` |
+  1549→| 昨成交额 | `CJJEPre1`（原始字段，单位：万元） | rzq | `engine/factors/prev_amount.py` | `prev_amount` |
+  1550→| 行业涨停数 | `df.groupby('行业').agg(行业涨停数=('_is_zt', 'sum'))` | dbqzt（孤板判断） | `engine/factors/industry_zt_count.py` | `industry_zt_count` |
+  1551→| 行业涨停率 | `行业涨停数 / 行业总数 * 100` | cslx/qzrfc | `engine/factors/industry_zt_rate.py` | `industry_zt_rate` |
+  1552→| 行业平均涨幅 | `df.groupby('行业').agg(行业平均涨幅=('ZAF', 'mean'))` | qzrfc | `engine/factors/industry_avg_pct.py` | `industry_avg_pct` |
+  1553→| 前日高点 | K 线 `high` 字段 | 压力位 | `engine/factors/prev_high.py` | `prev_high` |
+  1554→| 被套深度 | `ZAFYesterday - ZAF` | qzrfc | `engine/factors/trap_depth.py` | `trap_depth` |
+  1555→| 5日趋势反转 | `ZAFPre5<0 & ZAF>0`（布尔） | rzq | `engine/factors/trend_reversal_5d.py` | `trend_reversal_5d` |
+  1556→| 竞价金额比 | `OpenAmo / (CJJEPre1*10000+1)` | rzq | `engine/factors/auction_amount_ratio.py` | `auction_amount_ratio` |
+  1557→
+  1558→**因子总数**：38 个去重因子（含派生字段）。
+  1559→
+  1560→---
+  1561→
+  1562→## 十、CSV 字段使用映射
+  1563→
+  1564→> **此表说明 L2 快照 CSV 88 个字段中哪些被 5 策略使用。**
+  1565→
+  1566→### 10.1 L2 快照 CSV（`全市场L2快照_20260616.csv`）字段使用
+  1567→
+  1568→| CSV 字段 | 含义 | 用于哪些策略/步骤 | 是否清洗 |
+  1569→|----------|------|------------------|----------|
+  1570→| `code` | 股票代码 | 所有（基础键） | 是（regex 校验） |
+  1571→| `查询时间` | 快照时间 | 步骤 1（仅打印） | 否 |
+  1572→| `HqDate` | 行情日期 | 步骤 1（仅打印） | 否 |
+  1573→| `股票名称` | 派生（name_map 映射） | 所有（基础列）+ ST 过滤 | 否 |
+  1574→| `IsT0Fund` | T+0 货基标识 | 步骤 3 基础过滤 | 否 |
+  1575→| `IsKzz` | 可转债标识 | 步骤 3 基础过滤 | 否 |
+  1576→| `TPFlag` | 停牌标识 | 步骤 3 基础过滤 | 否 |
+  1577→| `SafeValue` | 安全值 | 步骤 3 基础过滤（≠-1） | 否 |
+  1578→| `IsZCZGP` | 增持增持股标识 | （未使用） | 否 |
+  1579→| `ZAF` | 当日涨幅% | 所有策略（核心） | 是（Bug5 numeric） |
+  1580→| `ZAFYesterday` | 前日涨幅% | rzq/qzrfc | 是（Bug5） |
+  1581→| `ZAFPre5` | 5日涨幅% | qszsl/rzq | 是（Bug5） |
+  1582→| `ZAFPre10` | 10日涨幅% | qszsl | 是（Bug5） |
+  1583→| `ZAFPre20` | 20日涨幅% | cslx | 是（Bug5） |
+  1584→| `ZAFPre60` | 60日涨幅% | cslx | 是（Bug5） |
+  1585→| `fHSL` | 换手率% | cslx/qzrfc + 老登过滤 + 恐慌量 | 是（Bug5） |
+  1586→| `fLianB` | （原）封板强度系数 | dbqzt（重定义为 ConZAFDateNum，作连板数） | 是（Bug4） |
+  1587→| `ConZAFDateNum` | （原）连板天数 | dbqzt（重定义为 fLianB） | 是（Bug4） |
+  1588→| `Wtb` | 量比 | qszsl/cslx/rzq | 是（Bug1 负值/0 置 NaN） |
+  1589→| `Zsz` | 总市值（亿） | 所有策略（基础列） | 是（Bug5） |
+  1590→| `Zjl` | 主力净流入（万） | qszsl/cslx/qzrfc + 行业统计 | 是（Bug5） |
+  1591→| `TotalBVol` | 大单买入量 | 大买占比计算（qszsl/cslx/qzrfc） | 是（Bug5） |
+  1592→| `TotalSVol` | 大单卖出量 | 大买占比 + 卖撤率计算 | 是（Bug5） |
+  1593→| `BCancel` | 买单撤单 | （Bug5 转换但未使用） | 是 |
+  1594→| `SCancel` | 卖单撤单 | dbqzt 卖撤率计算 | 是（Bug5） |
+  1595→| `L2OrderNum` | L2 订单数 | （Bug5 转换但未使用，原卖撤率公式已被弃用） | 是 |
+  1596→| `FCb` | 封成比 | dbqzt | 是（Bug2 负值置 0） |
+  1597→| `FCAmo` | 封单额（万） | dbqzt | 是（Bug2 负值置 0） |
+  1598→| `VOpenZAF` | 竞价涨幅% | dbqzt/rzq | 是（Bug5） |
+  1599→| `OpenZAF` | 开盘涨幅% | rzq | 是（Bug5） |
+  1600→| `OpenAmo` | 竞价金额（元） | rzq | 是（Bug5） |
+  1601→| `OpenAmoPre1` | 昨竞价金额 | （Bug5 转换但未使用） | 是 |
+  1602→| `FzAmo` | 尾盘金额（万） | dbqzt/rzq | 是（Bug5） |
+  1603→| `CJJEPre1` | 昨成交额（万元） | rzq | 是（Bug5） |
+  1604→| `YearZTDay` | 年涨停天数 | rzq + 老登过滤 | 是（Bug5） |
+  1605→| `BetaValue` | Beta 值 | rzq + 老登过滤 | 是（Bug5） |
+  1606→| `MA5Value` | MA5（快照字段） | 最新价兜底 | 是（Bug5） |
+  1607→| `行业`（派生） | 行业一级 | qszsl/cslx/qzrfc（基础列）+ 行业统计 | 否 |
+  1608→| `所属板块`（派生） | 板块拼接 | （未用于评分，仅展示） | 否 |
+  1609→| `行业总数`（派生） | 行业总数 | （行业统计中间字段） | 否 |
+  1610→| `行业涨停数`（派生） | 行业涨停数 | dbqzt（孤板判断） | 否 |
+  1611→| `行业涨停率`（派生） | 行业涨停率% | cslx/qzrfc | 否 |
+  1612→| `行业平均涨幅`（派生） | 行业平均涨幅% | qzrfc | 否 |
+  1613→| `行业主力净流入`（派生） | 行业主力净流入（万） | （未直接用于评分） | 否 |
+  1614→| `KL_MA5`（派生） | K线 MA5 | qszsl | 否 |
+  1615→| `KL_MA10`（派生） | K线 MA10 | qszsl | 否 |
+  1616→| `KL_MA20`（派生） | K线 MA20 | qszsl | 否 |
+  1617→| `KL_DIF`（派生） | K线 DIF | qszsl | 否 |
+  1618→| `KL_DEA`（派生） | K线 DEA | qszsl | 否 |
+  1619→| `KL_MACD_BAR`（派生） | K线 MACD_BAR | （未直接用于评分） | 否 |
+  1620→| `KL_BOLL_UP`（派生） | K线 BOLL_UP | 压力位 | 否 |
+  1621→| `最新价`（派生） | K线收盘价（MA5Value 兜底） | 所有策略（基础列）+ 压力位 | 否 |
+  1622→| `价格估算`（派生） | 是否用 MA5 兜底（布尔） | 所有策略（基础列） | 否 |
+  1623→| `大买占比`（派生） | `TotalBVol/(TotalBVol+TotalSVol+1)` | qszsl/cslx/qzrfc | 否 |
+  1624→| `卖撤率`（派生） | `SCancel/(SCancel+TotalSVol+1)`，缺失 0.5 | dbqzt | 否 |
+  1625→| `恐慌量`（派生） | `fHSL * |ZAF|` | cslx | 否 |
+  1626→| `是否涨停`（派生） | `_is_zt_for_row` 判断结果 | dbqzt/rzq + fLianB 清洗 | 否 |
+  1627→| `封板强度系数`（派生） | 原 fLianB 值 | dbqzt | 否 |
+  1628→
+  1629→### 10.2 K 线 CSV（`kline_*.csv`）字段使用
+  1630→
+  1631→| CSV 字段 | 含义 | 用于哪些步骤 |
+  1632→|----------|------|--------------|
+  1633→| `code` | 股票代码 | K 线合并键 |
+  1634→| `date` | 日期 | K 线去重/排序/筛选最新日 |
+  1635→| `open` | 开盘价 | （未直接使用） |
+  1636→| `high` | 最高价 | 压力位（前日高点） |
+  1637→| `low` | 最低价 | （未直接使用） |
+  1638→| `close` | 收盘价 | MA/DIF/DEA/BOLL/最新价 |
+  1639→| `volume` | 成交量 | （计算但未直接使用） |
+  1640→| `amount` | 成交额 | （计算但未直接使用） |
+  1641→| `change_pct` | 涨跌幅% | （未直接使用） |
+  1642→| `turnover` | 换手率 | （未直接使用） |
+  1643→| `forward_factor` | 复权因子 | （未使用，2-i 任务确认全空） |
+  1644→
+  1645→### 10.3 其他 CSV 字段使用
+  1646→
+  1647→| CSV 文件 | 字段 | 含义 | 用途 |
+  1648→|----------|------|------|------|
+  1649→| `stock_name_mapping.csv` | `code`, `name` | 股票代码-名称 | 步骤 1 映射股票名称 |
+  1650→| `股票行业三级分类_*.csv` | `stock_code`, `行业一级` 等 | 行业三级分类 | 步骤 5 取「行业一级」字段作行业 |
+  1651→| `stock_block_relation.csv` | `stock_code`, `block_code`, `block_name`, `block_type` 等 | 板块关系 | 步骤 5 取 `block_type=='行业'` 的 `block_name` 拼「所属板块」 |
+  1652→
+  1653→---
+  1654→
+  1655→## 十一、关键参数清单（YAML 配置时必读）
+  1656→
+  1657→### 11.1 全局阈值（THRESHOLDS）
+  1658→
+  1659→```python
+  1660→THRESHOLDS = {'daban': 35, 'qushi': 60, 'cuoshai': 55, 'ruozhuan': 50, 'qzr': 50}
+  1661→MAX_PER_MODEL = 30
+  1662→```
+  1663→
+  1664→### 11.2 涨停判断阈值（3 档）
+  1665→
+  1666→| 板块 | 代码前缀 | 阈值 |
+  1667→|------|---------|------|
+  1668→| 创业板/科创板 | 688/689/300/301/302 | ZAF ≥ 19.5 |
+  1669→| 北交所 | 8/4 开头 | ZAF ≥ 29.5 |
+  1670→| 主板/中小板 | 其他 | ZAF ≥ 9.8 |
+  1671→
+  1672→### 11.3 老登过滤 3 条件
+  1673→
+  1674→| 字段 | 阈值 |
+  1675→|------|------|
+  1676→| `YearZTDay` | == 0 |
+  1677→| `fHSL` | < 1 |
+  1678→| `BetaValue` | < 0.8 |
+  1679→
+  1680→### 11.4 5 策略 pool 筛选条件汇总
+  1681→
+  1682→| 策略 | pool 条件 |
+  1683→|------|-----------|
+  1684→| dbqzt | `是否涨停 OR ZAF>=7` |
+  1685→| qszsl | （无 pool，全市场评分） |
+  1686→| cslx | `ZAF<-3 OR (ZAF<-1 AND ZAFPre20<-8) OR (ZAF<-1 AND ZAFPre60<-15)` |
+  1687→| rzq | `VOpenZAF>1 AND ZAFYesterday<0` |
+  1688→| qzrfc | `ZAFYesterday>3 AND ZAF<-1` |
+  1689→
+  1690→### 11.5 5 策略惩罚规则汇总
+  1691→
+  1692→| 策略 | 惩罚条件 | 惩罚系数 |
+  1693→|------|---------|----------|
+  1694→| dbqzt | `~是否涨停 & FCb==0 & fLianB<1` | ×0.5 |
+  1695→| qszsl | `has_kline & MA5<=MA10`（短期空头） | ×0.3 |
+  1696→| cslx | `ZAF>3`（已反弹） | =0 |
+  1697→| cslx | `催化剂<5`（催化不足） | ×0.5 |
+  1698→| rzq | `是否涨停`（涨停股不属弱转强） | =0 |
+  1699→| qzrfc | （无额外惩罚） | - |
+  1700→
+  1701→### 11.6 5 策略 4 维度分值上限汇总
+  1702→
+  1703→| 策略 | 维度 1 | 维度 2 | 维度 3 | 维度 4 | 理论上限 | 阈值 | 占比 |
+  1704→|------|--------|--------|--------|--------|----------|------|------|
+  1705→| dbqzt | 封板强度 0-40 | 连板辨识度 0-30 | 竞价抢筹 0-20 | 风险扣分 0~-10 | 100 | 35 | 35% |
+  1706→| qszsl | 均线多头 0-35 | 量价配合 0-25 | MACD方向 0-20 | 大单流入 0-20 | 100 | 60 | 60% |
+  1707→| cslx | 恐慌深度 0-30 | 承接力度 0-30 | 恐慌极值 0-20 | 催化剂 0-20 | 100 | 55 | 55% |
+  1708→| rzq | 竞价异动 0-30 | 预期差 0-25 | 点火信号 0-25 | 股性 0-20 | 100 | 50 | 50% |
+  1709→| qzrfc | 主力被套深度 0-30 | 回踩幅度 0-25 | 板块支撑 0-25 | 反抽信号 0-20 | 100 | 50 | 50% |
+  1710→
+  1711→### 11.7 数据清洗规则汇总（YAML 中 `cleaning.custom_rules` 应配置）
+  1712→
+  1713→| 规则 ID | 字段 | 操作 | 兜底值 |
+  1714→|---------|------|------|--------|
+  1715→| `clean_wtb_negative` | `Wtb` | 负值或 0 置 NaN | NaN |
+  1716→| `clean_fcb_negative` | `FCb` | 负值置 0 | 0 |
+  1717→| `clean_fcamo_negative` | `FCAmo` | 负值置 0 | 0 |
+  1718→| `calc_sell_cancel_rate` | `SCancel`, `TotalSVol` | `SCancel/(SCancel+TotalSVol+1)`，缺失 0.5 | 0.5 |
+  1719→| `redefine_flianb` | `fLianB`, `ConZAFDateNum` | fLianB→封板强度系数；ConZAFDateNum→fLianB（非涨停置 0，取整） | 0 |
+  1720→| `to_numeric_all` | 25 个字段（见【二】Bug5） | `pd.to_numeric(errors='coerce')` | NaN |
+  1721→| `filter_laodeng` | `YearZTDay`, `fHSL`, `BetaValue` | 3 条件 AND 剔除 | - |
+  1722→
+  1723→### 11.8 辅助字段计算汇总
+  1724→
+  1725→| 派生字段 | 计算公式 | 用于哪些策略 |
+  1726→|----------|---------|--------------|
+  1727→| `大买占比` | `TotalBVol / (TotalBVol + TotalSVol + 1)` | qszsl/cslx/qzrfc |
+  1728→| `卖撤率` | `SCancel / (SCancel + TotalSVol + 1)`，缺失 0.5 | dbqzt |
+  1729→| `恐慌量` | `fHSL * |ZAF|` | cslx |
+  1730→| `最新价` | K 线收盘价 → MA5Value 兜底 | 所有（基础列）+ 压力位 |
+  1731→| `价格估算` | 布尔，True=用 MA5 兜底 | 所有（基础列） |
+  1732→| `是否涨停` | 3 档涨停判断 | dbqzt/rzq + fLianB 清洗 |
+  1733→| `封板强度系数` | 原 fLianB 值 | dbqzt |
+  1734→| `fLianB`（重定义） | `ConZAFDateNum`，非涨停置 0，取整 | dbqzt |
+  1735→
+  1736→### 11.9 压力位候选优先级
+  1737→
+  1738→```python
+  1739→1. 前日高点（high > close*1.005）
+  1740→2. 布林上轨 BOLL_UP > close*1.005
+  1741→3. MA20 > close*1.003
+  1742→4. MA10 > close*1.003
+  1743→5. MA5 > close*1.003
+  1744→6. 涨停价（无候选）：主板 1.10 / 创科 1.20 / 北交 1.30
+  1745→7. 无 K 线：close*1.02，标签"估算"
+  1746→```
+  1747→
+  1748→最终取所有候选中 `|candidate - close|` 最小者。
+  1749→
+  1750→---
+  1751→
+  1752→## 十二、互斥性说明（源自 V8.1 模型使用方法 sheet）
+  1753→
+  1754→| 策略 | 互斥策略 |
+  1755→|------|---------|
+  1756→| 🔥打板求涨停 | 与弱转强互斥 |
+  1757→| 📈趋势主升浪 | 独立（不需情绪） |
+  1758→| 🩹错杀低吸 | 与打板互斥 |
+  1759→| ⚡弱转强 | 与打板互斥 |
+  1760→| 🔄强转弱反抽 | 与打板互斥 |
+  1761→
+  1762→**实现机制**：源码中并无显式互斥逻辑，互斥性通过 pool 筛选条件自然实现（如 dbqzt pool 要求涨停或涨≥7%，而 cslx pool 要求当日跌，自然不重叠）。
+  1763→
+  1764→---
+  1765→
+  1766→## 十三、生成 YAML 时关键提示
+  1767→
+  1768→1. **每策略 YAML 必须配置 `cleaning.custom_rules`**：所有 5 策略共用相同的 7 条清洗规则，建议在 `config/cleaning_rules.yaml` 统一配置后用 `cleaning.rules_file` 引用。
+  1769→
+  1770→2. **因子插件设计原则**：
+  1771→   - 原始字段（如 `ZAF`, `Wtb`）应直接读取，不做转换
+  1772→   - 派生字段（如 `大买占比`, `恐慌量`, `卖撤率`）应封装为独立因子插件
+  1773→   - 阈值/系数（如 dbqzt 的 `封成比 ≥0.5=20`）应作为 `params` 配置，不硬编码
+  1774→
+  1775→3. **评分公式**：每策略 4 维度加分均为「阈值查表」模式，建议用 `scoring.formula` 配合 `penalties` 表达式引擎实现，而非硬编码 if-else。
+  1776→
+  1777→4. **clip 操作**：5 个策略中 4 个维度的总分上限分别为 40/30/20/10（dbqzt）、35/25/20/20（qszsl）等，必须用 `clip(0, N)` 严格限制，避免累加超上限。
+  1778→
+  1779→5. **惩罚规则**：每策略 1-2 条惩罚，必须用 `penalties` 段配置，含 `condition`/`multiplier`/`reason` 三字段。
+  1780→
+  1781→6. **次日确认**：每策略有不同次日确认规则，属"盘后选股→次日开盘确认"两段式理念，建议作为 `monitor.alert_conditions` 配置。
+  1782→
+  1783→7. **行业统计依赖**：cslx/qzrfc 用到 `行业涨停率`，dbqzt 用到 `行业涨停数`，qzrfc 用到 `行业平均涨幅`，这些字段需要先按 `行业一级` 分组聚合，再 merge 回主表。YAML 中需配置 `pre_calc` 段或独立 step。
+  1784→
+  1785→8. **fLianB 语义陷阱**：源码中 fLianB 已被重定义为 `ConZAFDateNum`（连板数），而原 fLianB 字段值存入 `封板强度系数`。YAML 中必须明确：
+  1786→   - `factors` 中 `continuous_limit_up` 因子的输入字段应为 `ConZAFDateNum`（不是 fLianB）
+  1787→   - `factors` 中 `seal_strength` 因子的输入字段应为原始 `fLianB` 字段
+  1788→
+  1789→9. **OpenAmo/CJJEPre1 单位差异**：`OpenAmo` 单位为元，`CJJEPre1` 单位为万元，计算 `竞价金额比` 时需 `* 10000` 对齐。YAML 中因子插件应明确处理此单位差异。
+  1790→
+  1791→---
+  1792→
+  1793→**本文档为 V8.1 选股系统 5 策略逻辑的唯一权威提取，所有代码原样保留，所有阈值一字不差。后续生成 `strategies/strategy_*.yaml` 时以此为准。**
+  1794→

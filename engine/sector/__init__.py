@@ -1,0 +1,1 @@
+"""Sector manager (atomic operations)."""

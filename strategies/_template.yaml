@@ -1,0 +1,134 @@
+# =====================================================================
+# TdxQuant 策略 YAML 模板 (strategies/_template.yaml)
+# =====================================================================
+# 复制本文件 → 命名 strategy_<id>.yaml，编辑字段即可生成新策略。
+# 文件名以 `_template` 开头会被 ConfigLoader 自动跳过（不会注册为策略）。
+#
+# 字段对照请阅读：
+# - docs/maintenance/ARCHITECTURE.md 第五节（策略 YAML 结构规范）
+# - docs/maintenance/STRATEGY_LOGIC.md 第八节（5 策略 4 维度公式与阈值）
+# - engine/config/schema.py（StrategyConfig / StrategyScoringConfig 等 dataclass）
+#
+# 设计要点：
+# 1. 所有阈值/权重/系数都从 YAML 读取，绝不硬编码到代码（ARCHITECTURE §六）
+# 2. 因子引用必须用 engine/factors/ 目录下真实存在的 factor_id（注册表自动扫描）
+# 3. 评分公式必须包含 clip，严格限制每维度上限（防止累加超上限）
+# 4. cleaning 段引用 config/cleaning_rules.yaml（V8 5 项 Bug 修复统一管理）
+# =====================================================================
+
+# ---- 必填：策略元信息 ----
+strategy_id: template            # 必填，全局唯一，拼音首字母小写（如 dbqzt/qszsl/cslx/rzq/qzrfc）
+strategy_name: 策略模板           # 必填，中文显示名
+strategy_emoji: "📋"             # 可选，UI 显示 emoji（与 Excel Sheet 名一致）
+version: "1.0"                   # 必填，版本号
+enabled: false                   # 必填，是否启用（模板默认 false，复制后改 true）
+
+# ---- 板块映射 ----
+# 与 config/sector_mapping.yaml 保持一致；二者任一存在即可生效，前者优先
+sector:
+  code: ZD_TPL01                 # 必填，板块 Code（命名规则：ZD_<拼音首字母大写><两位序号>）
+  name: 策略模板选股               # 必填，板块中文名
+  auto_update: true              # 选股结果是否自动回写板块
+  update_mode: replace           # replace(清空重写，对应 SectorManager.update_stocks) / append(追加，对应 add_stocks)
+
+# ---- 股票池筛选（universe） ----
+# 选股逻辑的「不变部分」：ST/停牌/新股/市场黑白名单
+universe:
+  exclude_st: true               # 排除 ST/*ST 股（V8 步骤 2）
+  exclude_suspended: true        # 排除停牌股（V8 步骤 3 TPFlag==0）
+  exclude_new_listing_days: 5    # 上市不足 N 天排除
+  market_list: [SH, SZ, BJ]      # 允许的市场（沪深北）
+  exclude_codes: []              # 黑名单（手动配置）
+  include_only: []               # 白名单（优先级高于黑名单）
+
+# ---- 策略专属股票池（pool） ----
+# V8 5 策略各自有 pool 筛选条件（STRATEGY_LOGIC.md §11.4）
+# 表达式引擎支持算术/比较/逻辑/列表 in；字段名直接引用清洗后 DataFrame 列
+pool:
+  # 示例：打板求涨停 pool = 是否涨停 OR ZAF>=7
+  # expression: "是否涨停 or ZAF >= 7"
+  expression: ""                 # 空字符串=不额外过滤（趋势策略无 pool）
+  description: 策略 pool 筛选表达式（STRATEGY_LOGIC.md §11.4）
+
+# ---- 数据清洗 ----
+# 引用 config/cleaning_rules.yaml 的 7 条通用规则 + 策略专属规则
+cleaning:
+  rules_file: cleaning_rules.yaml   # 引用通用规则（V8 5 Bug 修复 + 老登过滤 + 涨停阈值分板块）
+  custom_rules: []                  # 策略专属规则（一般为空，所有策略共用通用规则）
+
+# ---- 因子组合（核心可配置部分） ----
+# factor_id 必须是 engine/factors/ 目录下真实存在的因子（FactorRegistry 自动扫描）
+# 可用 26 个因子：见 engine/factors/registry.py
+#   momentum_5d/10d/20d, breakout_ma20/platform, turnover_rate/momentum,
+#   market_cap/pe_ttm/pb_ratio, volume_ratio/amount/price_volume_score,
+#   seal_ratio/amount/consecutive_limit/seal_strength/year_limit_days,
+#   ma_alignment/macd_direction/main_inflow/big_buy_ratio,
+#   panic_depth/panic_volume/support_strength/catalyst_score
+factors:
+  - factor_id: momentum_5d        # 因子 ID（必填）
+    weight: 1.0                   # 权重（评分时归一化用，仅用于排序）
+    params:                       # 因子参数（不硬编码）
+      window: 5
+    # 注：V8 5 策略的 4 维度评分大多为「阈值查表」式加分，
+    #     因子返回原始值（如 ZAFPre5），评分公式中再做阈值映射
+
+# ---- 评分逻辑 ----
+# 表达式引擎支持：算术/比较/逻辑/列表/clip/max/min/abs
+# 强制要求：每个维度独立 clip，防止累加超上限（V8 5 策略 4 维度分值上限不同）
+scoring:
+  # formula 是 V8 5 策略的总分公式，必须严格 clip：
+  # 例：dbqzt = clip(封板强度,0,40) + clip(连板辨识度,0,30) + clip(竞价抢筹,0,20) + clip(风险扣分,-10,0)
+  formula: "clip(d1, 0, 100)"     # 各维度累加 + 每维度 clip
+  normalization: none             # none(直接用公式值) / rank_percentile / zscore / minmax
+  # 评分维度细分（仅用于文档化，引擎按 formula 求值）
+  dimensions:
+    - id: d1
+      name: 维度1
+      factor_ids: [momentum_5d]   # 该维度依赖的因子
+      max_score: 100              # 维度上限
+      clip_range: [0, 100]        # clip 范围
+  penalties:                      # 惩罚规则（V8 §11.5 每策略 1-2 条）
+    - condition: "total_score > 0"  # 表达式引擎求值，True 时按 multiplier 缩放
+      multiplier: 0.5             # 惩罚系数（×0.5 = 半折；=0 = 清零）
+      reason: 惩罚示例
+
+# ---- 选股结果输出 ----
+output:
+  top_n: 30                       # 选前 N 只（V8 MAX_PER_MODEL=30）
+  min_score: 0                    # 最低得分门槛（V8 THRESHOLDS：dbqzt=35/qszsl=60/cslx=55/rzq=50/qzrfc=50）
+  sort_by: total_score            # 排序字段（公式求值后的总分列名）
+  sort_order: desc                # asc / desc
+
+# ---- 监控配置 ----
+# 该策略选出的股票如何监控（实盘预警）
+monitor:
+  enabled: true                   # 是否启用监控
+  subscribe_hq: true              # 是否订阅实时行情
+  batch_size: 50                  # subscribe_hq 分批大小（不硬编码，V8 上限 100，分批 50）
+  alert_conditions:               # 预警条件（V8 次日确认规则映射）
+    - condition: "pct_change > 0.095"
+      alert_type: limit_up
+      channels: [tdx_warn, websocket, feishu]
+      priority: high
+    - condition: "pct_change < -0.05"
+      alert_type: drop_alert
+      channels: [websocket, feishu]
+      priority: medium
+  # 次日确认规则（V8 各策略不同，作为注释保留方便 AI 维护）
+  next_day_confirm: "次日确认规则文本"
+
+# ---- 导出配置 ----
+# 覆盖 config/export.yaml 默认值
+export:
+  csv: true                       # 是否导出 CSV
+  excel: true                     # 是否导出 Excel
+  excel_sheet_name: 策略模板       # Excel Sheet 名（V8 含 emoji，与 strategy_emoji + strategy_name 拼接）
+  duckdb: true                    # 是否持久化到 DuckDB（selection_results 表）
+  sector: true                    # 是否回写通达信板块
+
+# ---- V8 对应关系（注释段，仅文档化，不参与运行） ----
+# 源码函数名: score_xxx（STRATEGY_LOGIC.md 第八节）
+# 4 维度上限: 如 dbqzt = 40+30+20+(-10)
+# 阈值: V8 THRESHOLDS（35/60/55/50/50）
+# Excel Sheet: 与 strategy_emoji + strategy_name 对齐
+# 互斥性: 见 STRATEGY_LOGIC.md 第十二节

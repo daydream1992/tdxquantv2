@@ -1,0 +1,106 @@
+# =====================================================================
+# TdxQuant 推送通道配置 (config/channels.yaml)
+# =====================================================================
+# 所有预警/信号推送通道的开关与参数。
+# 策略 YAML 的 monitor.alert_conditions.channels 引用本文件的 channel_id。
+# 修改后无需重启，调用 POST /api/config/reload 热加载。
+# 详见: docs/maintenance/ARCHITECTURE.md §五（配置文件规范）
+# =====================================================================
+
+# ---- 通道清单 ----
+# 字段说明:
+#   channel_id    - 通道唯一 ID（全局唯一，策略 YAML 引用此 ID）
+#   channel_name  - 通道中文名（UI 显示）
+#   enabled       - 是否启用（false 时该通道的所有推送被跳过）
+#   config        - 通道参数（不同通道不同，详见各通道注释）
+channels:
+  # ---- 通达信预警通道 ----
+  # 调用 tqcenter API: tq.send_warn(stock_list, msg, bs_flag, kww_flag)
+  # 用于半自动交易：推送预警到通达信客户端，用户在客户端确认下单
+  - channel_id: tdx_warn
+    channel_name: 通达信预警
+    enabled: true
+    config:
+      default_bs_flag: "0"        # 0=买 1=卖 2=中性
+      include_price: true         # 消息中包含当前价格
+      include_reason: true        # 消息中包含预警原因
+      kww_flag: 0                 # 0=普通 1=重要
+
+  # ---- WebSocket 推送通道 ----
+  # 推送到 Web 前端大屏，前端通过 /ws/signals 订阅
+  # 网关由 P1-5 前端项目提供（Next.js API route 或独立 ws 服务）
+  - channel_id: websocket
+    channel_name: Web大屏推送
+    enabled: true
+    config:
+      gateway_url: "http://127.0.0.1:3003"
+      event_prefix: "quant_"     # 事件名前缀（如 quant_signal_alert）
+      reconnect_interval: 5      # 断线重连间隔（秒）
+      max_queue_size: 1000       # 离线消息队列上限
+
+  # ---- 飞书推送通道 ----
+  # 调用飞书机器人 webhook，支持 interactive 卡片消息
+  # 预留接口，后续填入 webhook_url + secret 后启用
+  - channel_id: feishu
+    channel_name: 飞书推送
+    enabled: false                # 预留，后续开启
+    config:
+      webhook_url: ""             # 飞书机器人 webhook URL
+      secret: ""                  # 签名密钥（启用签名校验时填）
+      msg_type: interactive       # text / interactive（卡片）
+      # 消息模板（与 docs/maintenance/MAINTENANCE.md 中的飞书模板对齐）
+      templates:
+        signal_alert: tpl_signal_alert      # 选股信号
+        limit_up: tpl_limit_up              # 涨停预警
+        risk_warning: tpl_risk              # 风险预警
+      at_users: []                # @ 用户 ID 列表
+      at_all: false               # 是否 @ 全员
+
+  # ---- CSV 日志通道 ----
+  # 所有预警同时写入 CSV 日志，方便回溯与统计分析
+  - channel_id: csv_log
+    channel_name: CSV日志
+    enabled: true
+    config:
+      output_dir: ./data/logs/notifications
+      filename_pattern: "notify_{date}.csv"
+      rotation: daily             # daily / size
+      max_size_mb: 50             # size 模式下的最大文件大小
+      encoding: utf-8-sig
+
+  # ---- 邮件推送通道 ----
+  # 预留接口，后续填入 SMTP 配置后启用
+  - channel_id: email
+    channel_name: 邮件推送
+    enabled: false                # 预留，后续开启
+    config:
+      smtp_host: ""
+      smtp_port: 465              # SSL 端口
+      smtp_user: ""
+      smtp_password: ""
+      from: ""
+      to: []                      # 收件人列表
+      subject_prefix: "[TdxQuant]"
+      use_ssl: true
+
+# ---- 通道优先级（高优先级先推送） ----
+# priority 越小越优先；同优先级按 channels 顺序推送
+channel_priority:
+  tdx_warn: 1                     # 半自动交易优先（用户需及时确认下单）
+  feishu: 2                       # 移动端提醒
+  websocket: 3                    # Web 大屏（实时显示）
+  email: 4                        # 邮件（异步，可延迟）
+  csv_log: 5                      # CSV 日志（最后写入，不影响实时性）
+
+# ---- 通道开关快捷模板 ----
+# 通过 set_profile 切换不同场景的通道组合（如"交易时段"/"非交易时段"）
+profiles:
+  trading:
+    description: 交易时段（全通道启用）
+    enabled_channels: [tdx_warn, websocket, feishu, csv_log]
+  non_trading:
+    description: 非交易时段（仅 CSV 日志）
+    enabled_channels: [csv_log]
+  debug:
+    description: 调试模式（仅 WebSocket + CSV，不推送通达信）
+    enabled_channels: [websocket, csv_log]

@@ -1,0 +1,117 @@
+# =====================================================================
+# TdxQuant 通用数据清洗规则 (config/cleaning_rules.yaml)
+# =====================================================================
+# V8.1 选股系统审核发现的 5 项数据 Bug 修复，统一在此配置。
+# 策略 YAML 通过 ``cleaning.rules_file: cleaning_rules.yaml`` 引用本文件。
+# 修改后无需重启，调用 ``POST /api/config/reload`` 热加载。
+# =====================================================================
+
+# ---- V8.1 5 项 Bug 修复规则 ----
+rules:
+  # Bug1: Wtb量比存在大量负值(-99.8~-0.0)和0, 均为异常值
+  - rule_id: filter_wtb_negative
+    rule_type: filter_negative
+    field: Wtb
+    action: set_nan  # 置 NaN（不删除行，趋势策略可跳过）
+    also_zero: true  # 0 也视为异常（V8 行为）
+    description: 过滤 Wtb 量比负值与 0（V8 Bug1 修复）
+
+  # Bug2: FCb 封成比存在负值, 清洗为 0
+  - rule_id: filter_fcb_negative
+    rule_type: filter_negative
+    field: FCb
+    action: set_zero
+    description: 过滤 FCb 封成比负值（V8 Bug2 修复）
+
+  # Bug3: FCAmo 封单额存在负值, 清洗为 0
+  - rule_id: filter_fcamo_negative
+    rule_type: filter_negative
+    field: FCAmo
+    action: set_zero
+    description: 过滤 FCAmo 封单额负值（V8 Bug2 修复）
+
+  # Bug4: 卖撤率公式单位错配, 改用同单位公式
+  #   原公式 SCancel/L2OrderNum 中位 1.30(>1不合理)
+  #   新公式 SCancel/(SCancel+TotalSVol), 范围 [0,1], 中位约 0.77
+  - rule_id: fix_sell_cancel_rate
+    rule_type: apply_formula
+    field: 卖撤率
+    formula: "SCancel / (SCancel + TotalSVol + 1)"
+    description: 卖撤率公式重写（V8 Bug3 修复）
+
+  # Bug5: fLianB 实为"涨停系数/封板强度", 非连板数
+  #   - 真正连板数应取 ConZAFDateNum
+  #   - 保留 fLianB 原值作为"封板强度系数"派生字段
+  #   - 重命名 fLianB → lianban_count（语义改为连板数, 值=ConZAFDateNum）
+  - rule_id: rename_flianb_to_lianban_count
+    rule_type: rename_field
+    from: fLianB
+    to: lianban_count
+    description: fLianB 字段重命名为 lianban_count（V8 Bug4 修复, 待 clean 步骤补充值映射）
+  - rule_id: derive_seal_strength
+    rule_type: apply_formula
+    field: 封板强度系数
+    formula: "lianban_count"
+    description: 派生封板强度系数字段（占位, 待 P1-2 确认原始 fLianB 字段保留策略）
+
+  # 数值字段统一转 numeric (V8 Bug5 修复)
+  - rule_id: cast_numeric_fields
+    rule_type: cast_numeric
+    fields:
+      - ZAF
+      - Zjl
+      - Zsz
+      - fHSL
+      - VOpenZAF
+      - OpenZAF
+      - FzAmo
+      - OpenAmo
+      - ZAFYesterday
+      - ZAFPre5
+      - ZAFPre10
+      - ZAFPre20
+      - ZAFPre60
+      - YearZTDay
+      - BetaValue
+      - TotalBVol
+      - TotalSVol
+      - BCancel
+      - SCancel
+      - FCAmo
+      - FCb
+      - CJJEPre1
+      - L2OrderNum
+      - MA5Value
+      - OpenAmoPre1
+      - Wtb
+      - turnover
+      - amount
+      - vol
+    description: 数值字段统一转 numeric（V8 Bug5 修复）
+
+  # 删除关键字段空值行
+  - rule_id: drop_na_required
+    rule_type: drop_na
+    fields: [code]
+    description: 删除 code 为空的行
+
+# ---- 老登过滤（V8 兼容） ----
+# 排除: 年涨停数为0 + 换手率低 + Beta值低 的"老登股"
+# V8 原始: YearZTDay==0 & fHSL<1 & BetaValue<0.8
+old_filter:
+  enabled: true
+  conditions:
+    - "YearZTDay == 0"
+    - "fHSL < 1"
+    - "BetaValue < 0.8"
+  description: 老登过滤（V8 兼容, 阈值可在策略 YAML 覆盖）
+
+# ---- 行业涨停数计算（V8 Bug6 修复） ----
+# V8 原始: 所有股票用 9.8% 判涨停, 导致 688/300/8 开头的股票涨停数被低估
+# 修复: 区分 9.8 / 19.5 / 29.5 三档
+# 此处仅声明配置, 实际计算在 LoadData/CleanData 派生字段中完成
+limit_up_thresholds:
+  main_board: 9.8       # 沪深主板
+  gem_star: 19.5        # 创业板/科创板 (300/301/302/688/689)
+  bse: 29.5             # 北交所 (8/4 开头)
+  description: 涨停判定阈值分板块区分（V8 Bug6 修复）

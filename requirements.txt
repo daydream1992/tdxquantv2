@@ -1,0 +1,21 @@
+# TdxQuant Engine - Python 依赖
+# 安装: pip install -r requirements.txt
+# 或在沙箱环境: /home/z/.venv/bin/python3 -m pip install -r requirements.txt
+
+# Web 服务
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+
+# 存储 / 数据处理
+duckdb>=1.0.0
+pyyaml>=6.0
+pandas>=2.0
+openpyxl>=3.1
+
+# 表达式引擎（评分公式 / 预警条件）
+simpleeval>=1.0
+
+# 可选（生产环境才需要）
+# pydantic>=2.0  # FastAPI 已自带
+# httpx>=0.27    # 测试客户端

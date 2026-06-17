@@ -1,0 +1,91 @@
+# =====================================================================
+# TdxQuant 导出配置 (config/export.yaml)
+# =====================================================================
+# 控制各导出器的启用/路径/格式。策略 YAML ``export`` 节可覆盖 enabled。
+# 修改后无需重启，调用 ``POST /api/config/reload`` 热加载。
+# =====================================================================
+
+csv:
+  enabled: true
+  output_dir: ./data/csv
+  filename_pattern: "{strategy_id}_{date}_{run_id}.csv"
+  encoding: utf-8-sig
+  # 字段映射: 引擎内部字段名 → V8 CSV 列名
+  field_mapping:
+    code: 股票代码
+    stock_name: 股票名称
+    total_score: 总分
+    rank: 排名
+    strategy_id: 选股模型
+    ZAF: 涨幅%
+    fHSL: 换手率%
+    Wtb: 量比
+    Zsz: 总市值(亿)
+    Zjl: 主力净流入(万)
+    FCAmo: 封单额(万)
+    FCb: 封成比
+    fLianB: 连板数
+    VOpenZAF: 竞价涨幅%
+    OpenZAF: 开盘涨幅%
+    FzAmo: 尾盘金额(万)
+    OpenAmo: 竞价金额
+    ZAFYesterday: 前日涨幅%
+    ZAFPre5: 5日涨幅%
+    ZAFPre10: 10日涨幅%
+    ZAFPre20: 20日涨幅%
+    ZAFPre60: 60日涨幅%
+    YearZTDay: 年涨停天数
+    行业: 行业
+    行业涨停数: 行业涨停数
+    行业涨停率: 行业涨停率%
+    行业平均涨幅: 行业平均涨幅%
+    最新价: 最新价
+    大买占比: 大买占比
+    选股逻辑: 选股逻辑
+    次日确认: 次日确认
+    压力位: 压力位
+    压力位类型: 压力位类型
+
+excel:
+  enabled: true
+  output_dir: ./data/excel
+  filename_pattern: "{date}_selection.xlsx"
+  # 8 个 Sheet 配置 (V8 兼容)
+  sheets:
+    - sheet_name: 打板求涨停
+      strategy_id: dbqzt
+      description: 封板+连板+竞价 (≥35分)
+    - sheet_name: 趋势主升浪
+      strategy_id: qszsl
+      description: 均线+量价+MACD+大单 (≥60分)
+    - sheet_name: 错杀低吸
+      strategy_id: cslx
+      description: 恐慌+承接+极值+催化剂 (≥55分)
+    - sheet_name: 弱转强
+      strategy_id: rzq
+      description: 竞价异动+预期差+点火 (≥50分)
+    - sheet_name: 强转弱反抽
+      strategy_id: qzrfc
+      description: 主力被套+回踩+支撑+反抽 (≥50分)
+    - sheet_name: 多策略共振
+      strategy_id: _resonance
+      description: ≥2策略交叉确认
+    - sheet_name: 汇总
+      strategy_id: _summary
+      description: 各策略入选数总览
+    - sheet_name: 日志
+      strategy_id: _log
+      description: 流水线执行日志
+
+duckdb:
+  enabled: true
+  table_name: selection_results
+  # 字段映射: 引擎字段 → DuckDB 列名
+  # schema 由 config/duckdb_schema.sql 定义 (P1-3 负责)
+
+sector:
+  enabled: true
+  update_mode: replace  # replace | append
+  # Mock 模式: true=不真实推送，仅记录日志
+  mock: true
+  # 板块 code 来源: 策略 YAML ``sector.code`` 优先，回退到 sector_mapping.yaml

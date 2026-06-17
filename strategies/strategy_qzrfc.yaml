@@ -1,0 +1,93 @@
+strategy_id: qzrfc
+strategy_name: 强转弱反抽
+strategy_emoji: 🔄
+version: '1.0'
+enabled: true
+sector:
+  code: ZD_QZRFC01
+  name: 强转弱反抽选股
+  auto_update: true
+  update_mode: replace
+universe:
+  exclude_st: true
+  exclude_suspended: true
+  exclude_new_listing_days: 5
+  market_list:
+  - SH
+  - SZ
+  - BJ
+  exclude_codes: []
+  include_only: []
+  next_day_confirm: "总分<50 跳过；否则按当日跌幅分支:\n  ZAF<=-5: 开盘>-2%+30分钟不创新低\n  其他: 开盘>-1%+30分钟不创新低\n"
+pool:
+  expression: ZAFYesterday > 3 and ZAF < -1
+  description: 前日涨幅>3% AND 当日跌幅<-1%
+cleaning:
+  rules_file: cleaning_rules.yaml
+  custom_rules: []
+factors:
+- factor_id: main_inflow
+  weight: 1.0
+  params:
+    field: Zjl
+- factor_id: momentum_5d
+  weight: 0.0
+  params:
+    window: 5
+- factor_id: catalyst_score
+  weight: 0.0
+  params:
+    ind_zt_rate_field: 行业涨停率
+    wtb_field: Wtb
+    max_score: 25.0
+- factor_id: big_buy_ratio
+  weight: 1.0
+  params:
+    buy_field: TotalBVol
+    sell_field: TotalSVol
+    field: 大买占比
+- factor_id: turnover_rate
+  weight: 1.0
+  params:
+    field: fHSL
+scoring:
+  formula: clip((main_inflow>0)*10 + (main_inflow<=0 and main_inflow>-5000)*5, 0,
+    30) + clip(0, 0, 25) + clip(0, 0, 25) + clip((big_buy_ratio>=0.4)*12 + (big_buy_ratio>=0.3
+    and big_buy_ratio<0.4)*7 + (turnover_rate>=3 and turnover_rate<=15)*8 + (turnover_rate>=1
+    and turnover_rate<3)*4 + (turnover_rate>15)*2, 0, 20)
+  normalization: none
+  penalties: []
+output:
+  top_n: 30
+  min_score: 50
+  sort_by: total_score
+  sort_order: desc
+monitor:
+  enabled: true
+  subscribe_hq: true
+  batch_size: 50
+  alert_conditions:
+  - condition: pct_change > 0.02
+    alert_type: qzrfc_rebound
+    channels:
+    - tdx_warn
+    - websocket
+    - feishu
+    priority: high
+  - condition: pct_change < -0.05
+    alert_type: qzrfc_fail
+    channels:
+    - websocket
+    - feishu
+    priority: high
+  - condition: main_inflow > 1000
+    alert_type: main_self_rescue
+    channels:
+    - websocket
+    priority: medium
+export:
+  csv: true
+  excel: true
+  excel_sheet_name: 🔄强转弱反抽
+  duckdb: true
+  sector: true

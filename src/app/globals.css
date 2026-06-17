@@ -41,75 +41,93 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+
+  /* 量化专用语义色（A股惯例：涨红跌绿） */
+  --color-quant-up: var(--quant-up);
+  --color-quant-down: var(--quant-down);
+  --color-quant-flat: var(--quant-flat);
+  --color-quant-primary: var(--quant-primary);
 }
 
 :root {
   --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+
+  /* 量化专用色（默认深色金融风，由 ThemeProvider 在运行时覆盖） */
+  --quant-primary: #f59e0b;
+  --quant-up: #ef4444;
+  --quant-down: #22c55e;
+  --quant-flat: #6b7280;
+  --quant-bg: #0a0a0a;
+  --quant-card: #171717;
+  --quant-border: #262626;
+  --quant-font: ui-sans-serif, system-ui, sans-serif;
+
+  /* shadcn 默认（亮色），运行时会被 ThemeProvider 覆盖 */
+  --background: #ffffff;
+  --foreground: #0a0a0a;
+  --card: #ffffff;
+  --card-foreground: #0a0a0a;
+  --popover: #ffffff;
+  --popover-foreground: #0a0a0a;
+  --primary: #f59e0b;
+  --primary-foreground: #0a0a0a;
+  --secondary: #f5f5f5;
+  --secondary-foreground: #171717;
+  --muted: #f5f5f5;
+  --muted-foreground: #6b7280;
+  --accent: #f5f5f5;
+  --accent-foreground: #171717;
+  --destructive: #ef4444;
+  --border: #e5e5e5;
+  --input: #e5e5e5;
+  --ring: #f59e0b;
+  --chart-1: #f59e0b;
+  --chart-2: #ef4444;
+  --chart-3: #22c55e;
+  --chart-4: #06b6d4;
+  --chart-5: #a855f7;
+  --sidebar: #fafafa;
+  --sidebar-foreground: #0a0a0a;
+  --sidebar-primary: #f59e0b;
+  --sidebar-primary-foreground: #0a0a0a;
+  --sidebar-accent: #f5f5f5;
+  --sidebar-accent-foreground: #171717;
+  --sidebar-border: #e5e5e5;
+  --sidebar-ring: #f59e0b;
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --background: #0a0a0a;
+  --foreground: #fafafa;
+  --card: #171717;
+  --card-foreground: #fafafa;
+  --popover: #171717;
+  --popover-foreground: #fafafa;
+  --primary: #f59e0b;
+  --primary-foreground: #0a0a0a;
+  --secondary: #262626;
+  --secondary-foreground: #fafafa;
+  --muted: #262626;
+  --muted-foreground: #a3a3a3;
+  --accent: #262626;
+  --accent-foreground: #fafafa;
+  --destructive: #ef4444;
+  --border: #262626;
+  --input: #262626;
+  --ring: #f59e0b;
+  --chart-1: #f59e0b;
+  --chart-2: #ef4444;
+  --chart-3: #22c55e;
+  --chart-4: #06b6d4;
+  --chart-5: #a855f7;
+  --sidebar: #171717;
+  --sidebar-foreground: #fafafa;
+  --sidebar-primary: #f59e0b;
+  --sidebar-primary-foreground: #0a0a0a;
+  --sidebar-accent: #262626;
+  --sidebar-accent-foreground: #fafafa;
+  --sidebar-border: #262626;
+  --sidebar-ring: #f59e0b;
 }
 
 @layer base {
@@ -118,5 +136,122 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-family: var(--quant-font);
   }
+}
+
+/* ====================== 滚动条样式（金融深色风） ====================== */
+.quant-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--quant-border) transparent;
+}
+.quant-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.quant-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.quant-scroll::-webkit-scrollbar-thumb {
+  background-color: var(--quant-border);
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.quant-scroll::-webkit-scrollbar-thumb:hover {
+  background-color: var(--quant-primary);
+  background-clip: content-box;
+}
+
+/* 全局默认滚动条（暗色） */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--quant-border) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background-color: var(--quant-border);
+  border-radius: 4px;
+}
+
+/* ====================== 表格紧凑样式（高信息密度） ====================== */
+.quant-table {
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
+}
+.quant-table th {
+  font-weight: 500;
+  color: var(--muted-foreground);
+  text-transform: none;
+  letter-spacing: 0;
+  padding: 0.5rem 0.625rem;
+  background: color-mix(in srgb, var(--quant-card) 80%, var(--quant-border));
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.quant-table td {
+  padding: 0.5rem 0.625rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--quant-border) 60%, transparent);
+}
+.quant-table tbody tr:hover {
+  background: color-mix(in srgb, var(--quant-primary) 6%, transparent);
+}
+
+/* ====================== 动画 ====================== */
+
+/* 数字脉冲（涨跌刷新） */
+@keyframes quant-flash-up {
+  0% { background-color: transparent; }
+  30% { background-color: color-mix(in srgb, var(--quant-up) 25%, transparent); }
+  100% { background-color: transparent; }
+}
+@keyframes quant-flash-down {
+  0% { background-color: transparent; }
+  30% { background-color: color-mix(in srgb, var(--quant-down) 25%, transparent); }
+  100% { background-color: transparent; }
+}
+.flash-up { animation: quant-flash-up 0.8s ease-out; }
+.flash-down { animation: quant-flash-down 0.8s ease-out; }
+
+/* 信号流滑入 */
+@keyframes quant-slide-in {
+  from { transform: translateX(-12px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+.slide-in { animation: quant-slide-in 0.35s ease-out; }
+
+/* 状态指示灯脉冲 */
+@keyframes quant-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.15); }
+}
+.status-pulse { animation: quant-pulse 2s ease-in-out infinite; }
+
+/* 行情滚动条目 */
+@keyframes quant-ticker-up {
+  from { transform: translateY(100%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+.ticker-enter { animation: quant-ticker-up 0.4s ease-out; }
+
+/* ====================== 文本颜色工具类 ====================== */
+.text-up { color: var(--quant-up); }
+.text-down { color: var(--quant-down); }
+.text-flat { color: var(--quant-flat); }
+.text-quant-primary { color: var(--quant-primary); }
+.bg-quant-card { background-color: var(--quant-card); }
+.bg-quant-bg { background-color: var(--quant-bg); }
+.border-quant { border-color: var(--quant-border); }
+
+/* 等宽数字（金融数据用） */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
 }
