@@ -23,6 +23,8 @@
 11. [实施步骤（按顺序）](#十一实施步骤按顺序)
 12. [验证方案](#十二验证方案)
 13. [风险与回滚](#十三风险与回滚)
+14. [匹配策略层（MatchStrategy）—— 可增删调参](#十四匹配策略层matchstrategy)
+15. [其他可一并优化的点](#十五其他可一并优化的点)
 
 ---
 
@@ -828,4 +830,552 @@ events    record_      .dispatch(payload,
 
 ---
 
-**文档结束** · 实施时严格按第十一章步骤顺序，每步验证通过再进下一步。能复用的零件全部复用，新增代码控制在 ~400 行内。
+## 十四、匹配策略层（MatchStrategy）
+
+> **背景**：用户审查后指出，监控层目前只有「全局 alert_templates + 策略 YAML 内联 alert_conditions」两套静态规则，**缺一层可增删、可调参、可按策略/股票池匹配的「匹配策略」**。本节补这层。
+>
+> **原则**：能复用现有 `alert_templates` 与策略 YAML 的 `monitor.alert_conditions` 就复用；新增一层 `match_strategies` 配置做绑定与参数化。**本轮不求高精度**，只求跑通「策略→套餐→求值→推送」可调参链路。
+
+### 14.1 为什么需要匹配策略（现状局限）
+
+| 现状 | 局限 |
+|------|------|
+| `monitor_rules.yaml:alert_templates` 全局模板 | 所有股票一视同仁（600519 涨停和 ST 股用同一 9.5% 阈值） |
+| 策略 YAML `monitor.alert_conditions` 已存在（如 `strategy_rzq.yaml:60-82`） | **当前无人读取**（监控引擎缺位的副产品），等于死配置 |
+| 阈值硬编码在 condition 字符串里（`pct_change > 0.03`） | 调参要改 YAML + 重启，无法 UI 实时调 |
+| 无股票池 scope 过滤 | 一只股票可能被多策略选中，触发多套规则刷屏，无法限定范围 |
+| 无 UI/API 增删 match 配置 | 只能编辑文件 |
+
+### 14.2 三层模型升级
+
+```
+L1 原子条件 alert_templates（monitor_rules.yaml，已有，不改）
+    │  纯条件表达式 + 默认参数，不知道给谁用
+    ↓ 被引用
+L2 ★匹配策略 match_strategies（新增，可增删调参）
+    │  绑定 strategy_id + scope（股票池过滤）+ params（参数）+ alerts（套餐引用）
+    │  这是「给哪只股票、用哪套预警、用什么参数」的编排层
+    ↓ 求值时按股票所属策略取对应 match
+L3 监控引擎 MonitorEngine（第四章已设计，求值入口改造）
+    │  on_quote(snap) → snap.strategy_id → MatchRegistry.get(strategy_id)
+    │  → 对 match.alerts 逐条 render params + evaluate → 命中触发
+```
+
+**核心思想**：`alert_templates` 是「零件库」，`match_strategies` 是「装配单」，`MonitorEngine` 是「执行手」。装配单可增删调参，零件库稳定不动。
+
+### 14.3 `match_strategies` 配置 schema（新增 `config/match_strategies.yaml`）
+
+```yaml
+# config/match_strategies.yaml —— 匹配策略编排（可增删调参，热加载）
+# 每个 match 绑定一个选股 strategy_id，定义该策略选出股票用哪套预警、什么参数、什么范围。
+
+match_strategies:
+  # —— 弱转强策略的监控套餐 ——
+  - match_id: rzq_default
+    name: 弱转强默认监控
+    enabled: true
+    strategy_id: rzq                    # 绑定选股策略（对应 strategies 表 strategy_id）
+    scope:                              # 股票池过滤（on_quote 时检查）
+      markets: [SH, SZ, BJ]             # 市场前缀
+      exclude_st: true                  # 排除 ST
+      exclude_suspended: true           # 排除停牌
+      exclude_codes: []                 # 黑名单
+      include_only: []                  # 白名单（非空时只监控这些）
+    alerts:                             # 引用 alert_templates，可覆盖参数与通道
+      - alert_type: rzq_ignite
+        params: { pct_threshold: 0.03 } # 覆盖默认参数
+        channels: [tdx_warn, websocket, feishu]
+        priority: high
+      - alert_type: rzq_fail
+        params: { pct_threshold: -0.03 }
+        channels: [websocket, feishu]
+        priority: high
+      - alert_type: volume_surge
+        params: { vol_ratio_threshold: 2 }   # 弱转强专用量比阈值（比全局 3 更严）
+        channels: [websocket]
+        priority: low
+    debounce_override: 60               # 覆盖全局 alert_debounce_seconds（弱转强 60s）
+    trading_hours_override: null        # null=用全局；可单独配 {morning_start:...}
+
+  # —— 错杀反抽策略的监控套餐 ——
+  - match_id: qzrfc_default
+    name: 强转弱反抽监控
+    enabled: true
+    strategy_id: qzrfc
+    scope:
+      markets: [SH, SZ]
+      exclude_st: true
+    alerts:
+      - alert_type: qzrfc_rebound
+        params: { pct_threshold: 0.02 }
+        channels: [tdx_warn, websocket, feishu]
+        priority: high
+      - alert_type: qzrfc_fail
+        params: { pct_threshold: -0.05 }
+        channels: [websocket, feishu]
+        priority: high
+
+  # —— 通用兜底套餐（不绑定具体策略，所有未匹配策略的股票走这套）——
+  - match_id: _default
+    name: 通用兜底监控
+    enabled: true
+    strategy_id: ""                     # 空字符串 = 兜底
+    scope: {}
+    alerts:
+      - alert_type: limit_up
+        channels: [websocket, feishu]
+        priority: high
+      - alert_type: drop_alert
+        channels: [websocket, feishu]
+        priority: medium
+```
+
+**字段说明**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `match_id` | str | 全局唯一，CRUD 的主键 |
+| `name` | str | 显示名 |
+| `enabled` | bool | false 时该 match 不参与求值 |
+| `strategy_id` | str | 绑定选股策略；空串=兜底套餐 |
+| `scope` | dict | 股票池过滤；空 dict=不过滤 |
+| `alerts[].alert_type` | str | 引用 `alert_templates` 的 key |
+| `alerts[].params` | dict | 覆盖默认参数（render 进 condition） |
+| `alerts[].channels` | list[str] | 覆盖模板通道；不填用模板默认 |
+| `alerts[].priority` | str | high/medium/low |
+| `debounce_override` | int \| null | 覆盖全局 debounce 秒数 |
+| `trading_hours_override` | dict \| null | 覆盖全局交易时段 |
+
+### 14.4 `alert_templates` 参数化改造（最小改动）
+
+现有 `alert_templates` 的 condition 是硬编码字符串，需改成**带占位符的模板**，由 match 的 params 渲染。
+
+**改法**（改 `config/monitor_rules.yaml`，不改表结构）：
+
+```yaml
+# 改前（硬编码）
+alert_templates:
+  rzq_ignite:
+    condition: "pct_change > 0.03"
+    ...
+
+# 改后（参数化，向后兼容）
+alert_templates:
+  rzq_ignite:
+    condition: "pct_change > {pct_threshold}"   # 占位符
+    default_params:                              # 默认参数（match 不覆盖时用这套）
+      pct_threshold: 0.03
+    alert_type: rzq_ignite
+    channels: [tdx_warn, websocket, feishu]
+    priority: high
+    description: 弱转强点火成功
+```
+
+**渲染逻辑**（`RuleSet.evaluate` 内）：
+
+```python
+# 伪代码：condition 渲染
+def _render_condition(template: str, params: dict, defaults: dict) -> str:
+    merged = {**defaults, **params}        # match params 覆盖 defaults
+    try:
+        return template.format(**merged)    # "pct_change > {pct_threshold}" → "pct_change > 0.03"
+    except KeyError as e:
+        logger.warning("condition 渲染缺参 %s, 用默认", e)
+        return template.format(**defaults)  # 退回默认
+```
+
+**向后兼容**：老的无占位符 condition（如 `volume_ratio > 3`）`.format()` 不会报错（无 `{}` 原样返回），所以现有模板不用全改，只改需要调参的几条。
+
+### 14.5 求值流程改造（`on_quote` 内）
+
+**改前**（第四章 §4.3）：
+
+```python
+def on_quote(self, snap):
+    rules = RuleSet.load()           # 全局所有 alert_templates
+    hits = rules.evaluate(snap)      # 全局求值
+    for rule in hits:
+        ...
+```
+
+**改后**（按策略匹配）：
+
+```python
+def on_quote(self, snap):
+    code = snap["code"]
+    strategy_id = snap.get("strategy_id", "")
+
+    # 1. 取该股票适用的所有 match（按 strategy_id + 兜底）
+    matches = MatchRegistry.get_applicable(strategy_id, code)
+    #   - 先找 strategy_id 精确匹配的 enabled match
+    #   - 再加 _default 兜底 match
+    #   - scope 过滤：code 不在 match.scope 内则跳过该 match
+
+    # 2. 对每个 match 的 alerts 逐条求值
+    for match in matches:
+        if not self._in_scope(code, match.scope):
+            continue
+        for alert_ref in match.alerts:
+            template = AlertTemplates.get(alert_ref.alert_type)
+            condition = self._render_condition(
+                template.condition, alert_ref.params, template.default_params
+            )
+            if ExpressionEvaluator().evaluate(condition, self._snap_vars(snap)):
+                if self._is_debounced(code, alert_ref.alert_type, match.debounce_override):
+                    continue
+                self._fire(match, alert_ref, template, snap)
+                self._mark_debounce(code, alert_ref.alert_type)
+```
+
+**关键点**：
+- `snap.strategy_id` 由订阅注入时带上（选股结果 upsert_subscription 时写入，见 §15.7）
+- `MatchRegistry.get_applicable` 返回 `[精确匹配 match, _default match]`，多策略并集
+- scope 过滤在求值前，避免无效求值
+
+### 14.6 股票池 scope 过滤（`_in_scope`）
+
+```python
+# 伪代码
+def _in_scope(self, code: str, scope: dict) -> bool:
+    if not scope:
+        return True                      # 空 scope = 不过滤
+    # 白名单优先
+    include_only = scope.get("include_only") or []
+    if include_only and code not in set(include_only):
+        return False
+    # 市场前缀
+    markets = scope.get("markets") or []
+    if markets:
+        if not any(code.startswith(m + ".") or code.startswith(m) for m in markets):
+            return False
+    # 黑名单
+    if code in set(scope.get("exclude_codes") or []):
+        return False
+    # ST / 停牌：需 snap 带 is_st / is_suspended 字段（Mock 可缺省 False）
+    # （本轮不求高精度，ST 列表可后续从 cleaning_rules 注入）
+    return True
+```
+
+**本轮不求高精度**：ST/停牌判断暂用 snap 字段兜底（缺省 False），不做精确 ST 名单匹配。
+
+### 14.7 增删调参 API（新增路由 `engine/api/routes/match_strategy.py`）
+
+| 方法 | 路径 | 功能 |
+|------|------|------|
+| `GET` | `/api/monitor/match-strategies` | 列出所有 match（含 enabled 状态） |
+| `POST` | `/api/monitor/match-strategies` | 新增一个 match（写 YAML） |
+| `PUT` | `/api/monitor/match-strategies/{match_id}` | 改参/改 scope/改 alerts |
+| `DELETE` | `/api/monitor/match-strategies/{match_id}` | 删除 |
+| `POST` | `/api/monitor/match-strategies/reload` | 热加载（调 `MatchRegistry.invalidate()`） |
+| `POST` | `/api/monitor/match-strategies/{match_id}/test` | 用一只股票快照试跑，返回会命中哪些 alert（调参预览） |
+
+**持久化选型**：
+
+| 选项 | 优点 | 缺点 | 决策 |
+|------|------|------|------|
+| 纯 YAML（`config/match_strategies.yaml`） | 与现有配置体系一致，可 git 版本 | 并发写需加锁 | ✅ **本轮选** |
+| DuckDB 新表 `match_strategies` | 增删 API 简单 | 引入表结构变更，与 YAML 体系割裂 | ❌ 本轮不做 |
+
+**写 YAML 的并发安全**：`MatchRegistry.update()` 内加 `threading.Lock`，写时先 dump 临时文件再原子 rename，避免半写状态被读。
+
+### 14.8 多策略并发去重
+
+一只股票被多个策略选中（如 600519 同时被 rzq 和 qzrfc 选出）时：
+
+1. `MatchRegistry.get_applicable` 返回所有命中策略的 match 列表（并集）
+2. 对每个 match 的 alerts 逐条求值
+3. **同 alert_type 跨 match 命中** → debounce 去重（同 `(code, alert_type)` 在窗口内只推一次）
+4. 推送 payload 的 `extra.match_ids` 标注所有命中的 match_id，前端可展示「弱转强+反抽 双策略命中」
+
+**debounce 键不变**：仍是 `(stock_code, alert_type)`，跨 match 共享，避免重复推。
+
+### 14.9 不需高精度的取舍（本轮明确不做）
+
+| 不做 | 原因 | 后续 |
+|------|------|------|
+| ML 信号打分 | 本轮只做规则匹配，不上模型 | P2 |
+| 回测拟合最优参数 | 用户明确「不需高精度」 | §15.4 提供回测 API，参数人工调 |
+| 跨周期共振（日线+分钟线） | 复杂度高，本轮单快照求值 | P2 |
+| ST 精确名单匹配 | 需接入 cleaning_rules 的 ST 列表 | P1 |
+| 参数自动寻优 | 同 ML，不做 | P2 |
+
+**本轮目标**：跑通「策略→match 套餐→参数渲染→求值→推送」，参数能 UI 调，规则能增删，**精度够用即可**。
+
+### 14.10 文件清单增量（在第十章基础上）
+
+| 文件 | 类型 | 行数估算 | 职责 |
+|------|------|----------|------|
+| `config/match_strategies.yaml` | 新增配置 | ~80 | 3 个示例 match（rzq/qzrfc/_default） |
+| `engine/monitor/match_registry.py` | 新增 | ~120 | MatchRegistry：加载/求值/scope/CRUD 持久化 |
+| `engine/api/routes/match_strategy.py` | 新增 | ~100 | 6 个 CRUD + reload + test 路由 |
+| `config/monitor_rules.yaml` | 改 | +15 | alert_templates 加 default_params + 占位符 |
+| `engine/monitor/engine.py`（第四章） | 改 | +30 | on_quote 改走 MatchRegistry |
+| `engine/api/main.py` | 改 | +2 | 注册 match_strategy 路由 |
+
+**增量约 +350 行**，与第四章合计 ~700 行，仍可控。
+
+### 14.11 实施步骤（在十一章基础上追加）
+
+- **Step 7**：改 `config/monitor_rules.yaml`，给需调参的 alert_templates 加 `default_params` + 占位符 condition（向后兼容）
+- **Step 8**：新建 `config/match_strategies.yaml`（3 个示例 match）
+- **Step 9**：实现 `engine/monitor/match_registry.py`（MatchRegistry + scope + render + CRUD 持久化）
+- **Step 10**：改 `engine/monitor/engine.py` 的 `on_quote`，走 MatchRegistry
+- **Step 11**：实现 `engine/api/routes/match_strategy.py`（6 个路由）
+- **Step 12**：注册路由 + reload 联动（`MatchRegistry.invalidate()` 挂到 config reload hook）
+- **Step 13**：端到端验证（调参 → test API 预览 → 实盘命中）
+
+---
+
+## 十五、其他可一并优化的点
+
+> 用户问「还有没有其它的可以一并加入进去优化的」。以下按优先级排列，**P0 与匹配策略层一起做，P1/P2 后续轮次**。
+
+### 15.1 监控股票池动态管理 API（P0，与匹配策略一起做）
+
+**现状**：`_get_monitor_codes` 只从 `EngineState.list_subscriptions()` / `selection_results` 兜底取，**无主动加入/移除/按板块批量**的 API。用户想临时盯一只股票，只能等选股跑出来。
+
+**补**：
+
+| 方法 | 路径 | 功能 |
+|------|------|------|
+| `POST` | `/api/monitor/watchlist` | 批量加入监控 `{codes, strategy_id, subscriber}` |
+| `DELETE` | `/api/monitor/watchlist/{code}` | 移除单只 |
+| `POST` | `/api/monitor/watchlist/by-sector/{sector_code}` | 按板块批量加入（调 `SectorManager.get_stocks`） |
+| `GET` | `/api/monitor/watchlist` | 列出当前监控池（含 strategy_id 归属） |
+
+**实现**：复用 `EngineState.upsert_subscription` / `remove_subscription` + 写 `monitor_subscriptions` 表。`strategy_id` 必填（决定走哪个 match 套餐），临时盯盘可填 `_manual`。
+
+### 15.2 预警聚合推送（P1）
+
+**现状**：`_fire` 每命中一条立即推一条。开盘涨停潮时 8 只涨停 = 8 条飞书消息，刷屏。
+
+**补**：同类预警短时间多发 → 聚合成一条摘要。
+
+```python
+# 伪代码：_fire 前检查聚合窗口
+def _fire(self, match, alert_ref, template, snap):
+    policy = self._dispatch_policy(alert_ref.priority)
+    if policy == "immediate":
+        self._dispatch_now(...)              # high 立即推（当前行为）
+    elif policy == "batch_5min":
+        self._aggregator.add(alert_ref.alert_type, snap)   # medium 攒批
+        # 攒够 5 条 或 5 分钟到 → 推一条摘要
+    elif policy == "log_only":
+        self._insert_signal_event(...)       # low 只落库，前端轮询展示
+```
+
+**聚合消息格式**：「⚡ 近 5 分钟涨停 8 只：600519(+10.01%) / 000001(+9.98%) / ...」
+
+**配置**（`monitor_rules.yaml` 新增）：
+
+```yaml
+monitor:
+  alert_dispatch_policy:
+    high: immediate          # 立即推
+    medium: batch_5min       # 5 分钟聚合
+    low: log_only            # 只落库
+  batch_window_seconds: 300
+  batch_max_count: 10        # 攒够 10 条提前推
+```
+
+### 15.3 预警分级与值班（P1，与 15.2 配套）
+
+**现状**：所有 priority 都立即推，无值班概念。
+
+**补**：
+- `high` → 立即推全部启用通道（当前行为）
+- `medium` → 攒批摘要推（§15.2）
+- `low` → 只落库，前端轮询 `/api/signals` 展示
+
+**值班时段**：非交易时段的 high 预警可配「静默到次日开盘」（避免半夜测试数据刷屏）。配置：
+
+```yaml
+monitor:
+  silent_hours:              # 静默时段（high 也只落库不推）
+    start: "15:30"
+    end: "09:25"
+```
+
+### 15.4 预警回测验证（P2）
+
+**目的**：调参有依据。改了 `pct_threshold` 从 0.03 到 0.05，到底命中率变多少？
+
+**补**：
+
+| 方法 | 路径 | 功能 |
+|------|------|------|
+| `POST` | `/api/monitor/backtest` | `{match_id, start_date, end_date}` → 用 `kline_cache` 回放，统计命中 |
+
+**输出**：
+
+```json
+{
+  "match_id": "rzq_default",
+  "period": "2026-05-01 ~ 2026-06-17",
+  "alerts": {
+    "rzq_ignite": {"hits": 142, "unique_stocks": 68, "avg_next_day_return": 1.2},
+    "rzq_fail": {"hits": 89, "unique_stocks": 52, "avg_next_day_return": -2.1}
+  }
+}
+```
+
+**实现**：从 `kline_cache` 取历史日线，逐日构造 snap，跑 `MatchRegistry.evaluate`，统计命中。**本轮不求高精度**，只做日线级回放（分钟线回放留后续）。
+
+### 15.5 信号统计与归因日报（P2）
+
+**现状**：`/api/monitor/status` 只返回今日总计数，无按策略/类型归因。
+
+**补**：
+
+| 方法 | 路径 | 功能 |
+|------|------|------|
+| `GET` | `/api/monitor/daily-report?date=2026-06-17` | 按策略+类型二维统计 |
+
+**输出**：
+
+```json
+{
+  "date": "2026-06-17",
+  "total_signals": 56,
+  "by_strategy": {
+    "rzq": {"rzq_ignite": 12, "rzq_fail": 3, "volume_surge": 8},
+    "qzrfc": {"qzrfc_rebound": 5, "qzrfc_fail": 2}
+  },
+  "top_hit_stocks": [{"code": "600519.SH", "count": 4}]
+}
+```
+
+**前端**：Dashboard 加「监控日报」卡片（复用现有 StatCard）。
+
+### 15.6 引擎健康度监控（P1）
+
+**现状**：`/api/monitor/status` 只有人数/信号数，无引擎自身健康（订阅存活/行情延迟/求值耗时/异常计数）。
+
+**补**：`MonitorEngine` 上报健康指标到 `EngineState`：
+
+```python
+# EngineState 新增
+self._health = {
+    "subscribe_alive": True,          # subscribe_hq 是否还活着
+    "last_quote_ts": 0,               # 最近一次 on_quote 时间戳
+    "quote_lag_seconds": 0,           # 行情延迟（now - last_quote_ts）
+    "eval_count": 0,                  # 累计求值次数
+    "eval_avg_ms": 0,                 # 平均求值耗时
+    "error_count": 0,                 # 累计异常
+    "last_error": "",
+}
+```
+
+**新路由**：`GET /api/monitor/health` → 返回上述指标。前端「引擎状态」卡片增强（行情延迟 > 30s 标红）。
+
+**告警**：`quote_lag_seconds > 60` 时自动推一条 `system` 信号到飞书（引擎失联自检）。
+
+### 15.7 冷启动自动注入订阅（P0，与匹配策略一起做）
+
+**现状**：选股 run 完成后，结果落 `selection_results` 表，但**不主动注入 `monitor_subscriptions`**。监控引擎靠 `_fallback_top_picks` 被动兜底（且不带 strategy_id）。
+
+**补**：选股 pipeline 完成后（`engine/pipeline/runner.py` 的 export 步骤后）主动调：
+
+```python
+# 伪代码：选股完成后自动注入订阅
+for pick in results:
+    state.upsert_subscription(
+        pick.stock_code,
+        strategy_id=strategy_id,        # ★ 带 strategy_id，匹配策略靠它
+        subscriber="pipeline_auto",
+        batch_no=(i // 50) + 1,
+    )
+# 同时写 monitor_subscriptions 表（持久化）
+```
+
+**好处**：
+- 监控引擎启动即有股票可盯，不靠 fallback
+- `snap.strategy_id` 正确填充，匹配策略能按策略取套餐
+- 跨重启订阅不丢（表持久化）
+
+### 15.8 跨日清理调度（P0，与匹配策略一起做）
+
+**现状**：
+- `EngineState.reset_daily()` 存在但**无人调**（注释写「由调度器调用，本阶段手动触发」）
+- `MonitorEngine._debounce` dict 跨日不清会内存泄漏（§8.3 设计了清理但未实现调度）
+- `monitor_subscriptions` 表 `active=false` 的记录不归档
+
+**补**：`MonitorEngine` 主循环检测跨日，触发清理：
+
+```python
+# 伪代码：主循环内
+def _run(self):
+    last_date = datetime.now().date()
+    while not self._stop_event.is_set():
+        now_date = datetime.now().date()
+        if now_date != last_date:
+            self._on_new_day()           # 跨日清理
+            last_date = now_date
+        ...
+
+def _on_new_day(self):
+    EngineState().reset_daily()           # 信号计数清零
+    self._cleanup_debounce()              # 清超过 1 天的 debounce key
+    # monitor_subscriptions: 前一天的 active=false 归档（可选）
+    logger.info("跨日清理完成")
+```
+
+**时段**：00:00 触发（Mock 模式也跑，无副作用）。
+
+### 15.9 优先级总结
+
+| 优先级 | 项 | 与本轮关系 |
+|--------|-----|-----------|
+| **P0** | §14 匹配策略层 + §15.1 股票池管理 + §15.7 冷启动注入 + §15.8 跨日清理 | **本轮一起做**（匹配策略依赖 strategy_id 注入 + 跨日清理） |
+| **P1** | §15.2 聚合推送 + §15.3 分级值班 + §15.6 健康度 | 下一轮（监控引擎跑稳后做减噪与自检） |
+| **P2** | §15.4 回测 + §15.5 日报 | 后续（数据积累后做归因与调参依据） |
+
+**本轮总代码量**：第四章 ~400 行 + 第十四章 ~350 行 + §15.1/15.7/15.8 ~150 行 = **~900 行**，仍属可控范围（用户明确「不需高精度」，MVP 级别）。
+
+---
+
+## 附录 B：匹配策略层与现有架构的对齐
+
+### B.1 不破坏现有功能
+
+- 选股策略 YAML 的 `monitor.alert_conditions`（如 `strategy_rzq.yaml:60-82`）→ **保留**，作为该策略的默认 match 套餐的来源（首次启动时若 `match_strategies.yaml` 无对应 strategy_id，自动从策略 YAML 的 alert_conditions 生成一个 match）
+- `monitor_rules.yaml:alert_templates` → 保留为零件库，加 `default_params` 向后兼容
+- 前端「通道设置」「信号中心」→ 不动，`channels.dispatch` 接口不变
+
+### B.2 数据流（补全匹配策略后）
+
+```
+选股 pipeline 完成
+    │ 主动注入订阅（§15.7）带 strategy_id
+    ▼
+monitor_subscriptions 表 + EngineState
+    │
+    ▼
+MonitorEngine.on_quote(snap)  ← snap.strategy_id 来自订阅
+    │
+    ▼
+MatchRegistry.get_applicable(strategy_id, code)
+    │  返回 [精确 match, _default match]，scope 过滤
+    ▼
+对 match.alerts 逐条 render params + evaluate
+    │  命中
+    ▼
+_fire(match, alert_ref, template, snap)
+    │
+    ├── 写 signal_events（带 match_id）
+    ├── EngineState.record_signal + 健康度更新（§15.6）
+    └── ChannelRegistry.dispatch（按 alert_ref.channels）
+```
+
+### B.3 与「不需高精度」的取舍对应
+
+| 用户要求 | 本轮做法 |
+|----------|----------|
+| 可增删 | §14.7 CRUD API |
+| 可调参 | §14.4 参数化 + §14.7 PUT 改参 |
+| 不需高精度 | §14.6 scope 用市场前缀兜底，ST 名单 P1；§14.9 不做 ML/寻优 |
+| 一并优化 | §15.1/15.7/15.8 一起做（P0），§15.2-15.6 列出供后续 |
+
+---
+
+**文档结束** · 实施时严格按第十一章 + 第十四章 §14.11 步骤顺序，每步验证通过再进下一步。能复用的零件全部复用，新增代码控制在 ~900 行内（含匹配策略层）。**本轮不求高精度，只求可增删调参的匹配策略链路跑通**。

@@ -10125,3 +10125,73 @@ Stage Summary:
   3. 实施后更新 PROJECT_HANDOVER.md 把「WebSocket 通道未部署」「EngineState 不持久化」从已知限制移除
   4. 后续可考虑 WebSocket 推送前端（替代 HTTP 轮询，实时性更好）
   5. 后续可考虑跨进程 EngineState 持久化（Redis / DuckDB 心跳表）
+
+---
+Task ID: R8-监控引擎方案-匹配策略增补
+Agent: main
+Task: 在监控引擎方案基础上加入「匹配策略」层（可增删调参，不需高精度）+ 思考其他可一并优化的点。仍只写方案，不写业务代码。
+
+Work Log:
+- 读取上一轮 R8-监控引擎方案 worklog，确认 MONITOR_ENGINE_PLAN.md 已存在（~832 行，覆盖循环线程/行情获取/求值链路/trading_hours/debounce 五要点）
+- 用户本轮新要求：监控层要有「匹配策略」，可增删调参，不需高精度；并思考其他可一并优化的点
+- 核实现有相关代码确认匹配策略的雏形与缺口：
+  * strategies/strategy_rzq.yaml:60-82 已有 monitor.alert_conditions 字段（每策略一套预警条件）——这是匹配策略雏形，但当前无人读取（监控引擎缺位的副产品），等于死配置
+  * config/monitor_rules.yaml:alert_templates 是全局模板，所有股票一视同仁（600519 涨停和 ST 股用同一 9.5% 阈值）
+  * config/duckdb_schema.sql 已有 8 张表（signal_events/monitor_subscriptions/strategies 等），无 match_strategies 表
+  * engine/channels/registry.py dispatch(payload, channels) 接口稳定可复用
+  * engine/api/state.py reset_daily() 存在但无人调（注释写「由调度器调用，本阶段手动触发」）
+- 设计匹配策略层三层模型：
+  * L1 alert_templates（零件库，已有，加 default_params 参数化，向后兼容）
+  * L2 ★match_strategies（装配单，新增 config/match_strategies.yaml，绑定 strategy_id+scope+params+alerts）
+  * L3 MonitorEngine（执行手，on_quote 改走 MatchRegistry.get_applicable）
+- 设计 match_strategies 配置 schema：match_id/strategy_id/scope(markets+exclude_st+exclude_codes+include_only)/alerts(alert_type+params+channels+priority)/debounce_override/trading_hours_override
+- 设计 alert_templates 参数化改造：condition 改带占位符 "pct_change > {pct_threshold}" + default_params 兜底，.format() 渲染，老模板无占位符原样返回（向后兼容）
+- 设计 on_quote 求值流程改造：snap.strategy_id（订阅注入）→ MatchRegistry.get_applicable 返回 [精确 match, _default 兜底] → scope 过滤 → 逐条 render params + evaluate → debounce 去重 → _fire
+- 设计 scope 过滤：市场前缀 + 黑白名单，ST/停牌本轮用 snap 字段兜底（不求高精度，ST 精确名单留 P1）
+- 设计增删调参 API（6 个路由）：GET/POST/PUT/DELETE /api/monitor/match-strategies + reload + test（调参预览）
+- 持久化选型：纯 YAML（与现有配置体系一致，可 git 版本）优于 DuckDB 新表（避免表结构变更与体系割裂）；写时加 Lock + 临时文件原子 rename
+- 设计多策略并发去重：一股票被多策略选中 → match 并集 → 同 (code, alert_type) debounce 跨 match 共享 → payload.extra.match_ids 标注所有命中
+- 思考其他可一并优化的点（按 P0/P1/P2 分级）：
+  * P0（与匹配策略一起做）：§15.1 监控股票池动态管理 API（watchlist CRUD + 按板块批量加入）、§15.7 冷启动自动注入订阅（选股 pipeline 完成主动 upsert_subscription 带 strategy_id，告别 fallback 被动兜底）、§15.8 跨日清理调度（主循环检测跨日触发 reset_daily + 清 debounce + 归档订阅）
+  * P1（下一轮）：§15.2 预警聚合推送（同类多发攒批摘要，避免涨停潮刷屏）、§15.3 预警分级值班（high 立即/medium 攒批/low 只落库 + silent_hours 静默时段）、§15.6 引擎健康度监控（subscribe_alive/quote_lag/eval_avg_ms/error_count + /api/monitor/health + 失联自检告警）
+  * P2（后续）：§15.4 预警回测验证（kline_cache 回放统计命中率/误报率，调参依据）、§15.5 信号统计归因日报（按 strategy_id+alert_type 二维统计 + top_hit_stocks）
+- 更新 docs/MONITOR_ENGINE_PLAN.md：
+  * 目录新增 14、15 章
+  * 新增第十四章「匹配策略层 MatchStrategy」11 小节（14.1 为什么需要 ~ 14.11 实施步骤）+ 附录 B（与现有架构对齐）
+  * 新增第十五章「其他可一并优化的点」9 小节（15.1~15.9 优先级总结）
+  * 文件清单增量：+config/match_strategies.yaml(~80) +engine/monitor/match_registry.py(~120) +engine/api/routes/match_strategy.py(~100) +改 monitor_rules.yaml(+15) +改 engine.py(+30) +改 main.py(+2) = ~350 行
+  * 本轮总代码量估算：第四章 ~400 + 第十四章 ~350 + §15.1/15.7/15.8 ~150 = ~900 行（MVP 级别，用户明确不需高精度）
+  * 明确「不写代码」原则延续：方案含 schema + 伪代码 + 流程，实施时照此实现
+  * 明确不需高精度取舍：不做 ML/回测拟合/跨周期共振/ST 精确名单/参数自动寻优（§14.9）
+
+Stage Summary:
+- 已完成:
+  1. 核实匹配策略雏形已存在于策略 YAML（monitor.alert_conditions）但无人读取，确认用户判断
+  2. 在 MONITOR_ENGINE_PLAN.md 增补第十四章「匹配策略层 MatchStrategy」：
+     - 三层模型（alert_templates 零件库 → match_strategies 装配单 → MonitorEngine 执行手）
+     - match_strategies.yaml 配置 schema（3 个示例：rzq_default/qzrfc_default/_default 兜底）
+     - alert_templates 参数化改造（占位符 + default_params，向后兼容）
+     - on_quote 求值流程改造（按 strategy_id 取 match + scope 过滤 + render params + evaluate）
+     - 增删调参 API 6 路由 + 持久化选型（纯 YAML + Lock + 原子 rename）
+     - 多策略并发去重（match 并集 + debounce 跨 match 共享 + match_ids 标注）
+     - 不需高精度取舍（§14.9 明确不做 ML/寻优/跨周期/ST 精确名单）
+  3. 在 MONITOR_ENGINE_PLAN.md 增补第十五章「其他可一并优化的点」9 项，按 P0/P1/P2 分级：
+     - P0 一起做：股票池管理 API + 冷启动自动注入订阅 + 跨日清理调度
+     - P1 下一轮：聚合推送 + 分级值班 + 健康度监控
+     - P2 后续：回测验证 + 归因日报
+  4. 更新目录 + 附录 B（匹配策略层与现有架构对齐，不破坏现有功能）
+  5. 明确「不写业务代码」原则延续，方案含 schema + 伪代码，待实施 AI 接手
+- 文件变更:
+  修改 (1 个文件):
+    docs/MONITOR_ENGINE_PLAN.md   # ~832 行 → ~1383 行，新增第十四章 + 第十五章 + 附录 B
+- 未解决问题:
+  1. 方案仍未实施（用户要求「能不写代码就不写」，方案就绪待实施 AI 接手）
+  2. match_strategies 与策略 YAML alert_conditions 的关系：方案 B.1 建议首次启动从策略 YAML 自动生成 match（若 match_strategies.yaml 无对应 strategy_id），该自动生成逻辑待实施时确认
+  3. ST 精确名单匹配留 P1（本轮 scope 用市场前缀兜底，需接入 cleaning_rules 的 ST 列表）
+  4. 预警回测（§15.4）与归因日报（§15.5）留 P2，需 kline_cache 数据积累
+- 下一阶段建议:
+  1. 实施 MONITOR_ENGINE_PLAN.md 第四章（监控引擎主体）+ 第十四章（匹配策略层）+ §15.1/15.7/15.8（P0 优化项），按 §14.11 Step 7-13 顺序
+  2. 实施后更新 ARCHITECTURE.md 补 engine/monitor/ + match_strategies 章节
+  3. 实施后更新 PROJECT_HANDOVER.md 把「EngineState 不持久化」「监控只读」从已知限制移除
+  4. 前端可加「匹配策略管理」页（CRUD match + 调参 + test 预览），复用现有 StrategyManager 组件模式
+  5. P1 项（聚合推送/分级值班/健康度）待监控引擎跑稳后做减噪与自检
