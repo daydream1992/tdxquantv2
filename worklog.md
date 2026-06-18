@@ -10195,3 +10195,57 @@ Stage Summary:
   3. 实施后更新 PROJECT_HANDOVER.md 把「EngineState 不持久化」「监控只读」从已知限制移除
   4. 前端可加「匹配策略管理」页（CRUD match + 调参 + test 预览），复用现有 StrategyManager 组件模式
   5. P1 项（聚合推送/分级值班/健康度）待监控引擎跑稳后做减噪与自检
+
+---
+Task ID: R8-监控引擎方案-实施提示词与下载路由
+Agent: main
+Task: 提供方案文档下载链接 + 把两次追加写成给实施 AI 的开发提示词
+
+Work Log:
+- 用户要求两件事：1) 提供 docs/MONITOR_ENGINE_PLAN.md 下载链接；2) 把两次追加（监控引擎 + 匹配策略 + P0优化）写成提示词给 AI 按指引开发
+- 核实 MONITOR_ENGINE_PLAN.md 最终结构：1381 行，一~十五章 + 附录 A/B，覆盖监控引擎主体 + 匹配策略层 + 其他优化点
+- dev server 运行正常（/api/signals /api/monitor 等路由 200）
+- 编写 docs/MONITOR_ENGINE_IMPLEMENTATION_PROMPT.md（实施提示词，~28KB / ~430 行）：
+  * §0 元指令（7 条最高优先级：先读后写/能复用就不重写/不求高精度/代码量控制~900行/每步验证/工作日志/不破坏现有）
+  * §1 任务背景（项目现状 + 监控缺口表 + 本任务3块目标 + 非目标8项）
+  * §2 实施步骤总览（16 步表格，Step 1-6 引擎主体 / Step 7-13 匹配策略 / Step 14-16 P0优化）
+  * §3 关键设计要点（3.1 引擎主体架构+伪代码+变量映射+SQL / 3.2 匹配策略三层模型+schema+参数化+on_quote改造+scope+API+去重 / 3.3 P0三项）
+  * §4 文件清单（新增6 + 修改5 + watchlist路由 + 禁止改动8类明确列出）
+  * §5 验证方案（每步的 curl/python 验证命令，含防抖验证 SQL）
+  * §6 硬约束与红线（必须7条 + 禁止7条 + 代码风格）
+  * §7 工作日志要求（Task ID 模板 + Work Log + Stage Summary 格式）
+  * §8 交付物清单
+  * §9 风险与回滚（完全/部分/灰度三档）
+  * §10 实施前自检清单（12 项打勾再开工）
+- 新增下载路由 src/app/api/docs/[filename]/route.ts：
+  * 白名单限制仅 2 个文件（MONITOR_ENGINE_PLAN.md / MONITOR_ENGINE_IMPLEMENTATION_PROMPT.md），其他 404
+  * Content-Type: text/markdown; charset=utf-8
+  * Content-Disposition: attachment; filename="..." 触发浏览器下载
+  * Cache-Control: no-store
+- 验证下载路由：
+  * curl MONITOR_ENGINE_PLAN.md → HTTP 200, 53515 bytes, text/markdown
+  * curl MONITOR_ENGINE_IMPLEMENTATION_PROMPT.md → HTTP 200, 28299 bytes
+  * curl secret.md（非白名单）→ HTTP 404 + 错误提示
+- lint 通过（eslint 无错误输出）
+
+Stage Summary:
+- 已完成:
+  1. 编写 docs/MONITOR_ENGINE_IMPLEMENTATION_PROMPT.md（~430 行实施提示词），自包含、可整体喂给全新会话 AI 实施
+  2. 新增 src/app/api/docs/[filename]/route.ts 下载路由，白名单 2 文件，支持浏览器直接下载
+  3. 验证两个文件均可通过 http://<preview>/api/docs/<filename> 下载（200 + 正确 Content-Type/Disposition）
+  4. lint 通过，dev server 正常
+- 文件变更:
+  新增 (2 个文件):
+    docs/MONITOR_ENGINE_IMPLEMENTATION_PROMPT.md   # ~430 行，实施提示词
+    src/app/api/docs/[filename]/route.ts           # 下载路由（白名单2文件）
+- 下载地址（用户通过 Preview Panel 访问）:
+  * 方案文档：/api/docs/MONITOR_ENGINE_PLAN.md
+  * 实施提示词：/api/docs/MONITOR_ENGINE_IMPLEMENTATION_PROMPT.md
+- 未解决问题:
+  1. 方案与提示词均未实施（用户要求「能不写代码就不写」，本轮只产出方案+提示词+下载路由）
+  2. 沙箱环境无法提供本地文件直接 URL，用 Next.js API 路由 + Preview Panel 替代
+- 下一阶段建议:
+  1. 用户审阅实施提示词，确认无误后整体喂给实施 AI（新会话）
+  2. 实施 AI 按 PROMPT §2 的 16 步顺序开发，每步验证
+  3. 实施完成后更新 ARCHITECTURE.md / PROJECT_HANDOVER.md（PROMPT §8 交付物）
+  4. P1 项（聚合推送/分级值班/健康度）待监控引擎跑稳后下一轮
