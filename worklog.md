@@ -10059,3 +10059,69 @@ Stage Summary:
   6. 通知中心 localStorage 持久化
   7. WebSocket 服务部署（:3003）
   8. 回测 + K 线接真实数据
+
+---
+Task ID: R8-监控引擎方案
+Agent: main
+Task: 出监控循环引擎实现方案（不写代码，只写方案给实施 AI）
+
+Work Log:
+- 用户指出：WebSocket 通道未部署 + state.py 注释自认不持久化 = 实时推送链路是占位
+- 用户判断：监控只有「配置层 + 求值器 + 只读 API」三块零件，缺主动监控循环引擎
+- 核实代码确认用户判断，且缺口比描述更大：
+  * engine/monitor/ 目录不存在（ARCHITECTURE.md 声称的 L2 监控层是空的）
+  * engine/messaging/ 目录不存在（消息总线层也空）
+  * 无人调用 subscribe_hq（Mock 的 _push_loop 线程永不启动）
+  * 无人调 state.record_signal()（today_signals 永远 0，靠 DuckDB 兜底）
+  * monitor_rules.yaml 的 alert_templates 是纯文档（无代码求值执行）
+  * signal_events 表只读不写（signals.py 只查不 INSERT）
+  * 唯一的 dispatch 调用是 strategies.py:594（选股信号推送，非实时监控预警）
+- 已有零件盘点（可复用）：
+  * config/monitor_rules.yaml 完整（alert_templates + trading_hours + debounce + poll_interval）
+  * engine/expression/evaluator.py 可用（simpleeval + clip 白名单）
+  * engine/channels/registry.py dispatch 可用
+  * MockAdapter/RealAdapter subscribe_hq 接口就绪
+  * signal_events 表已建（config/duckdb_schema.sql）
+  * EngineState.record_signal() 就绪（无人调）
+- 编写 docs/MONITOR_ENGINE_PLAN.md（~580 行方案文档）：
+  * 现状缺口分析（已有零件 vs 缺口）
+  * 设计目标与非目标（明确不做什么）
+  * 架构总览（lifespan 启动 → daemon 线程 → 行情获取 → 求值 → 落库+计数+推送）
+  * 核心组件设计（MonitorEngine + RuleSet 伪代码接口）
+  * 行情获取：subscribe_hq vs 轮询决策（Mock 用 subscribe，Real 优先 subscribe 降级轮询）
+  * 预警求值→落库→推送链路（_fire 完整流程 + INSERT SQL + 变量映射）
+  * trading_hours 时段控制（Mock 强制 True，Real 严格执行 + 非交易时段 sleep 30s）
+  * debounce 防抖（(code, alert_type) 键 + 30s 窗口 + 跨日清理）
+  * 循环线程挂载点（lifespan 第 5 步 + daemon Thread + 异常隔离）
+  * 文件清单（新增 3 文件 ~355 行 + 改 2 文件 ~18 行 = ~373 行）
+  * 实施步骤（6 步顺序 + 每步验证）
+  * 验证方案（单元 + 引擎 + 集成 + 时段 + 防抖 5 层）
+  * 风险与回滚（完全回滚 + 部分回滚 + 灰度开关 monitor.enabled）
+
+Stage Summary:
+- 已完成:
+  1. 核实用户判断正确，且缺口比描述更大（engine/monitor/ + engine/messaging/ 目录都不存在）
+  2. 输出 docs/MONITOR_ENGINE_PLAN.md 完整方案（~580 行），覆盖用户要求的全部维度：
+     - 循环线程挂载点（lifespan 第 5 步 + daemon Thread）
+     - 行情轮询 vs subscribe_hq（Mock 用 subscribe，Real 优先 subscribe 降级轮询）
+     - 预警求值 → record_signal + 写 signal_events + 推 channels（_fire 完整链路）
+     - trading_hours 时段控制（Mock 强制 True，Real 严格 + 非交易 sleep 30s）
+     - debounce 防抖（(code, alert_type) 键 + 30s 窗口 + 跨日清理）
+  3. 明确「不写代码」原则：方案含伪代码接口，实施时照此实现
+  4. 明确复用现有零件：不改 monitor.py/state.py/channels/adapter/evaluator/rules.yaml/schema
+  5. 明确改动范围：新增 engine/monitor/ 3 文件 + 改 main.py/loader.py 2 文件，~373 行
+  6. 给出 6 步实施顺序 + 5 层验证方案 + 回滚策略
+- 文件变更:
+  新增 (1 个文件):
+    docs/MONITOR_ENGINE_PLAN.md   # ~580 行，监控引擎实现方案
+- 未解决问题:
+  1. 方案未实施（用户要求「能不写代码就不写」，方案就绪待实施 AI 接手）
+  2. MonitorEngine 与 ConfigLoader reload 的联动待确认（loader 是否有 reload hook，若无则 RuleSet 用 mtime 自检）
+  3. WebSocket 实时推送前端仍为规划项（本方案保持 HTTP 轮询，前端不动）
+  4. 跨进程状态持久化仍靠 DuckDB signal_events（EngineState 内存计数重启清零，但 DuckDB 兜底已够用）
+- 下一阶段建议:
+  1. 实施 MONITOR_ENGINE_PLAN.md（按第十一章 6 步顺序，每步验证）
+  2. 实施后更新 ARCHITECTURE.md 补 engine/monitor/ 章节
+  3. 实施后更新 PROJECT_HANDOVER.md 把「WebSocket 通道未部署」「EngineState 不持久化」从已知限制移除
+  4. 后续可考虑 WebSocket 推送前端（替代 HTTP 轮询，实时性更好）
+  5. 后续可考虑跨进程 EngineState 持久化（Redis / DuckDB 心跳表）
