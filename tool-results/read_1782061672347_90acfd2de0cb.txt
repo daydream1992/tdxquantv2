@@ -1,0 +1,807 @@
+     1→"""Mock 数据适配器（基于 V8 系统的 CSV 样本数据）。
+     2→
+     3→设计目标：
+     4→1. 在 Linux 沙箱环境（无通达信终端）下让选股/监控逻辑能跑通
+     5→2. 返回结构与 ``RealAdapter`` 一致（dict / DataFrame / list），上层无需感知 Mock
+     6→3. 板块管理方法（``create_sector`` / ``delete_sector`` 等）返回成功但 noop
+     7→4. ``subscribe_hq`` 用后台定时器模拟推送，基于快照 CSV 数据循环
+     8→
+     9→CSV 数据源（路径来自 ``config/app.yaml`` 的 ``mock.data_dir``）：
+    10→- ``全市场L2快照_20260616.csv`` —— 快照 / more_info（约 6794 条）
+    11→- ``kline_*_daily.csv`` —— 日 K 线（4 个文件覆盖 2026-05-20 ~ 2026-06-16）
+    12→- ``stock_name_mapping.csv`` —— code → name 映射
+    13→- ``股票行业三级分类_20260616_033518.csv`` —— 行业分类
+    14→- ``stock_block_relation.csv`` —— 板块归属关系
+    15→"""
+    16→
+    17→from __future__ import annotations
+    18→
+    19→import logging
+    20→import threading
+    21→import time
+    22→from pathlib import Path
+    23→from typing import Any, Callable
+    24→
+    25→import pandas as pd
+    26→
+    27→from engine.config.loader import ConfigLoader
+    28→from engine.data_adapter.base import BaseDataAdapter, Callback, DateList, FieldList, StockList
+    29→from engine.utils.stock_code import normalize
+    30→from engine.utils.time import normalize_date
+    31→
+    32→logger = logging.getLogger(__name__)
+    33→
+    34→
+    35→# CSV 文件名常量（不硬编码路径，仅文件名）
+    36→_SNAPSHOT_CSV = "全市场L2快照_20260616.csv"
+    37→_NAME_MAPPING_CSV = "stock_name_mapping.csv"
+    38→_INDUSTRY_CSV = "股票行业三级分类_20260616_033518.csv"
+    39→_BLOCK_RELATION_CSV = "stock_block_relation.csv"
+    40→_KLINE_GLOB = "kline_*_daily.csv"
+    41→
+    42→
+    43→class MockAdapter(BaseDataAdapter):
+    44→    """Mock 数据适配器：基于 V8 CSV 静态样本。"""
+    45→
+    46→    def __init__(self) -> None:
+    47→        cfg = ConfigLoader()
+    48→        rel_dir = cfg.get("mock.data_dir", "./docs/v8-data/stock_selection_v8_1_standalone/data")
+    49→        self._data_dir: Path = self._resolve_path(str(rel_dir))
+    50→        self._push_interval: float = float(cfg.get("mock.push_interval", 3))
+    51→
+    52→        # 缓存（懒加载）
+    53→        self._snapshot_df: pd.DataFrame | None = None
+    54→        self._kline_df: pd.DataFrame | None = None
+    55→        self._name_map_df: pd.DataFrame | None = None
+    56→        self._industry_df: pd.DataFrame | None = None
+    57→        self._block_relation_df: pd.DataFrame | None = None
+    58→
+    59→        # subscribe_hq 状态
+    60→        self._subscribers: dict[str, list[tuple[Callback, str]]] = {}  # code -> [(cb, sub_id)]
+    61→        self._sub_lock = threading.Lock()
+    62→        self._push_thread: threading.Thread | None = None
+    63→        self._push_stop = threading.Event()
+    64→        self._sub_batch_no = 0
+    65→
+    66→    # ------------------------------------------------------------------
+    67→    # 生命周期
+    68→    # ------------------------------------------------------------------
+    69→
+    70→    def initialize(self) -> bool:
+    71→        """Mock 不需要外部连接，仅校验数据目录存在。"""
+    72→        if not self._data_dir.exists():
+    73→            logger.error("Mock 数据目录不存在: %s", self._data_dir)
+    74→            return False
+    75→        logger.info("MockAdapter 初始化完成: %s", self._data_dir)
+    76→        return True
+    77→
+    78→    def close(self) -> None:
+    79→        """停止所有订阅推送线程。"""
+    80→        self.unsubscribe_hq([])
+    81→        if self._push_thread and self._push_thread.is_alive():
+    82→            self._push_stop.set()
+    83→            self._push_thread.join(timeout=5)
+    84→            self._push_thread = None
+    85→        logger.info("MockAdapter 已关闭")
+    86→
+    87→    # ------------------------------------------------------------------
+    88→    # CSV 加载（懒加载 + 缓存）
+    89→    # ------------------------------------------------------------------
+    90→
+    91→    def _load_snapshot(self) -> pd.DataFrame:
+    92→        """加载全市场 L2 快照 CSV。"""
+    93→        if self._snapshot_df is None:
+    94→            path = self._data_dir / _SNAPSHOT_CSV
+    95→            self._snapshot_df = pd.read_csv(path, encoding="utf-8-sig", dtype=str)
+    96→            # 规范化 code 列
+    97→            if "code" in self._snapshot_df.columns:
+    98→                self._snapshot_df["code"] = self._snapshot_df["code"].str.upper()
+    99→            # 派生 is_limit_up / 是否涨停 列（基于 FCAmo > 0 或 ZAF >= 9.5）
+   100→            # V8 兼容: 涨停判断 FCAmo>0 涨停，<0 跌停
+   101→            for col in ("FCAmo", "ZAF", "FCb"):
+   102→                if col in self._snapshot_df.columns:
+   103→                    self._snapshot_df[col] = pd.to_numeric(self._snapshot_df[col], errors="coerce")
+   104→            fcamo = self._snapshot_df.get("FCAmo", pd.Series(dtype=float))
+   105→            zaf = self._snapshot_df.get("ZAF", pd.Series(dtype=float))
+   106→            limit_mask = (fcamo.fillna(0) > 0) | (zaf.fillna(0) >= 9.5)
+   107→            self._snapshot_df["is_limit_up"] = limit_mask
+   108→            self._snapshot_df["是否涨停"] = limit_mask
+   109→            # 派生 name 列（若缺）从 stock_name_mapping
+   110→            if "name" not in self._snapshot_df.columns:
+   111→                try:
+   112→                    nm = self._load_name_map()
+   113→                    if "name" in nm.columns:
+   114→                        self._snapshot_df = self._snapshot_df.merge(
+   115→                            nm[["code", "name"]], on="code", how="left"
+   116→                        )
+   117→                except Exception:  # noqa: BLE001
+   118→                    pass
+   119→        return self._snapshot_df
+   120→
+   121→    def _load_kline(self) -> pd.DataFrame:
+   122→        """合并所有 kline_*_daily.csv 为一个 DataFrame。"""
+   123→        if self._kline_df is None:
+   124→            files = sorted(self._data_dir.glob(_KLINE_GLOB))
+   125→            if not files:
+   126→                logger.warning("未找到 K 线 CSV 文件: %s", self._data_dir / _KLINE_GLOB)
+   127→                self._kline_df = pd.DataFrame()
+   128→                return self._kline_df
+   129→            dfs = []
+   130→            for f in files:
+   131→                try:
+   132→                    df = pd.read_csv(f, encoding="utf-8-sig")
+   133→                    dfs.append(df)
+   134→                except Exception as exc:  # noqa: BLE001
+   135→                    logger.error("读取 K 线 CSV 失败 %s: %s", f, exc)
+   136→            if dfs:
+   137→                self._kline_df = pd.concat(dfs, ignore_index=True)
+   138→                self._kline_df["code"] = self._kline_df["code"].str.upper()
+   139→                # 数值列转 float
+   140→                for col in ("open", "high", "low", "close", "volume", "amount", "change_pct", "turnover", "forward_factor"):
+   141→                    if col in self._kline_df.columns:
+   142→                        self._kline_df[col] = pd.to_numeric(self._kline_df[col], errors="coerce")
+   143→                self._kline_df.sort_values(["code", "date"], inplace=True)
+   144→            else:
+   145→                self._kline_df = pd.DataFrame()
+   146→        return self._kline_df
+   147→
+   148→    def _load_name_map(self) -> pd.DataFrame:
+   149→        if self._name_map_df is None:
+   150→            path = self._data_dir / _NAME_MAPPING_CSV
+   151→            self._name_map_df = pd.read_csv(path, encoding="utf-8-sig", dtype=str)
+   152→            self._name_map_df["code"] = self._name_map_df["code"].str.upper()
+   153→        return self._name_map_df
+   154→
+   155→    def _load_industry(self) -> pd.DataFrame:
+   156→        if self._industry_df is None:
+   157→            path = self._data_dir / _INDUSTRY_CSV
+   158→            self._industry_df = pd.read_csv(path, encoding="utf-8-sig", dtype=str)
+   159→            self._industry_df["stock_code"] = self._industry_df["stock_code"].str.upper()
+   160→        return self._industry_df
+   161→
+   162→    def _load_block_relation(self) -> pd.DataFrame:
+   163→        if self._block_relation_df is None:
+   164→            path = self._data_dir / _BLOCK_RELATION_CSV
+   165→            self._block_relation_df = pd.read_csv(path, encoding="utf-8-sig", dtype=str)
+   166→            self._block_relation_df["stock_code"] = self._block_relation_df["stock_code"].str.upper()
+   167→        return self._block_relation_df
+   168→
+   169→    # ------------------------------------------------------------------
+   170→    # 行情类
+   171→    # ------------------------------------------------------------------
+   172→
+   173→    def get_market_snapshot(self, code: str, field_list: FieldList | None = None) -> dict:
+   174→        """从快照 CSV 读取单只股票数据。
+   175→
+   176→        V8 快照 CSV 实际是 ``get_more_info`` 字段集合，本 Mock 把它同时用于
+   177→        ``get_market_snapshot`` 与 ``get_more_info``。
+   178→        """
+   179→        try:
+   180→            ncode = normalize(code)
+   181→        except ValueError:
+   182→            return {}
+   183→        df = self._load_snapshot()
+   184→        row = df[df["code"] == ncode]
+   185→        if row.empty:
+   186→            return {}
+   187→        result: dict[str, Any] = row.iloc[0].to_dict()
+   188→        # 数值字段尝试转换
+   189→        for k, v in list(result.items()):
+   190→            if isinstance(v, str) and v.replace(".", "", 1).replace("-", "", 1).isdigit():
+   191→                try:
+   192→                    result[k] = float(v) if "." in v else int(float(v))
+   193→                except ValueError:
+   194→                    pass
+   195→        # 字段筛选
+   196→        if field_list:
+   197→            result = {k: result.get(k) for k in field_list}
+   198→        # 补充标准 snapshot 字段（与 tqcenter 对齐）
+   199→        result.setdefault("ErrorId", "0")
+   200→        result.setdefault("code", ncode)
+   201→        return result
+   202→
+   203→    def get_market_snapshot_all(self) -> "pd.DataFrame":
+   204→        """返回全市场快照 DataFrame（批量接口，供 pipeline.load_data 使用）。
+   205→
+   206→        列包含 CSV 全部字段 + 派生的 is_limit_up / 是否涨停 / name。
+   207→        """
+   208→        return self._load_snapshot().copy()
+   209→
+   210→    def get_snapshot_batch(self) -> "pd.DataFrame":
+   211→        """``get_market_snapshot_all`` 别名，兼容 pipeline 不同方法名探测。"""
+   212→        return self.get_market_snapshot_all()
+   213→
+   214→    def get_all_snapshots(self) -> "pd.DataFrame":
+   215→        """``get_market_snapshot_all`` 别名。"""
+   216→        return self.get_market_snapshot_all()
+   217→
+   218→    def get_snapshot(self) -> "pd.DataFrame":
+   219→        """``get_market_snapshot_all`` 别名（pipeline 旧式批量接口）。"""
+   220→        return self.get_market_snapshot_all()
+   221→
+   222→    def get_pricevol(self, stock_list: StockList) -> dict:
+   223→        """批量价量（从快照 CSV 提取 LastClose/Now/Volume 等关键字段）。
+   224→
+   225→        V8 快照 CSV 字段映射（已通过探针脚本验证）：
+   226→        - ``ZAF``        = 涨跌幅（百分比，如 -1.08 表示跌 1.08%），**非价格**
+   227→        - ``MA5Value``   = 5日均线价（近似现价）
+   228→        - ``ZTPrice``    = 涨停价
+   229→        - ``DTPrice``    = 跌停价
+   230→        - ``CJJEPre1``   = 昨日成交额（元）
+   231→        - ``OpenAmo``    = 今日开盘成交额
+   232→        - ``TotalBVol``  = 总买量（手）
+   233→        - ``TotalSVol``  = 总卖量（手）
+   234→
+   235→        推导：
+   236→        - ``Now``        ≈ MA5Value（5日均线，最近一日 close 近似）
+   237→        - ``LastClose``  = Now / (1 + ZAF/100)
+   238→        - ``Volume``     ≈ (TotalBVol + TotalSVol) / 100（手转股）
+   239→        - ``Amount``     ≈ CJJEPre1 或 OpenAmo
+   240→        """
+   241→        df = self._load_snapshot()
+   242→        out: dict[str, dict] = {}
+   243→        for code in stock_list:
+   244→            try:
+   245→                ncode = normalize(code)
+   246→            except ValueError:
+   247→                continue
+   248→            row = df[df["code"] == ncode]
+   249→            if row.empty:
+   250→                continue
+   251→            r = row.iloc[0].to_dict()
+   252→            pct = _to_float(_safe_sub(r, "ZAF", "0"))
+   253→            now = _to_float(_safe_sub(r, "MA5Value", "0"))
+   254→            # 兜底：MA5Value 缺失时用 ZTPrice / 1.1 估算
+   255→            if now <= 0:
+   256→                zt = _to_float(_safe_sub(r, "ZTPrice", "0"))
+   257→                if zt > 0:
+   258→                    now = round(zt / 1.1, 2)
+   259→            # LastClose = now / (1 + pct/100)
+   260→            last_close = round(now / (1 + pct / 100), 4) if (now > 0 and abs(pct) < 50) else now
+   261→            total_b = _to_float(_safe_sub(r, "TotalBVol", "0"))
+   262→            total_s = _to_float(_safe_sub(r, "TotalSVol", "0"))
+   263→            # V8 快照中 TotalBVol/TotalSVol 单位为"手"；pricevol 约定 Volume 也为"手"
+   264→            volume = total_b + total_s
+   265→            # V8 快照中 CJJEPre1 单位为"万元"（如 171156.13 = 17.11亿），OpenAmo 单位为"元"
+   266→            cjje = _to_float(_safe_sub(r, "CJJEPre1", "0"))
+   267→            open_amo = _to_float(_safe_sub(r, "OpenAmo", "0"))
+   268→            # 统一转换为元
+   269→            amount = cjje * 10000 if cjje > 0 else open_amo
+   270→            # 兜底：amount 缺失时用 volume * now 估算
+   271→            if amount <= 0 and volume > 0 and now > 0:
+   272→                amount = volume * 100 * now  # 手转股 × 现价
+   273→            name = str(_safe_sub(r, "name", "") or "")
+   274→            out[ncode] = {
+   275→                "LastClose": last_close,
+   276→                "Now": now,
+   277→                "pct_change": pct / 100,  # 转为小数
+   278→                "Volume": volume,
+   279→                "Amount": amount,
+   280→                "name": name,
+   281→                # V8 快照无 LastClose/Now/Volume 直接字段，用近似字段填充
+   282→                "_raw": r,
+   283→            }
+   284→        return out
+   285→
+   286→    def get_market_data(
+   287→        self,
+   288→        stock_list: StockList,
+   289→        period: str = "1d",
+   290→        start_time: str = "",
+   291→        end_time: str = "",
+   292→        count: int = -1,
+   293→        dividend_type: str | None = "none",
+   294→        field_list: FieldList | None = None,
+   295→        fill_data: bool = True,
+   296→    ) -> dict:
+   297→        """从 kline_*_daily.csv 读取日 K 线。
+   298→
+   299→        Mock 仅支持 ``period="1d"``，其他周期返回空。
+   300→        返回 ``dict[field -> DataFrame]``，与 Real 适配器一致。
+   301→        """
+   302→        if period not in ("1d", "daily", "1D"):
+   303→            logger.warning("Mock 仅支持日 K 线 (period=1d)，当前 period=%s", period)
+   304→            return {}
+   305→
+   306→        kline = self._load_kline()
+   307→        if kline.empty:
+   308→            return {}
+   309→
+   310→        # 归一化代码
+   311→        codes: list[str] = []
+   312→        for c in stock_list:
+   313→            try:
+   314→                codes.append(normalize(c))
+   315→            except ValueError:
+   316→                continue
+   317→        sub = kline[kline["code"].isin(codes)].copy()
+   318→
+   319→        # 日期过滤
+   320→        try:
+   321→            sub["date_norm"] = sub["date"].astype(str).str.replace("-", "")
+   322→        except Exception:  # noqa: BLE001
+   323→            sub["date_norm"] = sub["date"].astype(str)
+   324→        if start_time:
+   325→            sub = sub[sub["date_norm"] >= normalize_date(start_time)]
+   326→        if end_time:
+   327→            sub = sub[sub["date_norm"] <= normalize_date(end_time)]
+   328→
+   329→        # count：每只股票保留最后 count 条
+   330→        if count and count > 0:
+   331→            sub = sub.groupby("code", group_keys=False).tail(count)
+   332→
+   333→        # 构造 dict[field -> DataFrame]，index=stock, columns=date
+   334→        # Date 作为列索引（columns），不作为 value 字段
+   335→        all_fields = ["Date", "Open", "High", "Low", "Close", "Volume", "Amount", "ForwardFactor"]
+   336→        fields = field_list or all_fields
+   337→        # 字段映射（标准 tqcenter 字段名 → 小写 CSV 列名）
+   338→        col_map = {
+   339→            "Date": "date",
+   340→            "Open": "open",
+   341→            "High": "high",
+   342→            "Low": "low",
+   343→            "Close": "close",
+   344→            "Volume": "volume",
+   345→            "Amount": "amount",
+   346→            "ForwardFactor": "forward_factor",
+   347→        }
+   348→        out: dict[str, pd.DataFrame] = {}
+   349→        for f in fields:
+   350→            csv_col = col_map.get(f, f.lower())
+   351→            if f == "Date":
+   352→                # Date 单独处理：返回一个 DataFrame，index=code, columns=date
+   353→                # 值就是日期字符串本身（便于上层知道每列对应哪个交易日）
+   354→                if "date" not in sub.columns:
+   355→                    out[f] = pd.DataFrame(index=codes)
+   356→                    continue
+   357→                # 构造与其它字段一致的 index/columns 布局
+   358→                dates_per_code = (
+   359→                    sub.groupby("code")["date"].apply(lambda s: list(s))
+   360→                )
+   361→                # 取并集作为 columns
+   362→                all_dates = sorted(set(d for s in dates_per_code for d in s))
+   363→                df = pd.DataFrame(index=dates_per_code.index, columns=all_dates, dtype=object)
+   364→                for code, dlist in dates_per_code.items():
+   365→                    for d in dlist:
+   366→                        df.loc[code, d] = d
+   367→                out[f] = df
+   368→                continue
+   369→            if csv_col not in sub.columns:
+   370→                # 缺列返回空 DataFrame
+   371→                out[f] = pd.DataFrame(index=codes)
+   372→                continue
+   373→            pivot = sub.pivot_table(index="code", columns="date", values=csv_col, aggfunc="last")
+   374→            out[f] = pivot
+   375→        return out
+   376→
+   377→    def get_more_info(self, code: str, field_list: FieldList | None = None) -> dict:
+   378→        """股票更多信息（与 ``get_market_snapshot`` 共享快照 CSV）。"""
+   379→        return self.get_market_snapshot(code, field_list)
+   380→
+   381→    def get_stock_info(self, code: str, field_list: FieldList | None = None) -> dict:
+   382→        """证券基本信息（合成自 name_mapping + 快照 + 行业分类）。"""
+   383→        try:
+   384→            ncode = normalize(code)
+   385→        except ValueError:
+   386→            return {}
+   387→        name_df = self._load_name_map()
+   388→        name_row = name_df[name_df["code"] == ncode]
+   389→        name = name_row.iloc[0]["name"] if not name_row.empty else ""
+   390→
+   391→        info: dict[str, Any] = {
+   392→            "Name": name,
+   393→            "Code": ncode,
+   394→            "HSStockKind": _classify_kind(ncode),
+   395→            "ErrorId": "0",
+   396→        }
+   397→        # 追加快照里的市值/股本字段
+   398→        snap = self.get_market_snapshot(ncode)
+   399→        for k in ("Zsz", "Ltsz", "Wtb", "fHSL", "ZTPrice", "DTPrice", "IPO_Price"):
+   400→            if k in snap:
+   401→                info[k] = snap[k]
+   402→        # 追加行业
+   403→        ind_df = self._load_industry()
+   404→        ind_row = ind_df[ind_df["stock_code"] == ncode]
+   405→        if not ind_row.empty:
+   406→            r = ind_row.iloc[0]
+   407→            info["rs_hyname"] = r.get("行业一级", "")
+   408→            info["rs_hyname2"] = r.get("行业二级", "")
+   409→            info["rs_hyname3"] = r.get("行业三级", "")
+   410→            info["rs_hycode_sim"] = r.get("行业一级_代码", "")
+   411→
+   412→        if field_list:
+   413→            info = {k: info.get(k) for k in field_list}
+   414→        return info
+   415→
+   416→    def get_gb_info(self, code: str, date_list: DateList, count: int = 1) -> list:
+   417→        """Mock 没有股本数据，返回空列表。"""
+   418→        return []
+   419→
+   420→    def get_gb_info_by_date(self, code: str, start_date: str, end_date: str = "") -> list:
+   421→        """Mock 没有股本数据，返回空列表。"""
+   422→        return []
+   423→
+   424→    def get_relation(self, code: str) -> list:
+   425→        """从 stock_block_relation.csv 过滤。"""
+   426→        try:
+   427→            ncode = normalize(code)
+   428→        except ValueError:
+   429→            return []
+   430→        df = self._load_block_relation()
+   431→        rows = df[df["stock_code"] == ncode]
+   432→        out: list[dict] = []
+   433→        for _, r in rows.iterrows():
+   434→            out.append({
+   435→                "BlockCode": str(r.get("block_code", "")),
+   436→                "BlockName": str(r.get("block_name", "")),
+   437→                "BlockType": str(r.get("block_type", "")),
+   438→                "GPNume": str(r.get("gp_num", "")),
+   439→            })
+   440→        return out
+   441→
+   442→    def get_ipo_info(self, ipo_type: int = 0, ipo_date: int = 0) -> list:
+   443→        """Mock 没有 IPO 数据，返回空列表。"""
+   444→        return []
+   445→
+   446→    # ------------------------------------------------------------------
+   447→    # 板块/成份股
+   448→    # ------------------------------------------------------------------
+   449→
+   450→    def get_stock_list(self, list_type: str = "0", market: str = "") -> list:
+   451→        """从 K 线 CSV 取全市场股票代码（``list_type="0"`` 仅 Code，``"1"`` 含 Name）。"""
+   452→        kline = self._load_kline()
+   453→        if kline.empty:
+   454→            return []
+   455→        codes = sorted(kline["code"].unique().tolist())
+   456→        if list_type == "0":
+   457→            return [{"Code": c} for c in codes]
+   458→        # 含名称
+   459→        name_df = self._load_name_map()
+   460→        name_map = dict(zip(name_df["code"], name_df["name"]))
+   461→        return [{"Code": c, "Name": name_map.get(c, "")} for c in codes]
+   462→
+   463→    def get_sector_list(self, list_type: str = "0", market: str = "") -> list:
+   464→        """从 stock_block_relation.csv 取板块清单。"""
+   465→        df = self._load_block_relation()
+   466→        if df.empty:
+   467→            return []
+   468→        agg = df.groupby(["block_code", "block_name", "block_type"]).size().reset_index(name="cnt")
+   469→        out: list[dict] = []
+   470→        for _, r in agg.iterrows():
+   471→            out.append({
+   472→                "Code": str(r.get("block_code", "")),
+   473→                "Name": str(r.get("block_name", "")),
+   474→                "Type": str(r.get("block_type", "")),
+   475→            })
+   476→        return out
+   477→
+   478→    def get_stock_list_in_sector(
+   479→        self, block_code: str, block_type: int = 0, list_type: str = "0"
+   480→    ) -> list:
+   481→        """从 stock_block_relation.csv 过滤板块成份股。"""
+   482→        df = self._load_block_relation()
+   483→        rows = df[df["block_code"] == str(block_code)]
+   484→        if list_type == "0":
+   485→            return [{"Code": c} for c in rows["stock_code"].tolist()]
+   486→        # 含名称
+   487→        name_df = self._load_name_map()
+   488→        name_map = dict(zip(name_df["code"], name_df["name"]))
+   489→        return [
+   490→            {"Code": c, "Name": name_map.get(c, "")}
+   491→            for c in rows["stock_code"].tolist()
+   492→        ]
+   493→
+   494→    # ------------------------------------------------------------------
+   495→    # 财务类
+   496→    # ------------------------------------------------------------------
+   497→
+   498→    def get_gpjy_value(
+   499→        self, code: str, date_list: DateList, count: int = 1
+   500→    ) -> list:
+   501→        """Mock 从 K 线 CSV 取个股交易数据（OHLCV）。"""
+   502→        try:
+   503→            ncode = normalize(code)
+   504→        except ValueError:
+   505→            return []
+   506→        kline = self._load_kline()
+   507→        if kline.empty:
+   508→            return []
+   509→        sub = kline[kline["code"] == ncode].copy()
+   510→        sub["date_norm"] = sub["date"].astype(str).str.replace("-", "")
+   511→        target_dates = {normalize_date(d) for d in date_list}
+   512→        sub = sub[sub["date_norm"].isin(target_dates)]
+   513→        out: list[dict] = []
+   514→        for _, r in sub.iterrows():
+   515→            out.append({
+   516→                "Date": r.get("date", ""),
+   517→                "Open": float(r.get("open", 0) or 0),
+   518→                "Close": float(r.get("close", 0) or 0),
+   519→                "High": float(r.get("high", 0) or 0),
+   520→                "Low": float(r.get("low", 0) or 0),
+   521→                "Volume": float(r.get("volume", 0) or 0),
+   522→                "Amount": float(r.get("amount", 0) or 0),
+   523→            })
+   524→        return out[:count] if count > 0 else out
+   525→
+   526→    def get_gpjy_value_by_date(
+   527→        self, code: str, start_date: str, end_date: str = ""
+   528→    ) -> list:
+   529→        """时间段个股交易数据。"""
+   530→        try:
+   531→            ncode = normalize(code)
+   532→        except ValueError:
+   533→            return []
+   534→        kline = self._load_kline()
+   535→        if kline.empty:
+   536→            return []
+   537→        sub = kline[kline["code"] == ncode].copy()
+   538→        sub["date_norm"] = sub["date"].astype(str).str.replace("-", "")
+   539→        if start_date:
+   540→            sub = sub[sub["date_norm"] >= normalize_date(start_date)]
+   541→        if end_date:
+   542→            sub = sub[sub["date_norm"] <= normalize_date(end_date)]
+   543→        out: list[dict] = []
+   544→        for _, r in sub.iterrows():
+   545→            out.append({
+   546→                "Date": r.get("date", ""),
+   547→                "Open": float(r.get("open", 0) or 0),
+   548→                "Close": float(r.get("close", 0) or 0),
+   549→                "High": float(r.get("high", 0) or 0),
+   550→                "Low": float(r.get("low", 0) or 0),
+   551→                "Volume": float(r.get("volume", 0) or 0),
+   552→                "Amount": float(r.get("amount", 0) or 0),
+   553→            })
+   554→        return out
+   555→
+   556→    def get_financial_data(
+   557→        self,
+   558→        stock_list: StockList,
+   559→        field_list: FieldList,
+   560→        start_time: str = "",
+   561→        end_time: str = "",
+   562→        report_type: str = "announce_time",
+   563→    ) -> pd.DataFrame:
+   564→        """Mock 没有财务数据，返回空 DataFrame（含字段列）。"""
+   565→        return pd.DataFrame(columns=["stock_code"] + list(field_list))
+   566→
+   567→    def get_gp_one_data(
+   568→        self, stock_list: StockList, field_list: FieldList
+   569→    ) -> dict:
+   570→        """Mock 没有 GO 系列数据，返回 ``{code: {field: None}}`` 形式。"""
+   571→        out: dict[str, dict] = {}
+   572→        for c in stock_list:
+   573→            try:
+   574→                ncode = normalize(c)
+   575→            except ValueError:
+   576→                continue
+   577→            out[ncode] = {f: None for f in field_list}
+   578→        return out
+   579→
+   580→    # ------------------------------------------------------------------
+   581→    # ETF / 可转债
+   582→    # ------------------------------------------------------------------
+   583→
+   584→    def get_kzz_info(self, code: str, field_list: FieldList | None = None) -> dict:
+   585→        """Mock 没有可转债数据，返回空 dict。"""
+   586→        return {}
+   587→
+   588→    def get_trackzs_etf_info(self, index_code: str) -> list:
+   589→        """Mock 没有 ETF 跟踪指数数据，返回空 list。"""
+   590→        return []
+   591→
+   592→    # ------------------------------------------------------------------
+   593→    # 板块管理（noop）
+   594→    # ------------------------------------------------------------------
+   595→
+   596→    def create_sector(self, block_code: str, block_name: str) -> bool:
+   597→        logger.info("[Mock] create_sector(%s, %s) -> noop True", block_code, block_name)
+   598→        return True
+   599→
+   600→    def delete_sector(self, block_code: str) -> bool:
+   601→        logger.info("[Mock] delete_sector(%s) -> noop True", block_code)
+   602→        return True
+   603→
+   604→    def rename_sector(self, block_code: str, new_name: str) -> bool:
+   605→        logger.info("[Mock] rename_sector(%s, %s) -> noop True", block_code, new_name)
+   606→        return True
+   607→
+   608→    def clear_sector(self, block_code: str) -> bool:
+   609→        logger.info("[Mock] clear_sector(%s) -> noop True", block_code)
+   610→        return True
+   611→
+   612→    def send_user_block(self, block_code: str, stock_list: StockList) -> bool:
+   613→        logger.info("[Mock] send_user_block(%s, %d stocks) -> noop True", block_code, len(stock_list))
+   614→        return True
+   615→
+   616→    def get_user_sector(self, block_code: str = "") -> list:
+   617→        """Mock 不跟踪用户自定义板块，返回空 list。"""
+   618→        return []
+   619→
+   620→    # ------------------------------------------------------------------
+   621→    # 通用函数
+   622→    # ------------------------------------------------------------------
+   623→
+   624→    def get_trading_dates(
+   625→        self, market: str = "", start: str = "", end: str = ""
+   626→    ) -> list:
+   627→        """从 K 线 CSV 推断交易日。"""
+   628→        kline = self._load_kline()
+   629→        if kline.empty:
+   630→            return []
+   631→        dates = sorted(kline["date"].astype(str).str.replace("-", "").unique().tolist())
+   632→        if start:
+   633→            s = normalize_date(start)
+   634→            dates = [d for d in dates if d >= s]
+   635→        if end:
+   636→            e = normalize_date(end)
+   637→            dates = [d for d in dates if d <= e]
+   638→        return dates
+   639→
+   640→    def send_warn(self, stock_list: StockList, **kwargs: Any) -> bool:
+   641→        logger.info("[Mock] send_warn(%d stocks, %s) -> noop True", len(stock_list), kwargs)
+   642→        return True
+   643→
+   644→    def send_message(self, msg: str) -> bool:
+   645→        logger.info("[Mock] send_message(%r) -> noop True", msg[:80])
+   646→        return True
+   647→
+   648→    def subscribe_hq(
+   649→        self,
+   650→        stock_list: StockList,
+   651→        callback: Callback,
+   652→        batch_size: int | None = None,
+   653→    ) -> bool:
+   654→        """Mock 用后台线程模拟行情推送。
+   655→
+   656→        每隔 ``mock.push_interval`` 秒，对所有已订阅代码各调用一次 ``callback``，
+   657→        推送数据来自快照 CSV。
+   658→        """
+   659→        cfg = ConfigLoader()
+   660→        bs = batch_size or int(cfg.get("tqcenter.subscribe_batch_size", 50))
+   661→        codes: list[str] = []
+   662→        for c in stock_list:
+   663→            try:
+   664→                codes.append(normalize(c))
+   665→            except ValueError:
+   666→                continue
+   667→
+   668→        with self._sub_lock:
+   669→            self._sub_batch_no += 1
+   670→            batch_no = self._sub_batch_no
+   671→            for c in codes:
+   672→                self._subscribers.setdefault(c, []).append((callback, f"batch_{batch_no}"))
+   673→
+   674→        logger.info(
+   675→            "[Mock] subscribe_hq: %d 个代码（batch_size=%d, batch_no=%d）",
+   676→            len(codes), bs, batch_no,
+   677→        )
+   678→
+   679→        # 启动推送线程（如果未启动）
+   680→        if self._push_thread is None or not self._push_thread.is_alive():
+   681→            self._push_stop.clear()
+   682→            self._push_thread = threading.Thread(
+   683→                target=self._push_loop, name="MockAdapter-Push", daemon=True
+   684→            )
+   685→            self._push_thread.start()
+   686→        return True
+   687→
+   688→    def unsubscribe_hq(self, stock_list: StockList) -> bool:
+   689→        """取消订阅。``stock_list`` 为空表示取消所有订阅。"""
+   690→        with self._sub_lock:
+   691→            if not stock_list:
+   692→                self._subscribers.clear()
+   693→            else:
+   694→                codes = []
+   695→                for c in stock_list:
+   696→                    try:
+   697→                        codes.append(normalize(c))
+   698→                    except ValueError:
+   699→                        continue
+   700→                for c in codes:
+   701→                    self._subscribers.pop(c, None)
+   702→            empty = not self._subscribers
+   703→        if empty and self._push_thread and self._push_thread.is_alive():
+   704→            self._push_stop.set()
+   705→            self._push_thread.join(timeout=2)
+   706→            self._push_thread = None
+   707→        return True
+   708→
+   709→    def refresh_kline(self, stock_code: str, period: str = "1d") -> bool:
+   710→        logger.info("[Mock] refresh_kline(%s, %s) -> noop True", stock_code, period)
+   711→        return True
+   712→
+   713→    def download_data(self, stock_code: str, start_date: str, end_date: str) -> bool:
+   714→        logger.info("[Mock] download_data(%s, %s, %s) -> noop True", stock_code, start_date, end_date)
+   715→        return True
+   716→
+   717→    # ------------------------------------------------------------------
+   718→    # 推送线程
+   719→    # ------------------------------------------------------------------
+   720→
+   721→    def _push_loop(self) -> None:
+   722→        """Mock 推送循环：定期读取快照 CSV，对所有已订阅代码回调。"""
+   723→        logger.info("MockAdapter 推送线程启动 (interval=%.1fs)", self._push_interval)
+   724→        while not self._push_stop.is_set():
+   725→            try:
+   726→                with self._sub_lock:
+   727→                    subscribers = dict(self._subscribers)
+   728→                if not subscribers:
+   729→                    break
+   730→                snapshot = self._load_snapshot()
+   731→                for code, cb_list in subscribers.items():
+   732→                    row = snapshot[snapshot["code"] == code]
+   733→                    if row.empty:
+   734→                        continue
+   735→                    snap = row.iloc[0].to_dict()
+   736→                    snap["code"] = code
+   737→                    snap["ErrorId"] = "0"
+   738→                    for cb, _sub_id in list(cb_list):
+   739→                        try:
+   740→                            cb(snap)
+   741→                        except Exception as exc:  # noqa: BLE001
+   742→                            logger.error("推送回调异常 %s: %s", code, exc)
+   743→            except Exception as exc:  # noqa: BLE001
+   744→                logger.error("推送循环异常: %s", exc)
+   745→            self._push_stop.wait(self._push_interval)
+   746→        logger.info("MockAdapter 推送线程退出")
+   747→
+   748→    # ------------------------------------------------------------------
+   749→    # 路径解析
+   750→    # ------------------------------------------------------------------
+   751→
+   752→    @staticmethod
+   753→    def _resolve_path(p: str) -> Path:
+   754→        """配置中的相对路径解析为项目根绝对路径。"""
+   755→        path = Path(p)
+   756→        if path.is_absolute():
+   757→            return path
+   758→        root = Path(__file__).resolve().parent.parent.parent
+   759→        return root / path
+   760→
+   761→
+   762→# ----------------------------------------------------------------------------
+   763→# 辅助
+   764→# ----------------------------------------------------------------------------
+   765→
+   766→
+   767→def _to_float(v: Any) -> float:
+   768→    """安全转 float。"""
+   769→    try:
+   770→        if v is None or v == "":
+   771→            return 0.0
+   772→        return float(v)
+   773→    except (TypeError, ValueError):
+   774→        return 0.0
+   775→
+   776→
+   777→def _safe_sub(d: dict, key: str, default: Any = "") -> Any:
+   778→    """安全取 dict 子键，缺失返回 default。"""
+   779→    return d.get(key, default) if isinstance(d, dict) else default
+   780→
+   781→
+   782→def _classify_kind(code: str) -> int:
+   783→    """根据代码前缀推断 HSStockKind（粗略，仅 Mock 用）。
+   784→
+   785→    枚举参考 worklog Task 2-b：
+   786→    0=指数 / 1=A股主板 / 2=北证A股 / 3=创业板 / 4=科创板 / 5=B股 / 6=债券 /
+   787→    7=基金 / 8=权证 / 9=其它 / 10=非沪深京品种
+   788→    """
+   789→    if "." not in code:
+   790→        return 9
+   791→    pure, market = code.split(".")
+   792→    if pure.startswith("000001") or pure.startswith("399"):
+   793→        return 0  # 指数
+   794→    if market == "BJ":
+   795→        return 2
+   796→    if market == "SH" and pure.startswith("688"):
+   797→        return 4  # 科创板
+   798→    if market == "SZ" and pure.startswith("3"):
+   799→        return 3  # 创业板
+   800→    if market in ("SH", "SZ") and pure.startswith(("5", "1")):
+   801→        return 7  # 基金/ETF
+   802→    if market in ("SH", "SZ") and pure.startswith(("11", "12")):
+   803→        return 6  # 可转债
+   804→    if market in ("SH", "SZ") and pure.startswith(("6", "0")):
+   805→        return 1  # 主板
+   806→    return 9
+   807→

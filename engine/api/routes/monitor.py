@@ -1,7 +1,8 @@
 """``/api/monitor`` 路由 - 监控状态与实时行情快照。
 
 - ``GET /api/monitor/status``        - 监控状态（监控股票数/今日信号/订阅/心跳）
-- ``GET /api/monitor/quotes``        - 实时行情快照（前 N 只订阅股票的价量 + 资金流字段）
+- ``GET /api/monitor/quotes``        - 实时行情快照（前 N 只订阅股票的价量 + 资金流字段 + 竞价涨幅）
+- ``GET /api/monitor/auction``       - 批量竞价查询 + 强弱评分 (R13-2a)
 - ``GET /api/monitor/flow-ranking``  - 资金流向排行 (按 main_inflow / big_buy_ratio / turnover_rate 排序)
 - ``GET /api/monitor/subscriptions`` - 当前订阅列表
 """
@@ -11,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
@@ -152,6 +154,10 @@ async def get_quotes(
                 main_inflow, big_buy_ratio, turnover_rate = _extract_flow_fields(
                     code, more_info_map.get(code) or fields.get("_raw") or {}
                 )
+                # R13-2b: auction_pct 从 VOpenZAF 取 (小数形式, 0.0523 = 5.23%)
+                auction_pct = _extract_auction_pct_fraction(
+                    more_info_map.get(code) or fields.get("_raw") or {}
+                )
                 out.append(
                     QuoteSnapshot(
                         code=code,
@@ -165,6 +171,7 @@ async def get_quotes(
                         main_inflow=main_inflow,
                         big_buy_ratio=big_buy_ratio,
                         turnover_rate=turnover_rate,
+                        auction_pct=auction_pct,
                     )
                 )
             return out
@@ -181,6 +188,10 @@ async def get_quotes(
             main_inflow, big_buy_ratio, turnover_rate = _extract_flow_fields(
                 code, more_info_map.get(code) or snap
             )
+            # R13-2b: auction_pct 从 VOpenZAF 取 (小数形式, 0.0523 = 5.23%)
+            auction_pct = _extract_auction_pct_fraction(
+                more_info_map.get(code) or snap
+            )
             out.append(
                 QuoteSnapshot(
                     code=code,
@@ -194,6 +205,7 @@ async def get_quotes(
                     main_inflow=main_inflow,
                     big_buy_ratio=big_buy_ratio,
                     turnover_rate=turnover_rate,
+                    auction_pct=auction_pct,
                 )
             )
         except Exception as exc:  # noqa: BLE001
@@ -254,6 +266,151 @@ async def get_flow_ranking(
             )
         )
     return out
+
+
+@router.get(
+    "/auction",
+    summary="批量竞价查询 + 强弱评分 (R13-2a)",
+)
+async def get_auction(
+    codes: str | None = Query(
+        None, description="逗号分隔股票代码 (如 600519.SH,000858.SZ); 不传则用监控池"
+    ),
+    count: int = Query(50, ge=1, le=200, description="codes 不传时取监控池前 N 只 (按 batch_no 倒序)"),
+    state: Any = Depends(get_state),
+    adapter: Any = Depends(get_adapter),
+    cfg: Any = Depends(get_config),
+) -> dict[str, Any]:
+    """批量查询竞价数据 + 输出竞价强弱评分 (0-100)。
+
+    数据来源: ``adapter.get_more_info(code)`` 返回的竞价字段
+    (``VOpenZAF`` / ``OpenZTBuy`` / ``OpenAmo`` / ``OpenAmoPre1`` /
+    ``OpenVolPre1`` / ``L2OrderNum`` / ``L2TicNum``)。
+
+    评分公式 (0-100, 越高竞价越强):
+    - ``surge``     : 竞价涨幅, 10% 封顶 40 分 (``auction_pct / 10 * 40``, cap 40)
+    - ``zt_flag``   : 有竞价涨停买单 (``OpenZTBuy > 0``) +20 分
+    - ``vol_ratio`` : 量比同比 (今日开盘金额 / 昨开盘金额), 1 倍 = 30 分, 封顶 30
+    - ``l2``        : L2 委托数 (``L2OrderNum / 100``), 1000 单封顶 10 分
+
+    **字段约定**: ``auction_pct`` 为**百分比形式** (5.23 = 5.23%, 即原始 ``VOpenZAF``),
+    与 ``/quotes`` 端点的 ``auction_pct`` (小数形式 0.0523) 不同 —— 本端点为竞价专项展示,
+    用百分比便于前端直接显示; ``/quotes`` 沿用 ``pct`` 字段的小数形式以保持响应内一致。
+
+    **单位说明**:
+    - ``auction_amount`` (万元) = ``OpenAmo`` / 10000 (V8 中 OpenAmo 单位为元)
+    - ``open_amount_pre`` (万元) = ``OpenAmoPre1`` (V8 中已是万元)
+    - ``auction_zt_buy`` (万元) = ``OpenZTBuy``
+    - ``open_vol_pre`` (手) = ``OpenVolPre1``
+    - ``l2_order_num`` / ``l2_tic_num`` : 整数
+
+    排序: 按 ``auction_score`` 降序。
+
+    ``in_auction_hours``: Mock 模式强制 ``True`` (沙箱友好); Real 模式严格判断 9:15-9:25。
+    """
+    # 1. 取股票列表
+    if codes:
+        code_list: list[str] = [c.strip() for c in codes.split(",") if c.strip()]
+    else:
+        subs = state.list_subscriptions()
+        # 按 batch_no 倒序, 取前 count 只
+        sorted_subs = sorted(
+            subs, key=lambda s: int(s.get("batch_no", 0) or 0), reverse=True
+        )
+        code_list = [s["stock_code"] for s in sorted_subs[:count]]
+
+    in_auction = _in_auction_hours(cfg)
+
+    if not code_list:
+        return {"items": [], "count": 0, "in_auction_hours": in_auction}
+
+    # 2. 批量取 more_info (复用现有 _batch_more_info helper)
+    more_info_map = _batch_more_info(adapter, code_list)
+
+    # 3. 提取竞价字段 + 算分
+    fetched_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    items: list[dict[str, Any]] = []
+    for code in code_list:
+        info = more_info_map.get(code) or {}
+        fields = _extract_auction_fields(info)
+        items.append(
+            {
+                "stock_code": code,
+                **fields,
+                "fetched_at": fetched_at,
+            }
+        )
+
+    # 4. 按 auction_score 降序
+    items.sort(key=lambda x: x.get("auction_score", 0.0), reverse=True)
+
+    return {
+        "items": items,
+        "count": len(items),
+        "in_auction_hours": in_auction,
+    }
+
+
+@router.get(
+    "/rules",
+    summary="列出所有 alert_templates（供前端下拉）",
+)
+async def list_alert_templates(
+    cfg: Any = Depends(get_config),
+) -> dict[str, Any]:
+    """列出 ``monitor_rules.yaml`` 的 ``alert_templates`` 段，供前端编辑 match 策略时下拉选择。
+
+    返回每个模板的:
+    - ``alert_type``      - 模板 ID（全局唯一，编辑 alert 时填入 alerts[].alert_type）
+    - ``label``           - 中文标签（如"涨停"）
+    - ``emoji``           - 前端展示用的 emoji（如 🚀）
+    - ``description``     - 一句话说明
+    - ``condition``       - 表达式引擎求值模板（含 ``{param}`` 占位符）
+    - ``default_params``  - 默认参数 dict（前端选中模板时自动填入 alerts[].params）
+    - ``priority``        - high / medium / low
+    - ``channels``        - 推送通道列表
+
+    数据源: ``ConfigLoader().get("alert_templates")``。
+    配置缺失时返回空列表（保证向后兼容）。
+    """
+    raw = cfg.get("alert_templates") or {}
+    templates: list[dict[str, Any]] = []
+    if isinstance(raw, dict):
+        # monitor_rules.yaml 中 alert_templates 是 mapping: { template_id: { ... } }
+        # 保留声明顺序（Python 3.7+ dict 顺序 = 插入顺序 = YAML 顺序）
+        for tpl_id, body in raw.items():
+            if not isinstance(body, dict):
+                continue
+            templates.append(
+                {
+                    "alert_type": str(body.get("alert_type") or tpl_id),
+                    "label": str(body.get("label") or ""),
+                    "emoji": str(body.get("emoji") or ""),
+                    "description": str(body.get("description") or ""),
+                    "condition": str(body.get("condition") or ""),
+                    "default_params": dict(body.get("default_params") or {}),
+                    "priority": str(body.get("priority") or "medium"),
+                    "channels": list(body.get("channels") or []),
+                }
+            )
+    elif isinstance(raw, list):
+        # 兼容写法（数组形式）：原样映射
+        for body in raw:
+            if not isinstance(body, dict):
+                continue
+            templates.append(
+                {
+                    "alert_type": str(body.get("alert_type") or ""),
+                    "label": str(body.get("label") or ""),
+                    "emoji": str(body.get("emoji") or ""),
+                    "description": str(body.get("description") or ""),
+                    "condition": str(body.get("condition") or ""),
+                    "default_params": dict(body.get("default_params") or {}),
+                    "priority": str(body.get("priority") or "medium"),
+                    "channels": list(body.get("channels") or []),
+                }
+            )
+    return {"templates": templates, "count": len(templates)}
 
 
 @router.get(
@@ -412,6 +569,107 @@ def _extract_flow_fields(code: str, info: dict) -> tuple[float, float, float]:
         turnover_rate = _deterministic_hash_float(code, salt="hsl", lo=0.5, hi=10.0)
 
     return round(main_inflow, 2), round(big_buy_ratio, 4), round(turnover_rate, 3)
+
+
+# ----------------------------------------------------------------------------
+# R13-2a/2b: 竞价字段提取 + 评分
+# ----------------------------------------------------------------------------
+
+
+def _extract_auction_pct_fraction(info: dict) -> float:
+    """从 more_info dict 提取 ``auction_pct`` (小数形式, 0.0523 = 5.23%)。
+
+    用于 ``/quotes`` 端点 (与 ``pct`` 字段同为小数形式, 保持响应内一致)。
+
+    - 数据源: ``VOpenZAF`` (V8 字段, 5.23 表示 5.23%)
+    - 转换: ``VOpenZAF / 100`` → 0.0523
+    - 缺失/非法值返回 0.0 (不要 None, 前端好处理)
+
+    与 :func:`engine.monitor.engine._normalize_snap` 中的 auction_pct 计算逻辑一致,
+    便于 ``/quotes`` 响应与监控引擎内部求值保持同样的语义。
+    """
+    vopen = _safe_float(info.get("VOpenZAF"))
+    return round(vopen / 100.0, 6)
+
+
+def _extract_auction_fields(info: dict) -> dict[str, Any]:
+    """从 more_info dict 提取竞价字段 + 计算 ``auction_score`` (供 ``/auction`` 端点)。
+
+    **重要**: 本函数返回的 ``auction_pct`` 为**百分比形式** (5.23 = 5.23%,
+    即原始 ``VOpenZAF``), 与 ``/quotes`` 端点的 ``auction_pct`` (小数形式) 不同。
+    差异原因: ``/auction`` 端点为竞价专项展示, 用百分比便于前端直接显示;
+    ``/quotes`` 沿用 ``pct`` 字段的小数形式以保持响应内一致。
+
+    字段来源 (V8 快照 / RealAdapter ``tq.get_more_info``):
+    - ``VOpenZAF``     : 竞价涨幅% (5.23 = 5.23%) → auction_pct (百分比形式)
+    - ``OpenZTBuy``    : 竞价涨停买单 (万元) → auction_zt_buy
+    - ``OpenAmo``      : 今日开盘金额 (元, mock_adapter 注释确认) → auction_amount (转万元)
+    - ``OpenAmoPre1``  : 昨开盘金额 (万元) → open_amount_pre
+    - ``OpenVolPre1``  : 昨开盘量 (手) → open_vol_pre
+    - ``L2OrderNum``   : L2 委托数 → l2_order_num
+    - ``L2TicNum``     : L2 笔数 → l2_tic_num
+
+    评分公式 (0-100, ``auction_pct`` 为百分比形式):
+    - surge     = min(auction_pct / 10 * 40, 40)            # 竞价涨幅, 10% 封顶 40 分
+    - zt_flag   = 20 if auction_zt_buy > 0 else 0           # 有竞价涨停买单 +20
+    - vol_ratio = min(auction_amount / open_amount_pre * 30, 30)  # 量比同比, 1 倍 = 30 分
+    - l2        = min(l2_order_num / 100, 10)               # L2 委托数, 1000 单封顶 10 分
+    - auction_score = surge + zt_flag + vol_ratio + l2
+
+    字段缺失返回 0, 不报错。
+    """
+    auction_pct = _safe_float(info.get("VOpenZAF"))  # 百分比形式 (5.23 = 5.23%)
+    auction_zt_buy = _safe_float(info.get("OpenZTBuy"))
+    # OpenAmo 单位为元 (mock_adapter 注释: "OpenAmo 单位为元"), 转 万元 与 OpenAmoPre1 单位对齐
+    open_amo = _safe_float(info.get("OpenAmo"))
+    auction_amount = open_amo / 10000.0 if open_amo > 0 else 0.0
+    open_amount_pre = _safe_float(info.get("OpenAmoPre1"))
+    open_vol_pre = _safe_float(info.get("OpenVolPre1"))
+    l2_order_num = int(_safe_float(info.get("L2OrderNum")))
+    l2_tic_num = int(_safe_float(info.get("L2TicNum")))
+
+    # 评分
+    surge_score = min(auction_pct / 10.0 * 40.0, 40.0)
+    zt_flag = 20.0 if auction_zt_buy > 0 else 0.0
+    if open_amount_pre > 0:
+        vol_ratio_score = min(auction_amount / open_amount_pre * 30.0, 30.0)
+    else:
+        vol_ratio_score = 0.0
+    l2_score = min(l2_order_num / 100.0, 10.0)
+    auction_score = surge_score + zt_flag + vol_ratio_score + l2_score
+
+    return {
+        "auction_pct": round(auction_pct, 4),
+        "auction_amount": round(auction_amount, 2),
+        "auction_zt_buy": round(auction_zt_buy, 2),
+        "open_amount_pre": round(open_amount_pre, 2),
+        "open_vol_pre": round(open_vol_pre, 2),
+        "l2_order_num": l2_order_num,
+        "l2_tic_num": l2_tic_num,
+        "auction_score": round(auction_score, 2),
+        "score_detail": {
+            "surge": round(surge_score, 2),
+            "zt_flag": round(zt_flag, 2),
+            "vol_ratio": round(vol_ratio_score, 2),
+            "l2": round(l2_score, 2),
+        },
+    }
+
+
+def _in_auction_hours(cfg: Any) -> bool:
+    """是否在集合竞价时段 (09:15-09:25)。
+
+    - Mock 模式: 强制 ``True`` (沙箱友好, 与 ``MonitorEngine._in_trading_hours`` 同策略)
+    - Real 模式: 严格判断当前时间在 09:15-09:25 之间 (周末返回 False)
+    """
+    mode = str(cfg.get("app.adapter_mode", "mock"))
+    if mode == "mock":
+        return True
+    now = datetime.now()
+    if now.weekday() >= 5:  # 周六/日
+        return False
+    hhmm = now.strftime("%H:%M")
+    return "09:15" <= hhmm < "09:25"
 
 
 def _deterministic_hash_float(code: str, salt: str, lo: float, hi: float) -> float:

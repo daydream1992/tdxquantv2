@@ -223,6 +223,10 @@ class QuoteSnapshot(BaseModel):
     - ``big_buy_ratio``: 大买占比 (0~1, ``TotalBVol / (TotalBVol+TotalSVol)``)
     - ``turnover_rate``: 换手率% (来自 ``fHSL``)
 
+    新增竞价字段 (R13-2b):
+    - ``auction_pct``: 竞价涨幅 (小数形式, 0.0523 = 5.23%, 来自 ``VOpenZAF/100``)。
+      与 ``pct`` 同为小数形式, 缺失返回 0.0。
+
     所有新字段默认 0.0, 兼容旧调用方。
     """
 
@@ -237,6 +241,7 @@ class QuoteSnapshot(BaseModel):
     main_inflow: float = 0.0
     big_buy_ratio: float = 0.0
     turnover_rate: float = 0.0
+    auction_pct: float = 0.0
 
 
 class FlowRankingItem(BaseModel):

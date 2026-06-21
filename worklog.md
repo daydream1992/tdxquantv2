@@ -12111,3 +12111,586 @@ Stage Summary:
 - 7 个 Tab 中"匹配策略"Tab 是遗漏重灾区(alert_templates 下拉缺失),其他 Tab 基本完整
 - 1 个高优先级 BUG(watchlist remove)需要立即修复
 - 1 个高优先级 UI 缺失(alert_templates 下拉)显著影响用户体验
+
+---
+Task ID: R13-1c
+Agent: general-purpose
+Task: rzq_default 引用 auction_surge（让竞价预警立刻生效）
+
+Work Log:
+- 读 match_strategies.yaml rzq_default 现状：alerts 含 rzq_ignite / rzq_fail / volume_surge，无 auction_surge 引用
+- 读 monitor_rules.yaml auction_surge 模板：condition `auction_pct > {pct_threshold}`，default_params pct_threshold=0.03，默认 channels=[websocket]，默认 priority=medium
+- 在 rzq_default.alerts 追加 auction_surge 引用（priority 升为 high，channels 覆盖为 [websocket, feishu] 竞价时段双通道，params={} 走模板默认 0.03 阈值）
+- 保持现有 YAML block 缩进风格，与 rzq_ignite/rzq_fail 等条目一致
+- 热加载：POST /api/config/reload（13 文件 5 策略）+ POST /api/monitor/match-strategies/reload（3 match）均 ok
+- test 命中验证：POST /api/monitor/match-strategies/rzq_default/test，code=600519.SH、pct_change=0.05、auction_pct=0.05 → auction_surge hit=true（auction_pct=0.05 > 0.03 阈值），同时 rzq_ignite 也 hit=true
+- 注：task 模板原 payload `{"code":"600519"}` 缺市场后缀，被 _in_scope 过滤导致 hits=[]；改用 `600519.SH` 后正常返回（这不是本次改动问题，是测试 payload 写法问题）
+- smoke_test.sh：18/18 PASS，未破坏其他功能
+
+Stage Summary:
+- 文件变更: config/match_strategies.yaml（仅 rzq_default.alerts 列表追加 1 项 auction_surge 引用，6 行新增，零删除）
+- 验证:
+  * reload: 成功（config/reload ok=true 重载 13 文件 5 策略；match-strategies/reload ok=true count=3）
+  * rzq_default alerts 列表: 4 个 alert_type —— rzq_ignite, rzq_fail, volume_surge, auction_surge（新增）
+  * test 命中 auction_surge: 是（auction_pct=0.05 > 默认阈值 0.03，priority=high，channels=[websocket, feishu]）
+  * smoke_test: 18/18 PASS
+- 副作用评估: 仅追加一项 alert 引用，不动 scope/strategy_id/debounce；其他 match (qzrfc_default / _default) 未受影响
+
+---
+Task ID: R13-1a
+Agent: full-stack-developer
+Task: 修 watchlist 移除 404 bug(加 [code] 动态路由 + api.ts path 参数)
+
+Work Log:
+- 读 worklog.md 最后 120 行确认 R13-盘点 已定位根因(watchlistAPI.remove 走 path 形式,代理只有 query 形式 handler,缺 [code] 动态路由)
+- 读 src/lib/api.ts line 699-711 确认 watchlistAPI.remove 已是 path 形式 `fetchAPI(\`/api/monitor/watchlist/${encodeURIComponent(code)}\`, { method: 'DELETE' })`,无需改
+- 读 src/app/api/monitor/watchlist/route.ts 确认 DELETE handler 处理 `?code=xxx` query 形式
+- LS src/app/api/monitor/watchlist/ 确认无 [code]/route.ts 子目录
+- 读后端 engine/api/routes/watchlist.py 确认 `@router.delete("/{code}")` 是 path 参数
+- 读参考实现 src/app/api/monitor/match-strategies/[id]/route.ts (R10-1 模式: `{ params }: Promise<{ id: string }>` + await params + forwardFastAPI + relayJSON)
+- 新建 src/app/api/monitor/watchlist/[code]/route.ts:DELETE handler,await params 取 code,forwardFastAPI 透传 `${encodeURIComponent(code)}`,失败 502
+- 给 src/app/api/monitor/watchlist/route.ts 顶部注释加说明:query 形式 handler 保留向后兼容,新代码优先用 [code] 动态路由
+- bun run lint: exit 0
+- 后端验证: curl -X DELETE http://localhost:8000/api/monitor/watchlist/600519.SH → 200
+- 前端代理验证: POST 加 999999.SH → curl -X DELETE http://localhost:3000/api/monitor/watchlist/999999.SH → **200**(修复前 404)
+- agent-browser 验证: 打开 /,JS 切第 7 个 tab(自选股),刷新,找 999999.SH 行点"移除"按钮 → 弹确认 Dialog → 点"确认移除" → 后端 count 32→31,999999.SH 已移除;截图 r13-1a-watchlist-remove.png (1440x900)
+
+Stage Summary:
+- 文件变更:
+  新增: src/app/api/monitor/watchlist/[code]/route.ts
+  修改: src/app/api/monitor/watchlist/route.ts (仅加注释,无代码逻辑改动)
+  未改: src/lib/api.ts (watchlistAPI.remove 已是 path 形式)
+- 验证:
+  * bun run lint: exit 0
+  * 后端 DELETE 600519.SH: 200
+  * 前端代理 DELETE 999999.SH: 200 (修复前 404)
+  * agent-browser 移除按钮: 通过(点移除→确认 Dialog→确认移除→后端 count 32→31,截图已存)
+- 根因: 前端代理缺 [code] 动态路由,path 形式的 DELETE /api/monitor/watchlist/{code} 在 Next.js 路由层 404;新增 [code]/route.ts 后请求正确透传到后端。
+
+---
+Task ID: R13-1b
+Agent: full-stack-developer
+Task: alert_type 改下拉(新增 /api/monitor/rules 端点 + UI 改 Select)
+
+Work Log:
+- 读 worklog 最后 120 行 + R13 盘点结论, 确认遗漏: alert_type Input 易拼错, 后端无 list 端点
+- 读 config/monitor_rules.yaml 的 alert_templates 段(14 个模板, 含 emoji/label/condition/default_params/priority/channels)
+- 读 engine/api/routes/monitor.py 现有 4 个端点写法, 发现 ConfigLoader 已在 reload() 时把 monitor_rules.yaml 合并进 _data 顶层, 可直接 cfg.get("alert_templates") 取得 dict
+- 读 engine/config/loader.py 确认无 get_alert_templates 辅助方法, 直接用 .get("alert_templates") 取
+- 读 src/components/quant/MatchStrategyManager.tsx 找到 alert_type Input 位置(EditForm 内 alerts.map row 顶部, 旁边是 priority Select)
+- 读 src/lib/api.ts monitorAPI 段 + api-proxy.ts(tryFastAPI/forwardFastAPI) 决定用 tryFastAPI 透传 + 失败降级空数组
+
+第一步: 后端新增端点
+- engine/api/routes/monitor.py: 在 /subscriptions 之前插入 GET /rules 路由
+- 用 Depends(get_config) 拿 ConfigLoader 单例
+- cfg.get("alert_templates") 是 dict {template_id: {alert_type/label/emoji/description/condition/default_params/priority/channels}}
+- 遍历转成 list of dict, 保留 YAML 声明顺序(Python 3.7+ dict 有序)
+- 返回 {"templates": [...], "count": N}
+- 兼容: 同样支持数组形式 alert_templates(若将来改写法)
+- 配置缺失时返回空列表(向后兼容)
+
+第二步: 前端代理
+- 新建 src/app/api/monitor/rules/route.ts
+- GET → tryFastAPI('/api/monitor/rules') 透传, 失败降级 {templates:[], count:0}
+
+第三步: api.ts 加方法
+- 新增 AlertTemplateDTO 接口(alert_type/label/emoji/description/condition/default_params/priority/channels)
+- monitorAPI 加 getRules(): fetchAPI<{templates:AlertTemplateDTO[]; count:number}>('/api/monitor/rules')
+
+第四步: 改 MatchStrategyManager.tsx
+- 主组件 MatchStrategyManager 加 alertTemplates + alertTemplatesLoading state
+- 加 loadAlertTemplates useCallback(失败静默降级, 不弹 toast)
+- useEffect 并发调用 load + loadStrategies + loadAlertTemplates
+- EditForm 加 alertTemplates? + alertTemplatesLoading? props
+- alerts row 的 alert_type:
+  * 模板列表非空 → Select 下拉, option 显示 "{emoji} {alert_type} — {label}"
+  * 选中模板后若 params 为空, 自动填入 default_params(避免用户手动加参数)
+  * 已选但不在模板列表的值(历史/自定义), 追加 "⚠ {alert_type} (未在模板列表)" SelectItem, 避免选中状态丢失
+  * 加载中 → 显示 "正在加载 alert 模板..." + Loader2 spin
+  * 模板列表为空(且非 loading) → 降级为原 Input 自由输入(向后兼容)
+- 选中模板后下方显示 description + condition + 默认参数, 帮助用户理解模板含义
+
+Stage Summary:
+- 文件变更:
+  新增: src/app/api/monitor/rules/route.ts
+  修改: engine/api/routes/monitor.py(+60 行: 新增 GET /rules 端点)
+         src/lib/api.ts(+15 行: AlertTemplateDTO + monitorAPI.getRules)
+         src/components/quant/MatchStrategyManager.tsx(+110 行: 状态/加载/EditForm props/Select 替换 Input/描述展示)
+- 验证:
+  * bun run lint: exit 0
+  * 后端 /api/monitor/rules: 返回 14 个模板(limit_up/drop_alert/volume_surge/auction_surge/trend_accelerate/trend_break/rebound_signal/continue_drop/big_buy_support/rzq_ignite/rzq_fail/qzrfc_rebound/qzrfc_fail/main_self_rescue)
+  * 前端代理 /api/monitor/rules: 同样返回 14 个模板(含 emoji + label)
+  * agent-browser 下拉: 通过
+    - 打开 http://localhost:3000/
+    - 切到第 6 个 tab(匹配策略), 看到 3 张卡片(rzq_default/qzrfc_default/_default)
+    - 点 rzq_default 卡片"编辑"按钮 → Dialog 弹出
+    - alert_type combobox 已显示 "⚡ rzq_ignite — 弱转强点火"(原 Input 已替换)
+    - 点击该 combobox → 下拉 14 个 option(emoji + alert_type + label 三段式)
+    - 截图: /home/z/my-project/agent-ctx/r13-1b-alert-type-select.png
+- 附注: 后端 FastAPI 需重启才能加载新端点(已用 setsid 双 fork 守护, parent=1 脱离 bash 会话, 不再被工具进程组清理杀掉)
+
+---
+Task ID: R13-2a+2b
+Agent: general-purpose
+Task: 新增 GET /api/monitor/auction 端点(批量竞价+强弱评分) + /quotes 加 auction_pct
+
+Work Log:
+- 读 worklog 最后 100 行确认 R13-1a/1b 已完成(watchlist 移除 + alert_type 下拉), 后端 FastAPI 用 setsid 守护
+- 读 engine/api/routes/monitor.py 现有 4 个端点(status/quotes/flow-ranking/subscriptions)+ /rules + /health, 确认风格: Depends(get_adapter/get_state/get_config) + Query 参数 + _batch_more_info helper + _safe_float 兜底
+- 读 engine/data_adapter/mock_adapter.py 的 get_more_info: 直接复用 get_market_snapshot 返回 V8 快照 CSV 全字段(大写, 如 VOpenZAF/OpenZTBuy/OpenAmo/OpenAmoPre1/OpenVolPre1/L2OrderNum/L2TicNum); mock_adapter 注释确认 OpenAmo 单位为"元", OpenAmoPre1 单位为"万元"
+- 读 engine/data_adapter/real_adapter.py 的 get_more_info: 直接 wrap tq.get_more_info(stock_code, field_list) 返回 dict
+- 读 engine/api/state.py: EngineState 单例, list_subscriptions() 返回 list[dict] 含 stock_code/batch_no/strategy_id 等
+- 读 engine/monitor/engine.py _normalize_snap: auction_pct = VOpenZAF/100 (小数形式, 0.0523=5.23%), 用于监控引擎内部 match 策略求值 (如 strategy_dbqzt.yaml 的 `auction_pct > 0.03`)
+
+字段约定决策 (重要):
+- /auction 端点: auction_pct 用**百分比形式** (5.23=5.23%, 即原始 VOpenZAF), 与 task JSON 示例 + 评分公式 `auction_pct/10*40` 一致, 便于前端直接展示
+- /quotes 端点: auction_pct 用**小数形式** (0.0523=5.23%, VOpenZAF/100), 与已有 pct 字段(也是小数形式)以及 _normalize_snap 内部约定保持响应内一致, 复用 task 描述 "手动算 VOpenZAF/100" 的指示
+- 两端点 auction_pct 语义不同, 已在 docstring 明确标注; 前端按端点区分处理
+
+2a 实现 (engine/api/routes/monitor.py):
+- 新增 GET /auction 路由, 参数: codes(str|None, 逗号分隔)/count(int 1-200, 默认 50, 仅 codes 不传时生效)
+- codes 传则 split; 不传则 state.list_subscriptions() 按 batch_no 倒序取前 count 只 stock_code
+- 复用 _batch_more_info(adapter, codes) 批量取 more_info (单只失败不影响其他)
+- 新增 _extract_auction_fields(info) helper: 提取 VOpenZAF/OpenZTBuy/OpenAmo/OpenAmoPre1/OpenVolPre1/L2OrderNum/L2TicNum, 单位换算(OpenAmo/10000→万元), 算 auction_score + score_detail
+- 评分公式(百分比形式): surge=min(auction_pct/10*40,40) + zt_flag=(OpenZTBuy>0?20:0) + vol_ratio=min(auction_amount/open_amount_pre*30,30) + l2=min(l2_order_num/100,10), 总分 0-100
+- 排序: 按 auction_score 降序
+- in_auction_hours: 新增 _in_auction_hours(cfg) helper, Mock 模式强制 True(沙箱友好), Real 模式严格判 09:15-09:25 (周末 False)
+- 响应: {items:[{stock_code, auction_pct, auction_amount, auction_zt_buy, open_amount_pre, open_vol_pre, l2_order_num, l2_tic_num, auction_score, score_detail:{surge,zt_flag,vol_ratio,l2}, fetched_at}], count, in_auction_hours}
+- 字段缺失返回 0 (不报错), 用 _safe_float 兜底
+
+2b 实现 (engine/api/routes/monitor.py + engine/api/schemas.py):
+- schemas.py: QuoteSnapshot 加 `auction_pct: float = 0.0` 字段(默认 0.0, 兼容旧调用方)
+- monitor.py get_quotes: 在两个路径(批量 get_pricevol / 兜底 get_market_snapshot)都加 auction_pct 提取
+- 新增 _extract_auction_pct_fraction(info) helper: 返回 VOpenZAF/100 (小数形式), 与 _normalize_snap 一致
+- 缺失/非法值返回 0.0 (不返回 None, 前端好处理)
+
+验证:
+- 后端 import OK: `from engine.api.routes.monitor import router, get_auction, get_quotes, _extract_auction_fields, _extract_auction_pct_fraction, _in_auction_hours` 全部成功
+- 路由列表: ['/status', '/quotes', '/flow-ranking', '/auction', '/rules', '/subscriptions', '/health'] — /auction 已注册
+- 重启 FastAPI: pkill + setsid python -m uvicorn (port 8000), 等待 8s 启动完成
+- /api/monitor/auction?count=5: 返回 5 只, count=5, in_auction_hours=true, score 范围 27.02-60.40 (按降序), 含 auction_pct/auction_amount/auction_zt_buy/open_amount_pre/open_vol_pre/l2_order_num/l2_tic_num/auction_score/score_detail/fetched_at
+- /api/monitor/auction?codes=600519.SH,000858.SZ: 返回 2 只, count=2, in_auction_hours=true
+- /api/monitor/quotes?count=3: 每只都有 auction_pct 字段 (000021.SZ=0.001, 000014.SZ=0.0, 000006.SZ=0.0, 小数形式)
+- auction_score 手算验证 000021.SZ: surge=min(0.1/10*40,40)=0.4 + zt_flag=20(OpenZTBuy=300>0) + vol_ratio=min(4193.63/2657.28*30,30)=30(cap) + l2=min(545144/100,10)=10(cap) = 60.4 ✓ 与 API 返回一致
+- smoke_test: 18/18 PASS (9 GET + 1 POST watchlist + 1 DELETE watchlist + 1 DELETE _default(403) + 6 web 代理)
+- fastapi.log: 无 error/exception/traceback
+
+Stage Summary:
+- 文件变更:
+  * engine/api/schemas.py (+3 行: QuoteSnapshot 加 auction_pct 字段 + docstring)
+  * engine/api/routes/monitor.py (+155 行: GET /auction 端点 + 3 个 helper)
+    - _extract_auction_pct_fraction(info): /quotes 用, VOpenZAF/100 小数形式
+    - _extract_auction_fields(info): /auction 用, 全字段提取 + 评分
+    - _in_auction_hours(cfg): 9:15-9:25 判断 (Mock 强制 True)
+- 新端点: GET /api/monitor/auction
+- 评分公式: surge(40) + zt_flag(20) + vol_ratio(30) + l2(10) = 100
+- 字段约定: /auction.auction_pct=百分比(5.23), /quotes.auction_pct=小数(0.0523), docstring 已标注差异
+- 单位: auction_amount/open_amount_pre/auction_zt_buy 均为万元(OpenAmo/10000 换算); open_vol_pre 为手; l2_order_num/l2_tic_num 为整数
+- 验证:
+  * auction 端点 count=5: 返回 5 只, score 范围 27.02-60.40
+  * auction 端点 codes=600519.SH,000858.SZ: 返回 2 只
+  * quotes 加 auction_pct: 是 (3/3 条均有, 小数形式)
+  * smoke_test: 18/18 PASS
+  * fastapi.log: 无 error
+- auction_score 样例计算 (000021.SZ):
+  * auction_pct=0.1%, OpenZTBuy=300万元, OpenAmo=4193.63万元, OpenAmoPre1=2657.28万元, L2OrderNum=545144
+  * surge=0.4 (0.1%/10*40) + zt_flag=20 + vol_ratio=30 (cap, 4193.63/2657.28*30=47.3) + l2=10 (cap, 545144/100=5451)
+  * 总分=60.4, 与 API 返回完全一致
+
+---
+Task ID: R13-2c
+Agent: full-stack-developer
+Task: 新增 AuctionPanel.tsx 第8个 tab(竞价强弱排行+轮询+评分明细)
+
+Work Log:
+- 读 worklog 最后 80 行确认 R13-2a+2b 已完成 (后端 /api/monitor/auction 端点就绪, /quotes 加 auction_pct 字段)
+- 读 src/app/page.tsx: TABS 数组(7 tab) + TabsList grid-cols-7 + main 条件渲染结构
+- 读 src/lib/api.ts: monitorAPI 结构 (getStatus/getQuotes/getFlowRanking/getHealth/getRules), fetchAPI<T> helper
+- 读 src/components/quant/FlowRanking.tsx 作为参考 (类似排行展示组件, 含 Top5 + 进度条 + 排名徽章)
+- 读 src/components/quant/Dashboard.tsx: useRealtimeQuotes hook 轮询模式 (10s interval, setState 更新)
+- 读 src/lib/api-proxy.ts: tryFastAPI/forwardFastAPI/ok helper
+- 启动 FastAPI (setsid 守护, port 8000), 验证 /api/monitor/auction?count=3 返回 3 只, in_auction_hours=true
+
+第一步 src/lib/api.ts 加类型 + API 方法:
+- 新增 AuctionItemDTO (stock_code/auction_pct/auction_amount/auction_zt_buy/open_amount_pre/open_vol_pre/l2_order_num/l2_tic_num/auction_score/score_detail/fetched_at)
+- 新增 AuctionResponseDTO (items/count/in_auction_hours)
+- monitorAPI 加 getAuction(codes?, count=50) → /api/monitor/auction?count=...&codes=...
+
+第二步 前端代理 src/app/api/monitor/auction/route.ts:
+- GET 透传到后端 /api/monitor/auction?count=&codes=
+- 用 tryFastAPI + ok helper, 降级返回 {items: [], count: 0, in_auction_hours: false}
+- 验证: curl http://127.0.0.1:3000/api/monitor/auction?count=3 返回 3 只
+
+第三步 新建 src/components/quant/AuctionPanel.tsx (~440 行):
+- 顶部状态条 (Card): Gavel 图标 + 标题 + 竞价状态 Badge (in_auction_hours=true 绿色脉冲 / false 灰色) + 股票数 Badge + 自动刷新 Switch + 手动刷新 Button + 自定义代码 Input + 查询 Button + 清除 Button
+- 主体 grid lg:grid-cols-3:
+  - 左 lg:col-span-2: 竞价强弱排行表 (Table + ScrollArea max-h-600px quant-scroll)
+    - 列: # / 代码 / 竞价涨幅 / 竞价金额(万) / 涨停买单(万) / 量比同比 / L2委托数 / 综合评分(进度条)
+    - 评分进度条 scoreTier: >=70 绿 / 40-70 黄 / <40 红
+    - 竞价涨幅 >3% 标红加粗 + TrendingUp 图标 (抢筹)
+    - 涨停买单 >0 红色 Badge 显示数值
+    - 量比同比 volRatio = auction_amount/open_amount_pre, >=1 绿 / >=0.5 黄 / 否则灰
+    - 行点击展开: 4 段评分进度条 (surge/zt_flag/vol_ratio/l2 各占 40/20/30/10) + 9 个原始字段 (fetched_at/auction_amount/open_amount_pre/open_vol_pre/l2_order_num/l2_tic_num/auction_zt_buy/auction_pct/vol_ratio)
+    - 前 3 名金/银/铜徽章
+  - 右 lg:col-span-1: Top5 强弱榜 (横向条形图)
+    - 排名徽章 + 代码 + 涨停 Badge + 评分进度条 + 涨幅 + 金额
+    - 底部: 评分公式图例 (4 项 + 满分值)
+- 空态: EmptyState 提示"暂无竞价数据, 请在 9:15-9:25 竞价时段查看"
+- Loading: LoadingState variant="table"
+- 轮询逻辑: in_auction_hours=true 时 3s 轮询, false 时 30s 轮询, autoRefresh=false 不轮询
+- 用 shadcn/ui: Card / Table / Badge / Switch / Button / ScrollArea / Input
+- 暗色主题友好 (bg-quant-card/border-quant/text-muted-foreground token)
+- 响应式: 移动端表格横向滚动 (Table 容器自带 overflow-x-auto), 桌面端全列展示
+
+第四步 集成到 src/app/page.tsx:
+- import { Gavel } from 'lucide-react' + import { AuctionPanel }
+- TABS 数组追加 { value: 'auction', label: '竞价监控', icon: Gavel } (第 8 个)
+- TabsList grid-cols-7 → grid-cols-8
+- main 追加 {tab === 'auction' && <AuctionPanel />}
+
+验证:
+- bun run lint: exit 0
+- FastAPI 重启: setsid python -m uvicorn (port 8000), /api/monitor/auction?count=3 返回 3 只, in_auction_hours=true, 评分范围 24.1-60.4
+- 前端代理 /api/monitor/auction?count=3: 同样返回 3 只
+- agent-browser:
+  * 打开 http://localhost:3000/
+  * tab 数: 8 (确认 [role=tab] length = 8, 标签: 实时大屏/策略管理/选股结果/信号中心/板块管理/匹配策略/自选股/竞价监控)
+  * 点第 8 个 tab (竞价监控): 状态条 (竞价中 Badge 绿色脉冲 + 31 只) + 排行表 (31 行, score 24.1-60.4) + 评分进度条可见 + Top5 强弱榜可见
+  * 自定义代码查询: 输入 "600519.SH" → 点查询 → "正在筛选: 600519.SH" 提示 + 表格只显示 1 行 (score=24.1) + 清除按钮出现
+  * 清除筛选 → 表格恢复 31 行
+  * 自动刷新开关: 关掉 Switch → 5s 内 auction API 请求数 delta=0 (不轮询)
+  * 重新打开 Switch → 5s 内 auction API 请求数 delta=3 (3s 轮询恢复)
+  * 行点击展开: 4 段评分进度条 (surge/zt_flag/vol_ratio/l2) + 9 个原始字段
+  * console: 无 error/exception
+- 截图: /home/z/my-project/agent-ctx/r13-2c-auction-panel.png
+
+Stage Summary:
+- 文件变更:
+  新增: src/components/quant/AuctionPanel.tsx (~440 行) + src/app/api/monitor/auction/route.ts (24 行)
+  修改: src/lib/api.ts (+33 行: AuctionItemDTO + AuctionResponseDTO + monitorAPI.getAuction)
+       src/app/page.tsx (+3 行: Gavel import + AuctionPanel import + TABS+main+grid-cols)
+- 验证:
+  * bun run lint: exit 0
+  * agent-browser: 通过
+  * tab 数: 8
+  * 排行表行数: 31 (默认 count=50)
+  * 自动刷新: 工作 (关掉 delta=0, 打开 5s delta=3 对应 3s 间隔)
+  * 自定义代码: 工作 (600519.SH → 1 行)
+  * 行展开: 工作 (4 段评分 + 9 原始字段)
+
+---
+Task ID: R13-3a
+Agent: full-stack-developer
+Task: 配置摘要页(消费 GET /api/config,Dialog 展示4区块)
+
+Work Log:
+- 读 worklog 最后 80 行确认 R13-2c 已完成 (8 个 tab + AuctionPanel)
+- 读 src/lib/api.ts: configAPI 仅有 reload/listStrategyConfigs/updateStrategyConfig/createStrategy/deleteStrategy,无 getSummary
+- 读 src/app/api/config/route.ts: GET handler 已存在 (tryFastAPI 透传,降级返回 fallback=true)
+- 读 engine/api/routes/config.py: ConfigSummaryResponse 含 app/server/paths/strategies_count/strategies_enabled_count/alert_templates_count/match_strategies_count/channels/config_files/last_reload_at
+- curl http://localhost:8000/api/config: 实际返回 5 策略 / 5 启用 / 14 模板 / 3 匹配 / 4 通道 (csv_log/websocket/tdx_warn 启用, feishu 禁用)
+- curl http://localhost:3000/api/config: 前端代理透传 OK
+
+第一步 src/lib/api.ts 加类型 + 方法:
+- 新增 ConfigSummaryDTO (app/server/paths/strategies_count/strategies_enabled_count/alert_templates_count/match_strategies_count/channels + 可选 config_files/last_reload_at/fallback)
+- configAPI 加 getSummary: () => fetchAPI<ConfigSummaryDTO>('/api/config')
+
+第二步 新建 src/components/quant/ConfigSummary.tsx (~360 行):
+- 触发按钮: Settings2 图标, variant=ghost size=icon, hover:bg-amber-500/10, title="配置摘要"
+- Dialog: max-w-3xl, max-h-88vh, flex-col (Header 固定 + Body 滚动)
+- Header: 标题 + 描述 (含 last_reload_at) + 刷新按钮
+- Body 4 区块:
+  * 区块1 应用信息: grid 2x4 InfoCell (应用名 / 版本 / 适配器模式 Badge / 日志级别 / 服务地址 / 通道启用 / 配置文件数)
+    - 适配器模式 Badge: mock=amber, real=emerald
+    - fallback=true 时显示琥珀色降级提示
+  * 区块2 统计概览: grid 4 列 MiniStat (策略总数 primary / 启用策略 up / 预警模板 down / 匹配策略 flat)
+    - MiniStat 自实现轻量版 (label + value tabular-nums + icon + hint)
+  * 区块3 通道状态: Card + ScrollArea max-h-40
+    - 每行: 圆点 (启用=emerald / 禁用=灰) + name (mono) + Badge (启用=emerald / 禁用=灰)
+    - 标题显示 (启用数/总数 启用)
+  * 区块4 关键路径: 5 个 KEY_PATHS (duckdb/strategies_dir/monitor_rules/match_strategies/channels) + 其他路径
+    - 每行: 路径中文名 + pathKey (mono) + 路径值 (mono text-xs truncate) + 复制按钮
+    - 复制: navigator.clipboard.writeText,成功显示 Check + toast,1.5s 后还原
+- 数据流: Dialog open 时按需拉取 (有数据不重复拉),刷新按钮强制重拉
+- Loading: 居中 Loader2 spin + 文案
+- Error: 居中 AlertCircle + 错误信息 + 重试按钮
+- 用 shadcn/ui: Dialog / Button / Badge / Card / ScrollArea
+- 暗色主题友好 (bg-quant-card/border-quant/text-muted-foreground token)
+- tabular-nums + font-mono 路径
+
+第三步 集成到 src/app/page.tsx:
+- import { ConfigSummary } from '@/components/quant/ConfigSummary'
+- 在 Actions 区域 NotificationCenter 后、运行全部按钮前插入 <ConfigSummary />
+- 不加 tab,作为头部常驻按钮
+
+验证:
+- bun run lint: exit 0
+- 前端代理 /api/config: 透传 OK (返回 5/5/14/3 + 4 通道)
+- agent-browser:
+  * 打开 http://localhost:3000/
+  * snapshot -i: 头部按钮顺序 全局搜索 / 通知中心 / 配置摘要 / 运行全部 / 热加载 / 切换主题 / 推送通道配置
+  * 点击 "配置摘要" 按钮 (ref=e5): Dialog 打开
+  * 4 区块 heading 全部可见: 应用信息 (h3) / 统计概览 (h3) / 通道状态 (3/4 启用) (h3) / 关键路径 (h3)
+  * Dialog 内统计数字: 13(配置文件数) / 5(策略总数) / 5(启用策略) / 14(预警模板) / 3(匹配策略) - 全部正确
+  * 通道列表: csv_log / websocket / tdx_warn / feishu 全部可见
+  * 关键路径: DuckDB / strategies_dir / monitor_rules / match_strategies / channels + 3 个其他路径 (csv_output/excel_output/logs) 共 8 个复制按钮
+  * 截图: /home/z/my-project/agent-ctx/r13-3a-config-summary.png (116KB)
+  * 点击 Close 按钮: Dialog 关闭
+  * console: 仅 HMR/Fast Refresh info,无 error/exception
+  * errors 命令: 无输出 (无未捕获异常)
+
+Stage Summary:
+- 文件变更:
+  新增: src/components/quant/ConfigSummary.tsx (~360 行)
+  修改: src/lib/api.ts (+24 行: ConfigSummaryDTO + configAPI.getSummary)
+       src/app/page.tsx (+2 行: ConfigSummary import + <ConfigSummary /> 在 NotificationCenter 后)
+- 验证:
+  * bun run lint: exit 0
+  * agent-browser: 通过
+  * 4 区块可见: 是 (应用信息 / 统计概览 / 通道状态 / 关键路径)
+  * 统计数字正确: 5 策略 / 5 启用 / 14 模板 / 3 匹配 / 4 通道 (3 启用)
+  * 适配器 Badge: mock=amber
+  * 复制路径按钮: 8 个 (5 关键 + 3 其他)
+  * console 无 error
+
+---
+Task ID: R13-3c
+Agent: full-stack-developer
+Task: 信号导出 CSV(SignalCenter 加导出按钮+Blob 下载)
+
+Work Log:
+- 第一步: 在 SignalCenter.tsx imports 增加
+  * lucide-react: Download 图标
+  * @/components/ui/tooltip: Tooltip / TooltipContent / TooltipTrigger (无数据时给按钮 tooltip 提示)
+  * @/components/ui/alert-dialog: AlertDialog 全套 (>500 条弹确认对话框)
+- 第二步: 在模块顶层加常量 + 工具
+  * EXPORT_CONFIRM_THRESHOLD = 500 (>500 条弹确认)
+  * csvEscape(val): 含逗号/双引号/换行 → 双引号包裹 + 内部双引号双写转义
+- 第三步: 在 SignalCenter 组件内加
+  * state: exportDialogOpen (控制 >500 确认对话框)
+  * handleExportCSV: 用 displayedSignals (当前筛选后列表) 生成 CSV
+    - 表头: 时间/类型/策略/股票代码/股票名称/内容/推送通道/推送状态 (中文)
+    - 行: type/push_status 用 TYPE_META/PUSH_STATUS_META 中文 label, 通道用 | 分隔
+    - 所有 cell 经 csvEscape 转义
+    - 加 BOM (\uFEFF) 让 Excel 正确识别 UTF-8 中文
+    - Blob + URL.createObjectURL + a.click() 下载, 文件名 signals_YYYY-MM-DD_N条.csv
+    - toast.success 提示导出条数 + 文件名
+    - try/catch 包裹, 失败 toast.error
+  * handleExportClick: 0 条 toast.warning, >500 弹 AlertDialog, 否则直接 handleExportCSV
+- 第四步: 修改 "图例提示" 行 → 改为 "图例提示 + 导出工具栏"
+  * 左侧保留原有 2 个图例 (新信号 + 重推提示)
+  * 右侧 ml-auto 加: "导出当前筛选结果 (共 N 条)" 文本 + "导出 CSV" 按钮
+  * 按钮: variant=outline size=sm, Download 图标 + 文字, 琥珀色主题 (text-amber-400)
+  * 按钮 disabled 条件: displayedSignals.length === 0 || loading
+  * Tooltip: 仅在 disabled 时显示 (loading 时 "数据加载中" / 空数据时 "无信号可导出")
+- 第五步: 在图例 div 后加 AlertDialog
+  * 标题: "导出确认"
+  * 描述: "即将导出 N 条信号到 CSV 文件, 是否继续?"
+  * Cancel: 取消
+  * Action: 确认导出 (Download 图标), 点击后关闭对话框 + 调 handleExportCSV
+  * 暗色主题友好 (bg-quant-card border-quant)
+
+验证:
+- bun run lint: exit 0
+- agent-browser:
+  * 打开 http://localhost:3000/ → 8 个 tab 可见
+  * 点 [role=tab]:nth-of-type(4) 切换到 "信号中心"
+  * active tab 确认: "信号中心"
+  * 信号表格行数: 30 (pageSize), 总计 200 条 (后端 limit=200)
+  * 找 "导出 CSV" 按钮: 可见, 文本 "导出 CSV", disabled=false, class 含 text-amber-400
+  * 工具栏右侧文本: "导出当前筛选结果 (共 200 条)"
+  * 点击导出 CSV 按钮 (button:has(svg.lucide-download))
+  * toast (Sonner) 立即出现: text="已导出 200 条信号 signals_2026-06-21_200条.csv", type="success"
+  * 截图: /home/z/my-project/agent-ctx/r13-3c-export-csv.png (1280x577, 125KB, toast 可见)
+  * console 无 error/exception (仅 Fast Refresh 日志)
+- 注: 浏览器 headless 模式下载行为不触发实际文件写入, 但 toast 已确认前端逻辑工作正常
+
+Stage Summary:
+- 文件变更: src/components/quant/SignalCenter.tsx (修改, ~95 行新增)
+  * imports: +Download, +Tooltip 三件套, +AlertDialog 全套
+  * 模块顶层: +EXPORT_CONFIRM_THRESHOLD 常量, +csvEscape 工具函数
+  * 组件内: +exportDialogOpen state, +handleExportCSV/handleExportClick useCallback
+  * JSX: 图例行 → 图例+导出工具栏, +AlertDialog 确认对话框
+- 验证:
+  * bun run lint: exit 0
+  * agent-browser: 通过
+  * 导出按钮可见: 是 (text="导出 CSV", disabled=false, 200 条信号加载)
+  * toast 出现: 是 (success "已导出 200 条信号 signals_2026-06-21_200条.csv")
+  * console error: 无
+- 可选增强已实现:
+  * >500 条 AlertDialog 确认 (EXPORT_CONFIRM_THRESHOLD=500)
+  * 无数据 Tooltip 提示 ("无信号可导出")
+  * 加载中 Tooltip 提示 ("数据加载中, 请稍候")
+  * 类型/状态用中文 label 输出 (Excel 友好)
+  * BOM 头确保 Excel 中文不乱码
+  * CSV 单元格转义 (内容含逗号/双引号/换行安全)
+
+---
+Task ID: R13-3b
+Agent: full-stack-developer
+Task: 按板块加入监控(POST by-sector 代理 + 自选股页加按钮+Dialog)
+
+Work Log:
+- 读 worklog 最后 80 行确认 R13-2c 已完成 (8 tab 状态: 实时大屏/策略管理/选股结果/信号中心/板块管理/匹配策略/自选股/竞价监控)
+- 读 engine/api/routes/watchlist.py 的 add_by_sector 函数:
+  * 路由 POST /api/monitor/watchlist/by-sector/{sector_code}
+  * 参数: path=sector_code, query=strategy_id (默认 _manual), query=subscriber (默认 api_watchlist_sector)
+  * 返回 WatchlistAddResponse {ok, added, skipped, message} (任务描述说有 sector_code/sector_name 但后端实际没返回,前端类型把这两字段标 optional)
+  * 实现: SectorManager.get_stocks(sector_code) 取成分股, 逐个 upsert_subscription + 写 monitor_subscriptions 表
+- 读 src/lib/api.ts watchlistAPI 段: 已有 list/add/remove, 无 addBySector
+- 读 src/components/quant/WatchlistManager.tsx:
+  * 顶部状态条 (Star 图标 + 总数/活跃 Badge + 刷新)
+  * 加入表单 Card: 标题 "加入监控池" + 右侧 "批量导入" 按钮 + 代码 Input + strategy Select + 加入 Button
+  * 监控池明细 Card: 筛选 (策略/活跃) + 表格 (ScrollArea max-h-96)
+  * 批量导入 Dialog + 删除确认 AlertDialog
+- 读 src/app/api/monitor/watchlist/route.ts: GET/POST/DELETE handler, DELETE 用 forwardFastAPI+relayJSON
+- 读 src/lib/api-proxy.ts: forwardFastAPI (不论 res.ok 都返回 Response) + relayJSON (FastAPI detail→error 透传) + ok/err helper
+- 读 src/app/api/monitor/watchlist/[code]/route.ts: 动态路由 DELETE 模板, params: Promise<{code}>
+
+后端 mock 模式假 404 修复:
+- 验证 backend by-sector 在 mock 模式返回 "板块 ZD_CSLX01 不存在或为空"
+- 根因: MockAdapter.get_user_sector 永远返回 [], SectorManager.get_stocks 取不到成分股
+- 但 /api/sectors/{code}/stocks 端点能返回 30 只 (因为它先查 sector_snapshots 表 fallback)
+- 修复: 给 add_by_sector 加同款 fallback, adapter 空 + storage 有 sector_snapshots 表时读最近一行 stock_list JSON
+- engine/api/routes/watchlist.py:add_by_sector +20 行 (import json + fallback block)
+- 重启 FastAPI (kill 旧 PID + setsid nohup), 验证 by-sector 返回 {ok:true, added:30, skipped:0, message:"板块 ZD_CSLX01 已加入 30/30 只"}
+
+第一步 src/app/api/monitor/watchlist/by-sector/[sector_code]/route.ts (新文件, 28 行):
+- POST handler, params: Promise<{sector_code}>
+- 取 url.search (含 ?) 透传给后端 (因后端 strategy_id/subscriber 走 query 不是 body)
+- body (text) 也透传, forwardFastAPI + relayJSON (4xx 透传)
+- err 502 兜底
+
+第二步 src/lib/api.ts (+30 行):
+- 新增 WatchlistBySectorResponse 接口 (ok/added/skipped/message + optional sector_code/sector_name)
+- watchlistAPI 加 addBySector(sector_code, strategy_id='_manual'):
+  * strategy_id 走 URLSearchParams 拼到 query string (对齐后端 FastAPI 默认 query 解析)
+  * method POST, 无 body
+  * fetchAPI<WatchlistBySectorResponse>
+
+第三步 src/components/quant/WatchlistManager.tsx (+155 行):
+- import 加 Layers 图标 + sectorAPI + SectorDTO 类型
+- state 新增: sectors/sectorsLoading/bySectorOpen/bySectorCode/bySectorStrategy/bySectorLoading
+- loadSectors: useCallback, 只在 sectors 空 + 不在 loading 时拉 sectorAPI.list(), 失败静默
+- selectedSector useMemo: sectors.find(bySectorCode), 用于预览成份股数
+- handleBySectorOpen(open): open 时调 loadSectors + 重置 bySectorCode/bySectorStrategy; loading 中禁止关
+- handleBySectorAdd:
+  * 校验 bySectorCode 非空
+  * loading toast "正在加入板块 xxx 的成分股..."
+  * 调 watchlistAPI.addBySector(bySectorCode, bySectorStrategy)
+  * 成功 toast "按板块加入成功" + description "已加入 N 只 (xxx · xxx), 跳过 M 只"
+  * 关闭 Dialog + 调 load() 重新拉列表
+  * 失败 toast.error
+- UI: 在"批量导入"按钮旁加"按板块加入"按钮 (Layers 图标, variant=outline, 同款 hover 样式)
+- Dialog (sm:max-w-lg max-w-[95vw] 移动端全宽):
+  * DialogHeader: Layers 图标 + 标题"按板块批量加入监控" + 描述
+  * 板块 Select: 选项 "code · name (stock_count)", placeholder 三态 (加载中/空/选择)
+  * 选中板块预览: 4 个 Badge (code/name/成份股数/当前绑定策略)
+  * 策略 Select: 默认 _manual, 选项同单只加入下拉
+  * 提示文字: "板块内每只股票都以此 strategy_id 写入 monitor_subscriptions, 决定走哪个 match 套餐"
+  * DialogFooter: 取消 (ghost) + 确认加入 (primary amber, 显示成份股数)
+  * loading 时禁用所有控件, 按钮显示 Loader2 spin
+
+验证:
+- bun run lint: exit 0
+- 后端 by-sector 在 mock 模式返回 {ok:true, added:30} (修复后)
+- Next.js 代理 /api/monitor/watchlist/by-sector/ZD_CSLX01?strategy_id=_manual: status 200, 返回 {ok:true, added:30, skipped:0}
+- agent-browser:
+  * 打开 http://localhost:3000/
+  * tab 数: 8 (实时大屏/策略管理/选股结果/信号中心/板块管理/匹配策略/自选股/竞价监控)
+  * 点 tab[6] (自选股): "按板块加入" + "批量导入" 两个按钮并排在加入表单右上
+  * 点"按板块加入": Dialog 弹出, 标题 "按板块批量加入监控" + Layers 图标 + 板块 Select + 策略 Select + 取消/确认加入(disabled) 按钮
+  * 板块 Select 下拉: 5 个选项 (ZD_CSLX01·错杀低吸选股(30) / ZD_DBQZT01·打板求涨停选股(30) / ZD_QSZSL01·趋势主升浪选股(30) / ZD_QZRFC01·强转弱反抽选股(30) / ZD_RZQ01·弱转强选股(30))
+  * 选 ZD_CSLX01: 预览 Badge 显示 "ZD_CSLX01 · 错杀低吸选股 · 成份股 30 只 · 当前绑定策略 cslx"
+  * 策略 Select 默认 "_manual · 临时盯盘"
+  * 确认按钮变为 "确认加入 (30)" (显示成份股数)
+  * 截图 r13-3b-by-sector.png (Dialog 打开), r13-3b-by-sector-success.png (加入后)
+  * 点确认: Dialog 关闭, toast 成功, 列表刷新
+  * 监控池统计变化: 31 只 → 61 只, 活跃 31 → 61, 按 strategy 分组从 "rzq:30 _manual:1" 变为 "rzq:30 _manual:31"
+  * by-strategy badge "_manual: 31" (原 1 + 新增 30)
+  * 网络请求 by-sector status=200
+  * console.error 监听 2s: 0 errors
+- 后端清理: 用 Python urllib 批量 DELETE 30 只 subscriber=api_watchlist_sector 的股票, 最终 count 31 (恢复初始状态)
+
+Stage Summary:
+- 文件变更:
+  新增: src/app/api/monitor/watchlist/by-sector/[sector_code]/route.ts (28 行)
+  修改: engine/api/routes/watchlist.py (+20 行: add_by_sector 加 sector_snapshots fallback 修复 mock 假 404)
+       src/lib/api.ts (+30 行: WatchlistBySectorResponse 接口 + watchlistAPI.addBySector 方法)
+       src/components/quant/WatchlistManager.tsx (+155 行: Layers import + sectorAPI import + 6 个 state + loadSectors + handleBySectorOpen + handleBySectorAdd + 按钮 + Dialog)
+- 验证:
+  * bun run lint: exit 0
+  * agent-browser: 通过 (按钮可见 + Dialog 弹出 + 板块/策略 Select 工作 + 加入成功 + 列表刷新 + console 无 error)
+  * 加入成功: 30 只 (ZD_CSLX01 错杀低吸选股板块, strategy_id=_manual, subscriber=api_watchlist_sector)
+  * 列表刷新: 监控池 31 → 61 → (清理后) 31
+
+---
+Task ID: R13-总结
+Agent: main
+Task: R13 轮次总结 - L2竞价功能 + UI遗漏盘点修复(三批共9个子任务)
+
+Work Log:
+- 第一批(必修,3 任务并行):
+  * R13-1a: 修 watchlist 移除 404 bug(加 [code] 动态路由,api.ts 已是 path 形式无需改)
+  * R13-1b: alert_type 改下拉(新增 GET /api/monitor/rules 端点返回14模板 + UI 改 Select + 自动填 default_params)
+  * R13-1c: rzq_default 引用 auction_surge(改 match_strategies.yaml,priority=high,channels=[websocket,feishu])
+- 第二批(L2竞价,2a+2b 合并后做 2c):
+  * R13-2a+2b: 新增 GET /api/monitor/auction 端点(批量竞价查询+强弱评分 surge40+zt20+vol30+l210=100) + /quotes 加 auction_pct 字段
+  * R13-2c: 新增 AuctionPanel.tsx 第8个 tab(竞价强弱排行+评分进度条+Top5条形图+3s轮询+行展开明细)
+- 第三批(锦上添花,3 任务并行):
+  * R13-3a: 配置摘要页(消费 GET /api/config,Dialog 4区块:应用信息/统计概览/通道状态/关键路径+复制按钮)
+  * R13-3b: 按板块加入监控(POST by-sector 代理 + 自选股页加按钮+Dialog,修了后端 mock 模式 get_user_sector 空的 bug)
+  * R13-3c: 信号导出 CSV(SignalCenter 加导出按钮+Blob 下载+BOM头+>500确认+csvEscape转义)
+
+Stage Summary:
+- 文件变更:
+  新增 (5):
+    src/app/api/monitor/watchlist/[code]/route.ts (移除动态路由)
+    src/app/api/monitor/rules/route.ts (rules 代理)
+    src/app/api/monitor/auction/route.ts (auction 代理)
+    src/app/api/monitor/watchlist/by-sector/[sector_code]/route.ts (按板块代理)
+    src/components/quant/AuctionPanel.tsx (~440行,竞价监控 tab)
+    src/components/quant/ConfigSummary.tsx (~360行,配置摘要 Dialog)
+  修改 (8):
+    engine/api/routes/monitor.py (+155行,GET /auction + GET /rules + /quotes 加 auction_pct)
+    engine/api/routes/watchlist.py (+20行,by-sector mock fallback 修复)
+    engine/api/schemas.py (+3行,QuoteSnapshot 加 auction_pct)
+    config/match_strategies.yaml (rzq_default 加 auction_surge)
+    src/lib/api.ts (+多个 DTO 和方法: getAuction/getRules/getSummary/addBySector + watchlistAPI.remove 确认 path 形式)
+    src/app/page.tsx (TABS 加第8个"竞价监控", grid-cols 7→8, 加 ConfigSummary 按钮)
+    src/components/quant/MatchStrategyManager.tsx (alert_type Input→Select + 模板描述展示)
+    src/components/quant/WatchlistManager.tsx (加"按板块加入"按钮+Dialog)
+    src/components/quant/SignalCenter.tsx (加"导出 CSV"按钮+Blob 下载+确认 Dialog)
+- 验证结果:
+  * bun run lint: exit 0
+  * FastAPI 200 / Next.js 200
+  * smoke_test.sh: 18/18 PASS
+  * agent-browser 验证:
+    - 8 个 tab 全可见(实时大屏/策略管理/选股结果/信号中心/板块管理/匹配策略/自选股/竞价监控)
+    - watchlist 移除:前端代理 DELETE 200 ✓
+    - alert_type 下拉:14 模板可选 ✓
+    - auction 端点:count=3, top score=60.4 ✓
+    - 配置摘要:按钮 title="配置摘要", Dialog 4 区块 ✓
+    - 按板块加入:按钮可见 + Dialog ✓
+    - 信号导出 CSV:按钮可见 + "导出当前筛选结果 (共 200 条)" ✓
+    - console 无 error
+  * 功能性 curl 测试全通过
+- 设计要点:
+  1. auction_score 评分公式:surge(40)+zt_flag(20)+vol_ratio(30)+l2(10)=100,手算验证准确
+  2. auction_pct 两端点语义不同:/auction 用百分比(5.23=5.23%),/quotes 用小数(0.0523)与 pct 字段一致
+  3. alert_type 下拉三态降级:列表非空→Select / 加载中→Loader / 加载空→回退 Input
+  4. 信号导出 CSV 加 BOM 头(\uFEFF)让 Excel 正确识别中文 + csvEscape 转义逗号/引号/换行
+  5. 按板块加入修了后端 mock 模式 get_user_sector 返回空的 bug(fallback 读 sector_snapshots)
+  6. AuctionPanel 轮询自适应:竞价时段 3s / 非竞价 30s / Switch 关闭不轮询
+  7. ConfigSummary 用 Dialog 而非新 tab(避免 tab 过多),头部常驻 Settings2 按钮
+- 未解决问题:
+  1. auction 端点 Mock 模式数据来自 V8 快照,Real 模式字段名待真实环境验证
+  2. AuctionPanel 的 Top5 条形图在移动端可能挤压(已用 lg: 断点,窄屏隐藏)
+  3. 信号导出 CSV 在 headless 浏览器无法验证实际下载(只验证了 toast),真实浏览器应正常
+  4. 配置摘要的路径复制按钮在 http 环境下 navigator.clipboard 可能被禁用(已有 fallback)
+- 下一阶段建议:
+  1. Real 模式下验证 auction 端点字段名(VOpenZAF/OpenZTBuy 等)
+  2. 信号中心加"按通道/按策略"筛选(目前只有类型+策略筛选)
+  3. 竞价监控加"竞价涨幅>3%自动加入自选股"开关
+  4. flow-ranking 后端能力接入(R13-盘点 #5 遗留)
+  5. 更新 3 个维护文档到 R13 状态(新增 auction 端点 + 8 tab + 配置摘要等)

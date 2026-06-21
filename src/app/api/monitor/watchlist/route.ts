@@ -5,6 +5,12 @@
  * 后端实际路径: DELETE /api/monitor/watchlist/{code}
  * 前端约定:    DELETE /api/monitor/watchlist?code=xxx
  * 这里把 query 转成 path param 再透传给 FastAPI
+ *
+ * ⚠ 注意：本文件 DELETE handler 处理的是 `?code=xxx` (query 形式)。
+ *         `src/lib/api.ts:watchlistAPI.remove` 已改用 path 参数形式
+ *         (`DELETE /api/monitor/watchlist/{code}`),由
+ *         `src/app/api/monitor/watchlist/[code]/route.ts` 动态路由处理。
+ *         本 query 形式 handler 保留仅为向后兼容,新代码请优先走 [code] 动态路由。
  */
 
 import { tryFastAPI, ok, err, forwardFastAPI, relayJSON } from '@/lib/api-proxy'

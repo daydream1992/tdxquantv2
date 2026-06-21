@@ -49,10 +49,26 @@ import {
   Braces,
   Hash,
   Type as TypeIcon,
+  Download,
 } from 'lucide-react'
 import { StockTable, type Column } from './StockTable'
 import { LoadingState } from './LoadingState'
 import { EmptyState } from './EmptyState'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import {
   signalAPI,
   strategyAPI,
@@ -99,6 +115,17 @@ const CHANNEL_FILTER_ORDER: string[] = ['csv_log', 'websocket', 'tdx_warn', 'fei
 
 // 新信号判定阈值 (1 分钟)
 const NEW_SIGNAL_THRESHOLD_MS = 60 * 1000
+
+// R13-3c: 导出 CSV 时单条记录超过此条数弹确认对话框
+const EXPORT_CONFIRM_THRESHOLD = 500
+
+// R13-3c: CSV 单元格转义 (含逗号/双引号/换行 → 双引号包裹, 内部双引号双写转义)
+const csvEscape = (val: string): string => {
+  if (/[",\n\r]/.test(val)) {
+    return `"${val.replace(/"/g, '""')}"`
+  }
+  return val
+}
 
 export function SignalCenter() {
   const [signals, setSignals] = React.useState<SignalDTO[]>([])
@@ -276,6 +303,75 @@ export function SignalCenter() {
       toast.error('复制失败', { description: (e as Error).message })
     }
   }, [detailSignal])
+
+  // R13-3c: 导出确认对话框开关 (>500 条时弹窗确认)
+  const [exportDialogOpen, setExportDialogOpen] = React.useState(false)
+
+  // R13-3c: 导出当前筛选后的信号列表为 CSV (纯前端 Blob 下载)
+  const handleExportCSV = React.useCallback(() => {
+    const rows = displayedSignals
+    if (rows.length === 0) {
+      toast.warning('当前无信号可导出')
+      return
+    }
+    try {
+      // CSV 表头 (中文, 与表格列对齐)
+      const headers = [
+        '时间',
+        '类型',
+        '策略',
+        '股票代码',
+        '股票名称',
+        '内容',
+        '推送通道',
+        '推送状态',
+      ]
+      // CSV 行 (类型/推送状态用中文 label, 通道用 | 分隔)
+      const csvRows = rows.map((s) =>
+        [
+          s.time,
+          TYPE_META[s.type]?.label || s.type,
+          s.strategy_name || s.strategy_id || '',
+          s.stock_code || '',
+          s.stock_name || '',
+          s.content || '',
+          (s.pushed_channels || []).join('|'),
+          PUSH_STATUS_META[s.push_status]?.label || s.push_status,
+        ]
+          .map((cell) => csvEscape(String(cell)))
+          .join(',')
+      )
+      // BOM 让 Excel 正确识别 UTF-8 中文
+      const csv = '\uFEFF' + [headers.join(','), ...csvRows].join('\n')
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `signals_${new Date().toISOString().slice(0, 10)}_${rows.length}条.csv`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+      toast.success(`已导出 ${rows.length} 条信号`, {
+        description: `signals_${new Date().toISOString().slice(0, 10)}_${rows.length}条.csv`,
+      })
+    } catch (e) {
+      toast.error('导出失败', { description: (e as Error).message })
+    }
+  }, [displayedSignals])
+
+  // R13-3c: 点击导出按钮 (>500 条弹确认, 否则直接导出)
+  const handleExportClick = React.useCallback(() => {
+    if (displayedSignals.length === 0) {
+      toast.warning('当前无信号可导出')
+      return
+    }
+    if (displayedSignals.length > EXPORT_CONFIRM_THRESHOLD) {
+      setExportDialogOpen(true)
+      return
+    }
+    handleExportCSV()
+  }, [displayedSignals.length, handleExportCSV])
 
   // 判断是否新信号 (1 分钟内)
   const isNewSignal = React.useCallback((s: SignalDTO) => {
@@ -658,7 +754,7 @@ export function SignalCenter() {
         </div>
       </Card>
 
-      {/* 图例提示 */}
+      {/* 图例提示 + 导出工具栏 */}
       <div className="flex flex-wrap items-center gap-3 text-[10px] text-muted-foreground">
         <span className="flex items-center gap-1">
           <span className="inline-block w-3 h-0.5 bg-amber-400 rounded" />
@@ -668,7 +764,62 @@ export function SignalCenter() {
           <RefreshCw className="size-3" />
           点击行末"重推"可重新推送到所有启用通道
         </span>
+        <div className="ml-auto flex items-center gap-2">
+          <span className="hidden sm:inline tabular-nums">
+            导出当前筛选结果 (共 {displayedSignals.length} 条)
+          </span>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 gap-1.5 border-quant text-amber-400 hover:bg-amber-500/10 hover:text-amber-300 hover:border-amber-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                onClick={handleExportClick}
+                disabled={displayedSignals.length === 0 || loading}
+              >
+                <Download className="size-3.5" />
+                导出 CSV
+              </Button>
+            </TooltipTrigger>
+            {(displayedSignals.length === 0 || loading) && (
+              <TooltipContent side="left">
+                {loading ? '数据加载中, 请稍候' : '无信号可导出'}
+              </TooltipContent>
+            )}
+          </Tooltip>
+        </div>
       </div>
+
+      {/* R13-3c: 导出确认对话框 (>500 条时弹窗) */}
+      <AlertDialog open={exportDialogOpen} onOpenChange={setExportDialogOpen}>
+        <AlertDialogContent className="bg-quant-card border-quant">
+          <AlertDialogHeader>
+            <AlertDialogTitle>导出确认</AlertDialogTitle>
+            <AlertDialogDescription className="text-muted-foreground">
+              即将导出{' '}
+              <span className="text-amber-400 font-semibold tabular-nums">
+                {displayedSignals.length}
+              </span>{' '}
+              条信号到 CSV 文件, 是否继续?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="border-quant hover:bg-quant/40">
+              取消
+            </AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25 hover:text-amber-300"
+              onClick={() => {
+                setExportDialogOpen(false)
+                handleExportCSV()
+              }}
+            >
+              <Download className="size-3.5 mr-1.5" />
+              确认导出
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* 表格 */}
       {loading ? (

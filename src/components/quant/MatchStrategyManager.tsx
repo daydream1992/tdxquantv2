@@ -85,6 +85,7 @@ import { cn } from '@/lib/utils'
 import {
   matchStrategyAPI,
   strategyAPI,
+  monitorAPI,
   APIError,
   type MatchStrategyDTO,
   type MatchAlertDTO,
@@ -93,6 +94,7 @@ import {
   type MatchTestHitDTO,
   type MatchPriority,
   type StrategyDTO,
+  type AlertTemplateDTO,
 } from '@/lib/api'
 
 // ============================================================================
@@ -266,6 +268,9 @@ export function MatchStrategyManager() {
     copyAlerts: true,
     loading: false,
   })
+  // R13-1b: alert_templates 列表 (供 EditForm 的 alert_type 下拉)
+  const [alertTemplates, setAlertTemplates] = React.useState<AlertTemplateDTO[]>([])
+  const [alertTemplatesLoading, setAlertTemplatesLoading] = React.useState(false)
 
   // ------------------------------------------------------------------
   // 加载
@@ -291,10 +296,25 @@ export function MatchStrategyManager() {
     }
   }, [])
 
+  // R13-1b: 拉 alert_templates 列表
+  // 失败时不弹 toast (非关键路径, EditForm 会降级为 Input 自由输入)
+  const loadAlertTemplates = React.useCallback(async () => {
+    setAlertTemplatesLoading(true)
+    try {
+      const data = await monitorAPI.getRules()
+      setAlertTemplates(data.templates || [])
+    } catch {
+      setAlertTemplates([])
+    } finally {
+      setAlertTemplatesLoading(false)
+    }
+  }, [])
+
   React.useEffect(() => {
     load()
     loadStrategies()
-  }, [load, loadStrategies])
+    loadAlertTemplates()
+  }, [load, loadStrategies, loadAlertTemplates])
 
   // ------------------------------------------------------------------
   // 顶部：reload
@@ -700,6 +720,8 @@ export function MatchStrategyManager() {
               onChange={setEditForm}
               strategies={strategies}
               mode={editMode}
+              alertTemplates={alertTemplates}
+              alertTemplatesLoading={alertTemplatesLoading}
             />
           </ScrollArea>
 
@@ -1333,9 +1355,20 @@ interface EditFormProps {
   onChange: (next: EditFormState) => void
   strategies: StrategyDTO[]
   mode: 'create' | 'update'
+  /** R13-1b: alert_type 下拉用的模板列表 (空数组时回退为 Input 自由输入) */
+  alertTemplates?: AlertTemplateDTO[]
+  /** R13-1b: 模板列表加载中 (展示 loading 占位) */
+  alertTemplatesLoading?: boolean
 }
 
-function EditForm({ value, onChange, strategies, mode }: EditFormProps) {
+function EditForm({
+  value,
+  onChange,
+  strategies,
+  mode,
+  alertTemplates,
+  alertTemplatesLoading,
+}: EditFormProps) {
   const set = <K extends keyof EditFormState>(k: K, v: EditFormState[K]) =>
     onChange({ ...value, [k]: v })
 
@@ -1598,12 +1631,70 @@ function EditForm({ value, onChange, strategies, mode }: EditFormProps) {
               className="rounded-md border border-quant bg-quant-card/30 p-2 space-y-2"
             >
               <div className="flex items-center gap-2">
-                <Input
-                  className="h-7 text-xs font-mono flex-1"
-                  placeholder="alert_type (如 rzq_ignite)"
-                  value={a.alert_type}
-                  onChange={(e) => setAlert(i, { alert_type: e.target.value })}
-                />
+                {alertTemplates && alertTemplates.length > 0 ? (
+                  // R13-1b: alert_type 下拉选择 (从后端拉模板列表)
+                  <Select
+                    value={a.alert_type}
+                    onValueChange={(v) => {
+                      const tpl = alertTemplates.find((t) => t.alert_type === v)
+                      const patch: Partial<MatchAlertDTO> = { alert_type: v }
+                      // 选中模板后, 若 params 为空, 自动填入 default_params
+                      if (
+                        tpl &&
+                        tpl.default_params &&
+                        Object.keys(tpl.default_params).length > 0 &&
+                        (!a.params || Object.keys(a.params).length === 0)
+                      ) {
+                        patch.params = { ...tpl.default_params }
+                      }
+                      setAlert(i, patch)
+                    }}
+                  >
+                    <SelectTrigger className="h-7 text-xs font-mono flex-1">
+                      <SelectValue placeholder="选择 alert_type (模板下拉)" />
+                    </SelectTrigger>
+                    <SelectContent className="max-h-72">
+                      {alertTemplates.map((t) => (
+                        <SelectItem
+                          key={t.alert_type}
+                          value={t.alert_type}
+                          className="text-xs font-mono"
+                        >
+                          <span className="mr-1">{t.emoji}</span>
+                          {t.alert_type} — {t.label}
+                        </SelectItem>
+                      ))}
+                      {/* 已选但不在模板列表中的值 (历史/自定义/拼写差异), 仍展示, 避免选中状态丢失 */}
+                      {a.alert_type &&
+                        !alertTemplates.some(
+                          (t) => t.alert_type === a.alert_type
+                        ) && (
+                          <SelectItem
+                            value={a.alert_type}
+                            className="text-xs font-mono"
+                          >
+                            ⚠ {a.alert_type} (未在模板列表)
+                          </SelectItem>
+                        )}
+                    </SelectContent>
+                  </Select>
+                ) : alertTemplatesLoading ? (
+                  // 加载中: 显示 loading 占位
+                  <div className="h-7 flex-1 flex items-center gap-1.5 px-2 rounded-md border border-quant text-[10px] text-muted-foreground">
+                    <Loader2 className="size-3 animate-spin" />
+                    正在加载 alert 模板...
+                  </div>
+                ) : (
+                  // 降级: 模板列表为空 (FastAPI 不可达 or 配置缺失) → 自由 Input
+                  <Input
+                    className="h-7 text-xs font-mono flex-1"
+                    placeholder="alert_type (如 rzq_ignite)"
+                    value={a.alert_type}
+                    onChange={(e) =>
+                      setAlert(i, { alert_type: e.target.value })
+                    }
+                  />
+                )}
                 <Select
                   value={a.priority}
                   onValueChange={(v) =>
@@ -1631,6 +1722,41 @@ function EditForm({ value, onChange, strategies, mode }: EditFormProps) {
                   <Trash2 className="size-3" />
                 </Button>
               </div>
+
+              {/* R13-1b: 选中模板后展示 description + condition (帮助用户理解模板含义) */}
+              {a.alert_type &&
+                alertTemplates &&
+                alertTemplates.some((t) => t.alert_type === a.alert_type) && (
+                  <div className="text-[10px] text-muted-foreground leading-relaxed pl-1">
+                    {(() => {
+                      const t = alertTemplates.find(
+                        (x) => x.alert_type === a.alert_type
+                      )
+                      if (!t) return null
+                      return (
+                        <>
+                          <span className="text-foreground/70">
+                            {t.description}
+                          </span>
+                          {t.condition && (
+                            <span className="ml-2 font-mono text-foreground/50">
+                              条件: {t.condition}
+                            </span>
+                          )}
+                          {t.default_params &&
+                            Object.keys(t.default_params).length > 0 && (
+                              <span className="ml-2 font-mono text-foreground/50">
+                                默认参数:{' '}
+                                {Object.entries(t.default_params)
+                                  .map(([k, v]) => `${k}=${v}`)
+                                  .join(', ')}
+                              </span>
+                            )}
+                        </>
+                      )
+                    })()}
+                  </div>
+                )}
 
               {/* channels */}
               <div className="flex items-center gap-1.5 flex-wrap">

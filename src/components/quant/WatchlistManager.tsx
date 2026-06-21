@@ -80,14 +80,17 @@ import {
   CheckCircle2,
   XCircle,
   ListChecks,
+  Layers,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import {
   watchlistAPI,
   strategyAPI,
+  sectorAPI,
   type WatchlistItemDTO,
   type StrategyDTO,
+  type SectorDTO,
 } from '@/lib/api'
 
 const MANUAL_STRATEGY = '_manual'
@@ -164,6 +167,14 @@ export function WatchlistManager() {
   const [batchDefaultStrategy, setBatchDefaultStrategy] =
     React.useState<string>(MANUAL_STRATEGY)
   const [batchImporting, setBatchImporting] = React.useState(false)
+  // R13-3b: 按板块批量加入
+  const [sectors, setSectors] = React.useState<SectorDTO[]>([])
+  const [sectorsLoading, setSectorsLoading] = React.useState(false)
+  const [bySectorOpen, setBySectorOpen] = React.useState(false)
+  const [bySectorCode, setBySectorCode] = React.useState<string>('')
+  const [bySectorStrategy, setBySectorStrategy] =
+    React.useState<string>(MANUAL_STRATEGY)
+  const [bySectorLoading, setBySectorLoading] = React.useState(false)
 
   // ------------------------------------------------------------------
   // 加载
@@ -188,6 +199,24 @@ export function WatchlistManager() {
       /* 非关键失败，静默 */
     }
   }, [])
+
+  /**
+   * R13-3b: 加载板块列表 (供 "按板块加入" Dialog 的 Select 使用)。
+   *
+   * 只在 Dialog 首次打开且 sectors 为空时拉取, 拉到后缓存到 state。
+   */
+  const loadSectors = React.useCallback(async () => {
+    if (sectors.length > 0 || sectorsLoading) return
+    setSectorsLoading(true)
+    try {
+      const data = await sectorAPI.list()
+      setSectors(data || [])
+    } catch {
+      /* 静默, 用户重开 Dialog 会重试 */
+    } finally {
+      setSectorsLoading(false)
+    }
+  }, [sectors.length, sectorsLoading])
 
   React.useEffect(() => {
     load()
@@ -362,6 +391,54 @@ export function WatchlistManager() {
   }
 
   // ------------------------------------------------------------------
+  // R13-3b: 按板块批量加入
+  // ------------------------------------------------------------------
+  /** 选中板块的预览信息 (成份股数从 sectorDTO.stock_count 取, 不另发请求) */
+  const selectedSector = React.useMemo(
+    () => sectors.find((s) => s.code === bySectorCode) || null,
+    [sectors, bySectorCode],
+  )
+
+  const handleBySectorOpen = (open: boolean) => {
+    if (bySectorLoading) return
+    setBySectorOpen(open)
+    if (open) {
+      loadSectors()
+      // 重置选项 (每次打开都恢复默认, 防止误操作)
+      setBySectorCode('')
+      setBySectorStrategy(MANUAL_STRATEGY)
+    }
+  }
+
+  const handleBySectorAdd = async () => {
+    if (!bySectorCode) {
+      toast.error('请先选择板块')
+      return
+    }
+    setBySectorLoading(true)
+    const sectorLabel = selectedSector
+      ? `${selectedSector.code} · ${selectedSector.name}`
+      : bySectorCode
+    const tid = toast.loading(`正在加入板块 ${sectorLabel} 的成分股...`)
+    try {
+      const r = await watchlistAPI.addBySector(bySectorCode, bySectorStrategy)
+      toast.success('按板块加入成功', {
+        id: tid,
+        description: `已加入 ${r.added} 只 (${sectorLabel}), 跳过 ${r.skipped} 只`,
+      })
+      setBySectorOpen(false)
+      await load()
+    } catch (e) {
+      toast.error('按板块加入失败', {
+        id: tid,
+        description: (e as Error).message,
+      })
+    } finally {
+      setBySectorLoading(false)
+    }
+  }
+
+  // ------------------------------------------------------------------
   // 渲染
   // ------------------------------------------------------------------
   return (
@@ -431,15 +508,26 @@ export function WatchlistManager() {
               <Plus className="size-4 text-amber-400" />
               <span className="text-sm font-semibold">加入监控池</span>
             </div>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-8 border-quant hover:bg-amber-500/10 hover:text-amber-400 hover:border-amber-500/30"
-              onClick={() => setBatchOpen(true)}
-            >
-              <Upload className="size-3.5 mr-1" />
-              批量导入
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 border-quant hover:bg-amber-500/10 hover:text-amber-400 hover:border-amber-500/30"
+                onClick={() => handleBySectorOpen(true)}
+              >
+                <Layers className="size-3.5 mr-1" />
+                按板块加入
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 border-quant hover:bg-amber-500/10 hover:text-amber-400 hover:border-amber-500/30"
+                onClick={() => setBatchOpen(true)}
+              >
+                <Upload className="size-3.5 mr-1" />
+                批量导入
+              </Button>
+            </div>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto_auto] gap-2">
             <div className="space-y-1">
@@ -873,6 +961,157 @@ export function WatchlistManager() {
                 <Upload className="size-3.5 mr-1" />
               )}
               导入 {batchStats.valid > 0 ? `(${batchStats.valid})` : ''}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* R13-3b: 按板块批量加入 Dialog */}
+      <Dialog
+        open={bySectorOpen}
+        onOpenChange={handleBySectorOpen}
+      >
+        <DialogContent className="sm:max-w-lg max-w-[95vw] flex flex-col gap-4 bg-quant-card border-quant">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Layers className="size-5 text-amber-400" />
+              按板块批量加入监控
+            </DialogTitle>
+            <DialogDescription className="text-xs">
+              将整个板块的成分股一次性加入监控池, 绑定所选策略。
+              适用于"先把整个赛道纳入盯盘, 后续再逐只调优"的场景。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid grid-cols-1 gap-3">
+            {/* 板块选择 */}
+            <div className="space-y-1.5">
+              <Label className="text-[10px] text-muted-foreground flex items-center gap-1">
+                <Layers className="size-3" />
+                选择板块
+              </Label>
+              <Select
+                value={bySectorCode}
+                onValueChange={setBySectorCode}
+                disabled={bySectorLoading}
+              >
+                <SelectTrigger className="h-9 text-xs">
+                  <SelectValue
+                    placeholder={
+                      sectorsLoading
+                        ? '加载板块中...'
+                        : sectors.length === 0
+                          ? '暂无板块数据'
+                          : '选择板块'
+                    }
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  {sectors.map((s) => (
+                    <SelectItem
+                      key={s.code}
+                      value={s.code}
+                      className="text-xs"
+                    >
+                      <span className="font-mono">{s.code}</span>
+                      {' · '}
+                      <span>{s.name}</span>
+                      <span className="ml-1 text-muted-foreground">
+                        ({s.stock_count})
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {/* 选中板块预览 */}
+              {selectedSector && (
+                <div className="text-[11px] text-muted-foreground flex flex-wrap items-center gap-1.5 pt-0.5">
+                  <Badge
+                    variant="outline"
+                    className="text-[10px] border-quant font-mono"
+                  >
+                    {selectedSector.code}
+                  </Badge>
+                  <span className="font-medium text-foreground">
+                    {selectedSector.name}
+                  </span>
+                  <span>·</span>
+                  <span>成分股</span>
+                  <Badge
+                    variant="outline"
+                    className="text-[10px] border-[var(--quant-up)]/30 bg-[var(--quant-up)]/10 text-[var(--quant-up)] font-mono"
+                  >
+                    {selectedSector.stock_count} 只
+                  </Badge>
+                  <span>·</span>
+                  <span>当前绑定策略</span>
+                  <Badge
+                    variant="outline"
+                    className="text-[10px] border-quant font-mono text-quant-primary"
+                  >
+                    {selectedSector.strategy_id || '(空)'}
+                  </Badge>
+                </div>
+              )}
+            </div>
+
+            {/* 策略绑定 */}
+            <div className="space-y-1.5">
+              <Label className="text-[10px] text-muted-foreground">
+                绑定策略 strategy_id
+              </Label>
+              <Select
+                value={bySectorStrategy}
+                onValueChange={setBySectorStrategy}
+                disabled={bySectorLoading}
+              >
+                <SelectTrigger className="h-9 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={MANUAL_STRATEGY} className="text-xs">
+                    _manual · 临时盯盘
+                  </SelectItem>
+                  {strategies
+                    .filter((s) => s.strategy_id !== MANUAL_STRATEGY)
+                    .map((s) => (
+                      <SelectItem
+                        key={s.strategy_id}
+                        value={s.strategy_id}
+                        className="text-xs"
+                      >
+                        {s.strategy_id} · {s.strategy_name}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+              <p className="text-[10px] text-muted-foreground leading-relaxed pt-0.5">
+                板块内每只股票都以此 strategy_id 写入 monitor_subscriptions,
+                决定走哪个 match 套餐。
+              </p>
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2 sm:gap-2">
+            <Button
+              variant="ghost"
+              onClick={() => handleBySectorOpen(false)}
+              disabled={bySectorLoading}
+            >
+              取消
+            </Button>
+            <Button
+              className="bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25"
+              onClick={handleBySectorAdd}
+              disabled={bySectorLoading || !bySectorCode}
+            >
+              {bySectorLoading ? (
+                <Loader2 className="size-3.5 animate-spin mr-1" />
+              ) : (
+                <Layers className="size-3.5 mr-1" />
+              )}
+              确认加入
+              {selectedSector ? ` (${selectedSector.stock_count})` : ''}
             </Button>
           </DialogFooter>
         </DialogContent>

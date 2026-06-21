@@ -1,0 +1,1151 @@
+     1→'use client'
+     2→
+     3→/**
+     4→ * 信号中心
+     5→ * - 信号流表格：时间/类型/策略/股票/内容/推送通道/状态/操作
+     6→ * - 筛选：类型/策略/日期
+     7→ * - 统计：今日各类型信号数
+     8→ * - 行末"重推"按钮: channelAPI.repush(signalId)
+     9→ * - 新信号 (1 分钟内) 左侧琥珀色边框 + glow
+    10→ * - 行点击 -> 右侧 Sheet 抽屉显示信号完整详情 (含 snapshot JSON 树形展示) (R7-A)
+    11→ */
+    12→
+    13→import * as React from 'react'
+    14→import { Card } from '@/components/ui/card'
+    15→import { Badge } from '@/components/ui/badge'
+    16→import { Button } from '@/components/ui/button'
+    17→import {
+    18→  Sheet,
+    19→  SheetContent,
+    20→  SheetHeader,
+    21→  SheetTitle,
+    22→  SheetDescription,
+    23→} from '@/components/ui/sheet'
+    24→import {
+    25→  Select,
+    26→  SelectContent,
+    27→  SelectItem,
+    28→  SelectTrigger,
+    29→  SelectValue,
+    30→} from '@/components/ui/select'
+    31→import { Input } from '@/components/ui/input'
+    32→import { Label } from '@/components/ui/label'
+    33→import {
+    34→  Bell,
+    35→  TrendingUp,
+    36→  TrendingDown,
+    37→  Sparkles,
+    38→  Settings,
+    39→  Filter,
+    40→  CheckCircle2,
+    41→  AlertCircle,
+    42→  XCircle,
+    43→  Clock,
+    44→  RefreshCw,
+    45→  X,
+    46→  Radio,
+    47→  Copy,
+    48→  Loader2,
+    49→  Braces,
+    50→  Hash,
+    51→  Type as TypeIcon,
+    52→} from 'lucide-react'
+    53→import { StockTable, type Column } from './StockTable'
+    54→import { LoadingState } from './LoadingState'
+    55→import { EmptyState } from './EmptyState'
+    56→import {
+    57→  signalAPI,
+    58→  strategyAPI,
+    59→  channelAPI,
+    60→  type SignalDTO,
+    61→  type StrategyDTO,
+    62→} from '@/lib/api'
+    63→import { toast } from 'sonner'
+    64→import { cn } from '@/lib/utils'
+    65→
+    66→const TYPE_META: Record<
+    67→  SignalDTO['type'],
+    68→  { icon: React.ElementType; color: string; label: string }
+    69→> = {
+    70→  limit_up: { icon: TrendingUp, color: 'var(--quant-up)', label: '涨停' },
+    71→  drop_alert: { icon: TrendingDown, color: 'var(--quant-down)', label: '下跌' },
+    72→  breakout: { icon: Sparkles, color: 'var(--quant-primary)', label: '突破' },
+    73→  selection: { icon: Bell, color: '#06b6d4', label: '选股' },
+    74→  system: { icon: Settings, color: 'var(--quant-flat)', label: '系统' },
+    75→}
+    76→
+    77→// 推送状态元信息
+    78→const PUSH_STATUS_META: Record<
+    79→  SignalDTO['push_status'],
+    80→  { icon: React.ElementType; color: string; label: string }
+    81→> = {
+    82→  success: { icon: CheckCircle2, color: 'var(--quant-down)', label: '成功' },
+    83→  partial: { icon: AlertCircle, color: 'var(--quant-primary)', label: '部分' },
+    84→  failed: { icon: XCircle, color: 'var(--quant-up)', label: '失败' },
+    85→  pending: { icon: Clock, color: 'var(--quant-flat)', label: '待推' },
+    86→}
+    87→
+    88→// 通道徽章元信息 (颜色与简称)
+    89→const CHANNEL_BADGE_META: Record<string, { color: string; label: string }> = {
+    90→  csv_log: { color: 'var(--quant-flat)', label: 'CSV' },
+    91→  websocket: { color: '#06b6d4', label: 'WS' },
+    92→  tdx_warn: { color: '#a855f7', label: 'TDX' },
+    93→  feishu: { color: 'var(--quant-down)', label: '飞书' },
+    94→  email: { color: '#f59e0b', label: '邮件' },
+    95→}
+    96→
+    97→// 可筛选的通道列表 (固定顺序)
+    98→const CHANNEL_FILTER_ORDER: string[] = ['csv_log', 'websocket', 'tdx_warn', 'feishu']
+    99→
+   100→// 新信号判定阈值 (1 分钟)
+   101→const NEW_SIGNAL_THRESHOLD_MS = 60 * 1000
+   102→
+   103→export function SignalCenter() {
+   104→  const [signals, setSignals] = React.useState<SignalDTO[]>([])
+   105→  const [strategies, setStrategies] = React.useState<StrategyDTO[]>([])
+   106→  const [loading, setLoading] = React.useState(true)
+   107→  const [typeFilter, setTypeFilter] = React.useState<string>('all')
+   108→  const [strategyFilter, setStrategyFilter] = React.useState<string>('all')
+   109→  const [startDate, setStartDate] = React.useState<string>('')
+   110→  const [endDate, setEndDate] = React.useState<string>('')
+   111→  // 推送通道筛选 (多选, "同时包含所有选中通道"语义)
+   112→  const [channelFilter, setChannelFilter] = React.useState<Set<string>>(new Set())
+   113→  // 正在重推的 signal id 集合
+   114→  const [repushing, setRepushing] = React.useState<Set<string>>(new Set())
+   115→  // 用于刷新新信号判定
+   116→  const [, setTick] = React.useState(0)
+   117→  // R7-A: 信号详情抽屉
+   118→  const [detailOpen, setDetailOpen] = React.useState(false)
+   119→  const [detailSignal, setDetailSignal] = React.useState<SignalDTO | null>(null)
+   120→  const [detailLoading, setDetailLoading] = React.useState(false)
+   121→  const [detailError, setDetailError] = React.useState<string | null>(null)
+   122→
+   123→  React.useEffect(() => {
+   124→    strategyAPI.list().then(setStrategies).catch(() => {})
+   125→  }, [])
+   126→
+   127→  const load = React.useCallback(async () => {
+   128→    setLoading(true)
+   129→    try {
+   130→      const data = await signalAPI.list({
+   131→        type: typeFilter === 'all' ? undefined : typeFilter,
+   132→        strategy_id: strategyFilter === 'all' ? undefined : strategyFilter,
+   133→        start_date: startDate || undefined,
+   134→        end_date: endDate || undefined,
+   135→        limit: 200,
+   136→      })
+   137→      setSignals(data)
+   138→    } catch (e) {
+   139→      console.error(e)
+   140→    } finally {
+   141→      setLoading(false)
+   142→    }
+   143→  }, [typeFilter, strategyFilter, startDate, endDate])
+   144→
+   145→  React.useEffect(() => {
+   146→    load()
+   147→  }, [load])
+   148→
+   149→  // 每 30 秒刷新一次"新信号"标记 (避免时间过去了还显示)
+   150→  React.useEffect(() => {
+   151→    const t = setInterval(() => setTick((n) => n + 1), 30_000)
+   152→    return () => clearInterval(t)
+   153→  }, [])
+   154→
+   155→  // 按类型统计
+   156→  const stats = React.useMemo(() => {
+   157→    const m: Record<string, number> = {}
+   158→    signals.forEach((s) => {
+   159→      m[s.type] = (m[s.type] || 0) + 1
+   160→    })
+   161→    return m
+   162→  }, [signals])
+   163→
+   164→  // 应用 channel 筛选后的信号 (AND 语义: 必须包含所有选中通道)
+   165→  const displayedSignals = React.useMemo(() => {
+   166→    if (channelFilter.size === 0) return signals
+   167→    return signals.filter((s) => {
+   168→      for (const ch of channelFilter) {
+   169→        if (!s.pushed_channels.includes(ch)) return false
+   170→      }
+   171→      return true
+   172→    })
+   173→  }, [signals, channelFilter])
+   174→
+   175→  // 通道切换
+   176→  const toggleChannel = (ch: string) => {
+   177→    setChannelFilter((prev) => {
+   178→      const next = new Set(prev)
+   179→      if (next.has(ch)) {
+   180→        next.delete(ch)
+   181→      } else {
+   182→        next.add(ch)
+   183→      }
+   184→      return next
+   185→    })
+   186→  }
+   187→
+   188→  // 清空所有筛选 (类型 / 策略 / 日期 / 通道)
+   189→  const clearAllFilters = () => {
+   190→    setTypeFilter('all')
+   191→    setStrategyFilter('all')
+   192→    setStartDate('')
+   193→    setEndDate('')
+   194→    setChannelFilter(new Set())
+   195→  }
+   196→
+   197→  const hasAnyFilter =
+   198→    typeFilter !== 'all' ||
+   199→    strategyFilter !== 'all' ||
+   200→    !!startDate ||
+   201→    !!endDate ||
+   202→    channelFilter.size > 0
+   203→
+   204→  // 重推信号
+   205→  const handleRepush = React.useCallback(async (signal: SignalDTO) => {
+   206→    setRepushing((prev) => new Set(prev).add(signal.id))
+   207→    const toastId = toast.loading(`正在重新推送信号 ${signal.id.slice(0, 8)}...`)
+   208→    try {
+   209→      const r = await channelAPI.repush(signal.id)
+   210→      if (r.ok && r.fired.length > 0) {
+   211→        toast.success(`已重推到 ${r.fired.join(', ')}`, {
+   212→          id: toastId,
+   213→          description: r.results
+   214→            .map((x) => `${x.channel}: ${x.ok ? '✓' : '✗'}`)
+   215→            .join(' · '),
+   216→        })
+   217→      } else if (r.ok && r.fired.length === 0) {
+   218→        toast.warning('未推送到任何通道', {
+   219→          id: toastId,
+   220→          description: r.results
+   221→            .map((x) => `${x.channel}: ${x.message}`)
+   222→            .join(' · ') || '请检查通道是否已启用',
+   223→        })
+   224→      } else {
+   225→        toast.error('重推失败', {
+   226→          id: toastId,
+   227→          description: r.results
+   228→            .map((x) => `${x.channel}: ${x.message}`)
+   229→            .join(' · '),
+   230→        })
+   231→      }
+   232→    } catch (e) {
+   233→      toast.error('重推失败', {
+   234→        id: toastId,
+   235→        description: (e as Error).message,
+   236→      })
+   237→    } finally {
+   238→      setRepushing((prev) => {
+   239→        const next = new Set(prev)
+   240→        next.delete(signal.id)
+   241→        return next
+   242→      })
+   243→    }
+   244→  }, [])
+   245→
+   246→  // R7-A: 打开信号详情抽屉, 拉取完整详情 (含 snapshot)
+   247→  const handleOpenDetail = React.useCallback(async (signal: SignalDTO) => {
+   248→    setDetailSignal(signal) // 先显示行内已有的基本信息
+   249→    setDetailOpen(true)
+   250→    setDetailError(null)
+   251→    setDetailLoading(true)
+   252→    try {
+   253→      const full = await signalAPI.getDetail(signal.id)
+   254→      setDetailSignal(full)
+   255→    } catch (e) {
+   256→      setDetailError((e as Error).message || '加载详情失败')
+   257→      // 保持已有 signal 信息可显示
+   258→    } finally {
+   259→      setDetailLoading(false)
+   260→    }
+   261→  }, [])
+   262→
+   263→  // R7-A: 复制 snapshot JSON 到剪贴板
+   264→  const handleCopyJson = React.useCallback(async () => {
+   265→    if (!detailSignal?.snapshot) {
+   266→      toast.warning('当前信号无 snapshot JSON')
+   267→      return
+   268→    }
+   269→    try {
+   270→      const text = JSON.stringify(detailSignal.snapshot, null, 2)
+   271→      await navigator.clipboard.writeText(text)
+   272→      toast.success('已复制 snapshot JSON', {
+   273→        description: `${text.length} 字符`,
+   274→      })
+   275→    } catch (e) {
+   276→      toast.error('复制失败', { description: (e as Error).message })
+   277→    }
+   278→  }, [detailSignal])
+   279→
+   280→  // 判断是否新信号 (1 分钟内)
+   281→  const isNewSignal = React.useCallback((s: SignalDTO) => {
+   282→    const ts = new Date(s.time).getTime()
+   283→    return Date.now() - ts < NEW_SIGNAL_THRESHOLD_MS
+   284→  }, [])
+   285→
+   286→  const columns: Column<SignalDTO>[] = [
+   287→    {
+   288→      key: 'time',
+   289→      header: '时间',
+   290→      width: '6rem',
+   291→      render: (s) => (
+   292→        <span className="text-xs tabular-nums text-muted-foreground">
+   293→          {new Date(s.time).toLocaleTimeString('zh-CN', {
+   294→            hour: '2-digit',
+   295→            minute: '2-digit',
+   296→            second: '2-digit',
+   297→          })}
+   298→        </span>
+   299→      ),
+   300→      sortValue: (s) => s.time,
+   301→    },
+   302→    {
+   303→      key: 'type',
+   304→      header: '类型',
+   305→      width: '5rem',
+   306→      render: (s) => {
+   307→        const meta = TYPE_META[s.type]
+   308→        const Icon = meta.icon
+   309→        return (
+   310→          <span
+   311→            className="text-xs px-1.5 py-0.5 rounded inline-flex items-center gap-1 border"
+   312→            style={{
+   313→              color: meta.color,
+   314→              backgroundColor: `color-mix(in srgb, ${meta.color} 10%, transparent)`,
+   315→              borderColor: `color-mix(in srgb, ${meta.color} 30%, transparent)`,
+   316→            }}
+   317→          >
+   318→            <Icon className="size-3" />
+   319→            {meta.label}
+   320→          </span>
+   321→        )
+   322→      },
+   323→    },
+   324→    {
+   325→      key: 'strategy',
+   326→      header: '策略',
+   327→      width: '8rem',
+   328→      render: (s) => {
+   329→        // 优先 strategy_name; 若只有 strategy_id 显示 id; 都没有显示 —
+   330→        const name = s.strategy_name
+   331→        const sid = s.strategy_id
+   332→        if (!name && !sid) {
+   333→          return <span className="text-xs text-muted-foreground">—</span>
+   334→        }
+   335→        // 反查策略 emoji (若信号本身没带)
+   336→        const strategy = strategies.find((x) => x.strategy_id === sid)
+   337→        const emoji = strategy?.strategy_emoji || ''
+   338→        return (
+   339→          <span className="text-xs text-foreground/80 truncate inline-flex items-center gap-1">
+   340→            {emoji && <span className="shrink-0">{emoji}</span>}
+   341→            <span className="truncate">{name || sid}</span>
+   342→          </span>
+   343→        )
+   344→      },
+   345→    },
+   346→    {
+   347→      key: 'stock',
+   348→      header: '股票',
+   349→      width: '9rem',
+   350→      render: (s) => {
+   351→        if (!s.stock_code && !s.stock_name) {
+   352→          return <span className="text-xs text-muted-foreground">—</span>
+   353→        }
+   354→        return (
+   355→          <span className="text-xs font-mono text-foreground/80 inline-flex items-center gap-1">
+   356→            {s.stock_name && (
+   357→              <span className="text-foreground/90">{s.stock_name}</span>
+   358→            )}
+   359→            {s.stock_code && (
+   360→              <span className="text-muted-foreground">({s.stock_code})</span>
+   361→            )}
+   362→          </span>
+   363→        )
+   364→      },
+   365→    },
+   366→    {
+   367→      key: 'content',
+   368→      header: '内容',
+   369→      render: (s) => (
+   370→        <span className="text-xs text-foreground/90 line-clamp-2">
+   371→          {s.content}
+   372→        </span>
+   373→      ),
+   374→    },
+   375→    {
+   376→      key: 'channels',
+   377→      header: '推送通道',
+   378→      align: 'center',
+   379→      width: '8rem',
+   380→      render: (s) => (
+   381→        <div className="flex flex-wrap gap-1 justify-center">
+   382→          {s.pushed_channels.length === 0 ? (
+   383→            <span className="text-xs text-muted-foreground">—</span>
+   384→          ) : (
+   385→            s.pushed_channels.map((ch) => {
+   386→              const meta = CHANNEL_BADGE_META[ch] || {
+   387→                color: 'var(--quant-flat)',
+   388→                label: ch,
+   389→              }
+   390→              return (
+   391→                <span
+   392→                  key={ch}
+   393→                  className="text-[10px] px-1.5 py-0.5 rounded border font-medium"
+   394→                  style={{
+   395→                    color: meta.color,
+   396→                    backgroundColor: `color-mix(in srgb, ${meta.color} 10%, transparent)`,
+   397→                    borderColor: `color-mix(in srgb, ${meta.color} 30%, transparent)`,
+   398→                  }}
+   399→                  title={ch}
+   400→                >
+   401→                  {meta.label}
+   402→                </span>
+   403→              )
+   404→            })
+   405→          )}
+   406→        </div>
+   407→      ),
+   408→    },
+   409→    {
+   410→      key: 'status',
+   411→      header: '状态',
+   412→      align: 'center',
+   413→      width: '5rem',
+   414→      render: (s) => {
+   415→        const meta = PUSH_STATUS_META[s.push_status]
+   416→        const Icon = meta.icon
+   417→        return (
+   418→          <span
+   419→            className="text-[10px] inline-flex items-center gap-1 px-1.5 py-0.5 rounded border"
+   420→            style={{
+   421→              color: meta.color,
+   422→              backgroundColor: `color-mix(in srgb, ${meta.color} 10%, transparent)`,
+   423→              borderColor: `color-mix(in srgb, ${meta.color} 30%, transparent)`,
+   424→            }}
+   425→          >
+   426→            <Icon className="size-3" />
+   427→            {meta.label}
+   428→          </span>
+   429→        )
+   430→      },
+   431→    },
+   432→    {
+   433→      key: 'actions',
+   434→      header: '操作',
+   435→      align: 'center',
+   436→      width: '4rem',
+   437→      render: (s) => {
+   438→        const isRepushing = repushing.has(s.id)
+   439→        return (
+   440→          <Button
+   441→            variant="ghost"
+   442→            size="sm"
+   443→            className="h-7 px-2 text-xs hover:bg-amber-500/10 hover:text-amber-400"
+   444→            disabled={isRepushing}
+   445→            onClick={(e) => {
+   446→              e.stopPropagation()
+   447→              handleRepush(s)
+   448→            }}
+   449→            title="重新推送到所有启用通道"
+   450→          >
+   451→            <RefreshCw className={cn('size-3', isRepushing && 'animate-spin')} />
+   452→            <span className="hidden lg:inline">{isRepushing ? '推送中' : '重推'}</span>
+   453→          </Button>
+   454→        )
+   455→      },
+   456→    },
+   457→  ]
+   458→
+   459→  // 行样式: 新信号左侧琥珀色边框 + glow
+   460→  const rowClassName = React.useCallback(
+   461→    (s: SignalDTO) => {
+   462→      if (isNewSignal(s)) {
+   463→        return 'signal-row-new'
+   464→      }
+   465→      return ''
+   466→    },
+   467→    [isNewSignal]
+   468→  )
+   469→
+   470→  return (
+   471→    <div className="space-y-4">
+   472→      {/* 类型统计卡片 */}
+   473→      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+   474→        {(Object.keys(TYPE_META) as SignalDTO['type'][]).map((t) => {
+   475→          const meta = TYPE_META[t]
+   476→          const Icon = meta.icon
+   477→          const count = stats[t] || 0
+   478→          const total = signals.length || 1
+   479→          const pct = (count / total) * 100
+   480→          const isActive = typeFilter === t
+   481→          return (
+   482→            <Card
+   483→              key={t}
+   484→              className={`p-3 gap-0 bg-quant-card border-quant cursor-pointer transition-all hover:border-[var(--quant-primary)]/40 hover:shadow-md ${
+   485→                isActive ? 'ring-1 ring-amber-500/30 border-amber-500/40' : ''
+   486→              }`}
+   487→              onClick={() => setTypeFilter(isActive ? 'all' : t)}
+   488→              style={{
+   489→                backgroundImage: `radial-gradient(circle at top right, color-mix(in srgb, ${meta.color} 15%, transparent) 0%, transparent 60%)`,
+   490→              }}
+   491→            >
+   492→              <div className="flex items-center justify-between">
+   493→                <div className="flex items-center gap-2">
+   494→                  <div
+   495→                    className="size-8 rounded-md flex items-center justify-center transition-transform hover:scale-110"
+   496→                    style={{ backgroundColor: `color-mix(in srgb, ${meta.color} 12%, transparent)` }}
+   497→                  >
+   498→                    <Icon className="size-4" style={{ color: meta.color }} />
+   499→                  </div>
+   500→                  <span className="text-xs text-muted-foreground">{meta.label}</span>
+   501→                </div>
+   502→                <span className="text-xl font-semibold tabular-nums" style={{ color: meta.color }}>
+   503→                  {count}
+   504→                </span>
+   505→              </div>
+   506→              {/* 占比进度条 */}
+   507→              <div className="mt-2 h-1 rounded-full bg-muted/30 overflow-hidden">
+   508→                <div
+   509→                  className="h-full rounded-full transition-all duration-500"
+   510→                  style={{
+   511→                    width: `${Math.max(2, pct)}%`,
+   512→                    backgroundColor: meta.color,
+   513→                  }}
+   514→                />
+   515→              </div>
+   516→              <div className="mt-1 text-[10px] text-muted-foreground tabular-nums">
+   517→                {pct.toFixed(1)}% · 点击{isActive ? '取消' : '筛选'}
+   518→              </div>
+   519→            </Card>
+   520→          )
+   521→        })}
+   522→      </div>
+   523→
+   524→      {/* 筛选栏 */}
+   525→      <Card className="p-3 gap-0 bg-quant-card border-quant">
+   526→        <div className="flex flex-wrap items-end gap-3">
+   527→          <div className="flex flex-col gap-1">
+   528→            <Label className="text-xs text-muted-foreground">类型</Label>
+   529→            <Select value={typeFilter} onValueChange={setTypeFilter}>
+   530→              <SelectTrigger className="h-8 w-32 border-quant">
+   531→                <SelectValue />
+   532→              </SelectTrigger>
+   533→              <SelectContent>
+   534→                <SelectItem value="all">全部</SelectItem>
+   535→                {(Object.keys(TYPE_META) as SignalDTO['type'][]).map((t) => (
+   536→                  <SelectItem key={t} value={t}>
+   537→                    {TYPE_META[t].label}
+   538→                  </SelectItem>
+   539→                ))}
+   540→              </SelectContent>
+   541→            </Select>
+   542→          </div>
+   543→          <div className="flex flex-col gap-1">
+   544→            <Label className="text-xs text-muted-foreground">策略</Label>
+   545→            <Select value={strategyFilter} onValueChange={setStrategyFilter}>
+   546→              <SelectTrigger className="h-8 w-40 border-quant">
+   547→                <SelectValue />
+   548→              </SelectTrigger>
+   549→              <SelectContent>
+   550→                <SelectItem value="all">全部策略</SelectItem>
+   551→                {strategies.map((s) => (
+   552→                  <SelectItem key={s.strategy_id} value={s.strategy_id}>
+   553→                    {s.strategy_emoji} {s.strategy_name}
+   554→                  </SelectItem>
+   555→                ))}
+   556→              </SelectContent>
+   557→            </Select>
+   558→          </div>
+   559→          <div className="flex flex-col gap-1">
+   560→            <Label className="text-xs text-muted-foreground">开始日期</Label>
+   561→            <Input
+   562→              type="date"
+   563→              value={startDate}
+   564→              onChange={(e) => setStartDate(e.target.value)}
+   565→              className="h-8 w-36 border-quant"
+   566→            />
+   567→          </div>
+   568→          <div className="flex flex-col gap-1">
+   569→            <Label className="text-xs text-muted-foreground">结束日期</Label>
+   570→            <Input
+   571→              type="date"
+   572→              value={endDate}
+   573→              onChange={(e) => setEndDate(e.target.value)}
+   574→              className="h-8 w-36 border-quant"
+   575→            />
+   576→          </div>
+   577→          {hasAnyFilter && (
+   578→            <Button
+   579→              size="sm"
+   580→              variant="ghost"
+   581→              className="h-8 text-xs text-muted-foreground hover:text-amber-400 hover:bg-amber-500/10"
+   582→              onClick={clearAllFilters}
+   583→              title="清空所有筛选"
+   584→            >
+   585→              <X className="size-3" />
+   586→              清空筛选
+   587→            </Button>
+   588→          )}
+   589→          <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
+   590→            <Filter className="size-3" />
+   591→            <span>
+   592→              共 <span className="text-quant-primary font-semibold tabular-nums">{displayedSignals.length}</span>
+   593→              {channelFilter.size > 0 && signals.length !== displayedSignals.length && (
+   594→                <span className="text-muted-foreground/70"> / {signals.length}</span>
+   595→              )} 条
+   596→            </span>
+   597→          </div>
+   598→        </div>
+   599→
+   600→        {/* 推送通道筛选行 */}
+   601→        <div className="mt-3 pt-3 border-t border-quant/60">
+   602→          <div className="flex flex-wrap items-center gap-2">
+   603→            <Label className="text-xs text-muted-foreground inline-flex items-center gap-1">
+   604→              <Radio className="size-3" />
+   605→              推送通道
+   606→            </Label>
+   607→            <button
+   608→              type="button"
+   609→              onClick={() => setChannelFilter(new Set())}
+   610→              className={cn(
+   611→                'text-[11px] px-2.5 py-1 rounded-md border transition-all',
+   612→                channelFilter.size === 0
+   613→                  ? 'bg-amber-500/15 text-amber-400 border-amber-500/40 font-semibold ring-2 ring-amber-500/30'
+   614→                  : 'text-muted-foreground border-quant hover:bg-amber-500/10 hover:text-amber-400 hover:border-amber-500/30'
+   615→              )}
+   616→            >
+   617→              全部
+   618→            </button>
+   619→            {CHANNEL_FILTER_ORDER.map((ch) => {
+   620→              const meta = CHANNEL_BADGE_META[ch]
+   621→              const active = channelFilter.has(ch)
+   622→              return (
+   623→                <button
+   624→                  key={ch}
+   625→                  type="button"
+   626→                  onClick={() => toggleChannel(ch)}
+   627→                  className={cn(
+   628→                    'text-[11px] px-2.5 py-1 rounded-md border font-medium transition-all',
+   629→                    active && 'ring-2 ring-amber-500/60 ring-offset-1 ring-offset-background'
+   630→                  )}
+   631→                  style={{
+   632→                    color: active ? '#ffffff' : meta.color,
+   633→                    backgroundColor: active
+   634→                      ? meta.color
+   635→                      : `color-mix(in srgb, ${meta.color} 8%, transparent)`,
+   636→                    borderColor: active
+   637→                      ? meta.color
+   638→                      : `color-mix(in srgb, ${meta.color} 30%, transparent)`,
+   639→                  }}
+   640→                  title={`筛选推送通道: ${meta.label} (${ch})`}
+   641→                >
+   642→                  {meta.label}
+   643→                </button>
+   644→              )
+   645→            })}
+   646→            {channelFilter.size > 0 && (
+   647→              <span className="ml-auto text-[11px] text-amber-400 inline-flex items-center gap-1">
+   648→                <Filter className="size-3" />
+   649→                已筛选: {CHANNEL_FILTER_ORDER.filter((ch) => channelFilter.has(ch))
+   650→                  .map((ch) => CHANNEL_BADGE_META[ch].label)
+   651→                  .join(' + ')}
+   652→                <span className="text-muted-foreground">
+   653→                  (共 {displayedSignals.length} 条)
+   654→                </span>
+   655→              </span>
+   656→            )}
+   657→          </div>
+   658→        </div>
+   659→      </Card>
+   660→
+   661→      {/* 图例提示 */}
+   662→      <div className="flex flex-wrap items-center gap-3 text-[10px] text-muted-foreground">
+   663→        <span className="flex items-center gap-1">
+   664→          <span className="inline-block w-3 h-0.5 bg-amber-400 rounded" />
+   665→          新信号 (1 分钟内)
+   666→        </span>
+   667→        <span className="flex items-center gap-1">
+   668→          <RefreshCw className="size-3" />
+   669→          点击行末"重推"可重新推送到所有启用通道
+   670→        </span>
+   671→      </div>
+   672→
+   673→      {/* 表格 */}
+   674→      {loading ? (
+   675→        <LoadingState rows={10} />
+   676→      ) : displayedSignals.length === 0 ? (
+   677→        <Card className="bg-quant-card border-quant">
+   678→          <EmptyState
+   679→            text={signals.length === 0 ? '暂无信号' : '当前筛选条件下无信号'}
+   680→            description={signals.length === 0 ? '调整筛选条件或稍后再试' : `已过滤 ${signals.length} 条信号, 尝试调整通道筛选`}
+   681→          />
+   682→        </Card>
+   683→      ) : (
+   684→        <StockTable
+   685→          columns={columns}
+   686→          data={displayedSignals}
+   687→          rowKey={(s) => s.id}
+   688→          maxHeight="32rem"
+   689→          pageSize={30}
+   690→          rowClassName={rowClassName}
+   691→          onRowClick={handleOpenDetail}
+   692→        />
+   693→      )}
+   694→
+   695→      {/* R7-A: 信号详情抽屉 */}
+   696→      <SignalDetailSheet
+   697→        open={detailOpen}
+   698→        onOpenChange={setDetailOpen}
+   699→        signal={detailSignal}
+   700→        loading={detailLoading}
+   701→        error={detailError}
+   702→        strategies={strategies}
+   703→        repushing={repushing.has(detailSignal?.id || '')}
+   704→        onRepush={handleRepush}
+   705→        onCopyJson={handleCopyJson}
+   706→      />
+   707→    </div>
+   708→  )
+   709→}
+   710→
+   711→// ============================================================================
+   712→// R7-A: 信号详情抽屉
+   713→// ============================================================================
+   714→
+   715→interface SignalDetailSheetProps {
+   716→  open: boolean
+   717→  onOpenChange: (open: boolean) => void
+   718→  signal: SignalDTO | null
+   719→  loading: boolean
+   720→  error: string | null
+   721→  strategies: StrategyDTO[]
+   722→  repushing: boolean
+   723→  onRepush: (signal: SignalDTO) => void
+   724→  onCopyJson: () => void
+   725→}
+   726→
+   727→function SignalDetailSheet({
+   728→  open,
+   729→  onOpenChange,
+   730→  signal,
+   731→  loading,
+   732→  error,
+   733→  strategies,
+   734→  repushing,
+   735→  onRepush,
+   736→  onCopyJson,
+   737→}: SignalDetailSheetProps) {
+   738→  if (!signal) return null
+   739→  const typeMeta = TYPE_META[signal.type] || TYPE_META.system
+   740→  const TypeIcon = typeMeta.icon
+   741→  const statusMeta = PUSH_STATUS_META[signal.push_status] || PUSH_STATUS_META.pending
+   742→  const StatusIcon = statusMeta.icon
+   743→
+   744→  // 反查策略 emoji (若信号本身没带)
+   745→  const strategy = strategies.find((x) => x.strategy_id === signal.strategy_id)
+   746→  const strategyEmoji = signal.strategy_name ? strategy?.strategy_emoji || '📊' : ''
+   747→  const severityLabel: Record<string, string> = {
+   748→    info: '信息',
+   749→    warn: '警告',
+   750→    error: '错误',
+   751→  }
+   752→  const severityColor: Record<string, string> = {
+   753→    info: 'var(--quant-flat)',
+   754→    warn: 'var(--quant-primary)',
+   755→    error: 'var(--quant-up)',
+   756→  }
+   757→  const severity = signal.severity || 'info'
+   758→
+   759→  return (
+   760→    <Sheet open={open} onOpenChange={onOpenChange}>
+   761→      <SheetContent
+   762→        side="right"
+   763→        className="w-full sm:max-w-lg bg-quant-card border-quant p-0 gap-0 overflow-y-auto quant-scroll"
+   764→      >
+   765→        {/* 顶部: 类型 + 时间 + 策略 */}
+   766→        <SheetHeader className="p-4 border-b border-quant gap-2">
+   767→          <div className="flex items-center gap-2">
+   768→            <span
+   769→              className="text-xs px-2 py-0.5 rounded inline-flex items-center gap-1 border"
+   770→              style={{
+   771→                color: typeMeta.color,
+   772→                backgroundColor: `color-mix(in srgb, ${typeMeta.color} 10%, transparent)`,
+   773→                borderColor: `color-mix(in srgb, ${typeMeta.color} 30%, transparent)`,
+   774→              }}
+   775→            >
+   776→              <TypeIcon className="size-3" />
+   777→              {typeMeta.label}
+   778→            </span>
+   779→            <SheetTitle className="text-sm font-mono text-muted-foreground">
+   780→              {new Date(signal.time).toLocaleString('zh-CN', {
+   781→                month: '2-digit',
+   782→                day: '2-digit',
+   783→                hour: '2-digit',
+   784→                minute: '2-digit',
+   785→                second: '2-digit',
+   786→              })}
+   787→            </SheetTitle>
+   788→          </div>
+   789→          <SheetDescription className="flex items-center gap-2 text-sm text-foreground/90">
+   790→            {strategyEmoji && <span className="text-lg" aria-hidden>{strategyEmoji}</span>}
+   791→            <span className="font-medium">
+   792→              {signal.strategy_name || signal.strategy_id || '系统信号'}
+   793→            </span>
+   794→          </SheetDescription>
+   795→        </SheetHeader>
+   796→
+   797→        {/* 加载中 */}
+   798→        {loading && (
+   799→          <div className="p-4 flex items-center justify-center text-muted-foreground text-sm border-b border-quant">
+   800→            <Loader2 className="size-4 mr-2 animate-spin text-quant-primary" />
+   801→            正在加载完整详情...
+   802→          </div>
+   803→        )}
+   804→
+   805→        {/* 错误提示 */}
+   806→        {error && !loading && (
+   807→          <div className="p-4 border-b border-quant bg-rose-500/5 text-rose-400 text-xs">
+   808→            加载详情失败: {error} (显示行内已有信息)
+   809→          </div>
+   810→        )}
+   811→
+   812→        {/* 基本信息 */}
+   813→        <section className="p-4 border-b border-quant space-y-2">
+   814→          <div className="text-[11px] text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+   815→            <Hash className="size-3" />
+   816→            基本信息
+   817→          </div>
+   818→          <div className="grid grid-cols-2 gap-2 text-xs">
+   819→            <InfoCell label="信号 ID" value={signal.id} mono />
+   820→            <InfoCell
+   821→              label="股票代码"
+   822→              value={signal.stock_code || '—'}
+   823→              mono
+   824→            />
+   825→            <InfoCell
+   826→              label="股票名称"
+   827→              value={signal.stock_name || '—'}
+   828→            />
+   829→            <InfoCell
+   830→              label="策略 ID"
+   831→              value={signal.strategy_id || '—'}
+   832→              mono
+   833→            />
+   834→            <InfoCell
+   835→              label="推送状态"
+   836→              value={
+   837→                <span
+   838→                  className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border"
+   839→                  style={{
+   840→                    color: statusMeta.color,
+   841→                    backgroundColor: `color-mix(in srgb, ${statusMeta.color} 10%, transparent)`,
+   842→                    borderColor: `color-mix(in srgb, ${statusMeta.color} 30%, transparent)`,
+   843→                  }}
+   844→                >
+   845→                  <StatusIcon className="size-3" />
+   846→                  {statusMeta.label}
+   847→                </span>
+   848→              }
+   849→            />
+   850→            <InfoCell
+   851→              label="严重度"
+   852→              value={
+   853→                <span
+   854→                  className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded border"
+   855→                  style={{
+   856→                    color: severityColor[severity] || 'var(--quant-flat)',
+   857→                    backgroundColor: `color-mix(in srgb, ${severityColor[severity] || 'var(--quant-flat)'} 10%, transparent)`,
+   858→                    borderColor: `color-mix(in srgb, ${severityColor[severity] || 'var(--quant-flat)'} 30%, transparent)`,
+   859→                  }}
+   860→                >
+   861→                  {severityLabel[severity] || severity}
+   862→                </span>
+   863→              }
+   864→            />
+   865→          </div>
+   866→        </section>
+   867→
+   868→        {/* 推送通道 */}
+   869→        <section className="p-4 border-b border-quant space-y-2">
+   870→          <div className="text-[11px] text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+   871→            <Radio className="size-3" />
+   872→            推送通道 ({signal.pushed_channels.length})
+   873→          </div>
+   874→          {signal.pushed_channels.length === 0 ? (
+   875→            <div className="text-xs text-muted-foreground">—</div>
+   876→          ) : (
+   877→            <div className="flex flex-wrap gap-1.5">
+   878→              {signal.pushed_channels.map((ch) => {
+   879→                const meta = CHANNEL_BADGE_META[ch] || {
+   880→                  color: 'var(--quant-flat)',
+   881→                  label: ch,
+   882→                }
+   883→                return (
+   884→                  <span
+   885→                    key={ch}
+   886→                    className="text-[11px] px-2 py-0.5 rounded border font-medium"
+   887→                    style={{
+   888→                      color: meta.color,
+   889→                      backgroundColor: `color-mix(in srgb, ${meta.color} 10%, transparent)`,
+   890→                      borderColor: `color-mix(in srgb, ${meta.color} 30%, transparent)`,
+   891→                    }}
+   892→                    title={ch}
+   893→                  >
+   894→                    {meta.label}
+   895→                  </span>
+   896→                )
+   897→              })}
+   898→            </div>
+   899→          )}
+   900→        </section>
+   901→
+   902→        {/* 信号内容 */}
+   903→        <section className="p-4 border-b border-quant space-y-2">
+   904→          <div className="text-[11px] text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+   905→            <TypeIcon className="size-3" />
+   906→            信号内容
+   907→          </div>
+   908→          <div className="rounded-md bg-quant-bg/50 border border-quant/60 p-3 text-xs leading-relaxed whitespace-pre-wrap break-words">
+   909→            {signal.content || '(空)'}
+   910→          </div>
+   911→        </section>
+   912→
+   913→        {/* Snapshot JSON 树形展示 */}
+   914→        <section className="p-4 border-b border-quant space-y-2">
+   915→          <div className="flex items-center justify-between">
+   916→            <div className="text-[11px] text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+   917→              <Braces className="size-3" />
+   918→              Snapshot JSON
+   919→            </div>
+   920→            <Button
+   921→              variant="ghost"
+   922→              size="sm"
+   923→              className="h-7 px-2 text-xs hover:bg-amber-500/10 hover:text-amber-400"
+   924→              onClick={onCopyJson}
+   925→              disabled={!signal.snapshot}
+   926→              title="复制 JSON 到剪贴板"
+   927→            >
+   928→              <Copy className="size-3" />
+   929→              复制 JSON
+   930→            </Button>
+   931→          </div>
+   932→          {!signal.snapshot ? (
+   933→            <div className="rounded-md bg-quant-bg/50 border border-quant/60 p-3 text-xs text-muted-foreground">
+   934→              {loading ? '加载中...' : '该信号无 snapshot 数据'}
+   935→            </div>
+   936→          ) : (
+   937→            <div className="rounded-md bg-quant-bg/80 border border-quant p-3 max-h-80 overflow-y-auto quant-scroll">
+   938→              <pre className="text-[11px] font-mono leading-relaxed">
+   939→                <JsonNode
+   940→                  value={signal.snapshot}
+   941→                  depth={0}
+   942→                  isLast
+   943→                />
+   944→              </pre>
+   945→            </div>
+   946→          )}
+   947→        </section>
+   948→
+   949→        {/* 底部操作 */}
+   950→        <div className="p-4 border-t border-quant flex flex-wrap items-center gap-2 sticky bottom-0 bg-quant-card">
+   951→          <Button
+   952→            variant="default"
+   953→            size="sm"
+   954→            className="h-8 gap-1.5 bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25 hover:text-amber-300"
+   955→            onClick={() => onRepush(signal)}
+   956→            disabled={repushing}
+   957→            title="重新推送到所有启用通道"
+   958→          >
+   959→            <RefreshCw className={cn('size-3.5', repushing && 'animate-spin')} />
+   960→            {repushing ? '推送中...' : '重新推送'}
+   961→          </Button>
+   962→          <Button
+   963→            variant="outline"
+   964→            size="sm"
+   965→            className="h-8 gap-1.5 border-quant"
+   966→            onClick={onCopyJson}
+   967→            disabled={!signal.snapshot}
+   968→            title="复制 JSON 到剪贴板"
+   969→          >
+   970→            <Copy className="size-3.5" />
+   971→            <span className="hidden sm:inline">复制 JSON</span>
+   972→          </Button>
+   973→          <Button
+   974→            variant="ghost"
+   975→            size="sm"
+   976→            className="h-8 ml-auto text-muted-foreground hover:text-foreground"
+   977→            onClick={() => onOpenChange(false)}
+   978→          >
+   979→            关闭
+   980→          </Button>
+   981→        </div>
+   982→      </SheetContent>
+   983→    </Sheet>
+   984→  )
+   985→}
+   986→
+   987→// ============================================================================
+   988→// 工具: 信息单元 / JSON 树
+   989→// ============================================================================
+   990→
+   991→function InfoCell({
+   992→  label,
+   993→  value,
+   994→  mono,
+   995→}: {
+   996→  label: string
+   997→  value: React.ReactNode
+   998→  mono?: boolean
+   999→}) {
+  1000→  return (
+  1001→    <div className="rounded-md bg-quant-bg/40 border border-quant/50 px-2 py-1.5">
+  1002→      <div className="text-[9px] text-muted-foreground uppercase tracking-wider">{label}</div>
+  1003→      <div
+  1004→        className={cn(
+  1005→          'text-xs truncate',
+  1006→          mono && 'font-mono tabular-nums'
+  1007→        )}
+  1008→        title={typeof value === 'string' ? value : undefined}
+  1009→      >
+  1010→        {value}
+  1011→      </div>
+  1012→    </div>
+  1013→  )
+  1014→}
+  1015→
+  1016→/**
+  1017→ * JSON 树形节点 (递归渲染)
+  1018→ *
+  1019→ * - key: 琥珀色 var(--quant-primary)
+  1020→ * - string: 绿色 var(--quant-down)
+  1021→ * - number: 蓝色 #38bdf8
+  1022→ * - boolean: 紫色 #c084fc
+  1023→ * - null: 灰色 var(--quant-flat)
+  1024→ * - object/array: 递归, 缩进 2 空格
+  1025→ */
+  1026→function JsonNode({
+  1027→  value,
+  1028→  depth,
+  1029→  isLast,
+  1030→  keyName,
+  1031→}: {
+  1032→  value: unknown
+  1033→  depth: number
+  1034→  isLast: boolean
+  1035→  keyName?: string
+  1036→}) {
+  1037→  const indent = '  '.repeat(depth)
+  1038→  const comma = isLast ? '' : ','
+  1039→
+  1040→  if (value === null) {
+  1041→    return (
+  1042→      <div>
+  1043→        {keyName && <span style={{ color: 'var(--quant-primary)' }}>"{keyName}": </span>}
+  1044→        <span style={{ color: 'var(--quant-flat)' }}>null</span>
+  1045→        <span>{comma}</span>
+  1046→      </div>
+  1047→    )
+  1048→  }
+  1049→
+  1050→  if (typeof value === 'boolean') {
+  1051→    return (
+  1052→      <div>
+  1053→        {keyName && <span style={{ color: 'var(--quant-primary)' }}>"{keyName}": </span>}
+  1054→        <span style={{ color: '#c084fc' }}>{String(value)}</span>
+  1055→        <span>{comma}</span>
+  1056→      </div>
+  1057→    )
+  1058→  }
+  1059→
+  1060→  if (typeof value === 'number') {
+  1061→    return (
+  1062→      <div>
+  1063→        {keyName && <span style={{ color: 'var(--quant-primary)' }}>"{keyName}": </span>}
+  1064→        <span style={{ color: '#38bdf8' }}>{String(value)}</span>
+  1065→        <span>{comma}</span>
+  1066→      </div>
+  1067→    )
+  1068→  }
+  1069→
+  1070→  if (typeof value === 'string') {
+  1071→    // 尝试 display longer strings with quotes
+  1072→    const display = value.length > 200 ? value.slice(0, 200) + '…' : value
+  1073→    return (
+  1074→      <div>
+  1075→        {keyName && <span style={{ color: 'var(--quant-primary)' }}>"{keyName}": </span>}
+  1076→        <span style={{ color: 'var(--quant-down)' }}>"{display}"</span>
+  1077→        <span>{comma}</span>
+  1078→      </div>
+  1079→    )
+  1080→  }
+  1081→
+  1082→  if (Array.isArray(value)) {
+  1083→    if (value.length === 0) {
+  1084→      return (
+  1085→        <div>
+  1086→          {keyName && <span style={{ color: 'var(--quant-primary)' }}>"{keyName}": </span>}
+  1087→          <span>[]</span>
+  1088→          <span>{comma}</span>
+  1089→        </div>
+  1090→      )
+  1091→    }
+  1092→    return (
+  1093→      <div>
+  1094→        {keyName && <span style={{ color: 'var(--quant-primary)' }}>"{keyName}": </span>}
+  1095→        <span>[</span>
+  1096→        {value.map((v, i) => (
+  1097→          <div key={i} style={{ paddingLeft: '1rem' }}>
+  1098→            <JsonNode
+  1099→              value={v}
+  1100→              depth={depth + 1}
+  1101→              isLast={i === value.length - 1}
+  1102→            />
+  1103→          </div>
+  1104→        ))}
+  1105→        <span>{indent}]</span>
+  1106→        <span>{comma}</span>
+  1107→      </div>
+  1108→    )
+  1109→  }
+  1110→
+  1111→  if (typeof value === 'object') {
+  1112→    const entries = Object.entries(value as Record<string, unknown>)
+  1113→    if (entries.length === 0) {
+  1114→      return (
+  1115→        <div>
+  1116→          {keyName && <span style={{ color: 'var(--quant-primary)' }}>"{keyName}": </span>}
+  1117→          <span>{'{}'}</span>
+  1118→          <span>{comma}</span>
+  1119→        </div>
+  1120→      )
+  1121→    }
+  1122→    return (
+  1123→      <div>
+  1124→        {keyName && <span style={{ color: 'var(--quant-primary)' }}>"{keyName}": </span>}
+  1125→        <span>{'{'}</span>
+  1126→        {entries.map(([k, v], i) => (
+  1127→          <div key={k} style={{ paddingLeft: '1rem' }}>
+  1128→            <JsonNode
+  1129→              value={v}
+  1130→              depth={depth + 1}
+  1131→              isLast={i === entries.length - 1}
+  1132→              keyName={k}
+  1133→            />
+  1134→          </div>
+  1135→        ))}
+  1136→        <span>{indent}{'}'}</span>
+  1137→        <span>{comma}</span>
+  1138→      </div>
+  1139→    )
+  1140→  }
+  1141→
+  1142→  // fallback (function / undefined / symbol)
+  1143→  return (
+  1144→    <div>
+  1145→      {keyName && <span style={{ color: 'var(--quant-primary)' }}>"{keyName}": </span>}
+  1146→      <span style={{ color: 'var(--quant-flat)' }}>{String(value)}</span>
+  1147→      <span>{comma}</span>
+  1148→    </div>
+  1149→  )
+  1150→}
+  1151→

@@ -122,6 +122,39 @@ export interface FlowRankingItemDTO {
   amount: number
 }
 
+/** R13-2c: 竞价强弱项 (后端 /api/monitor/auction 单条) */
+export interface AuctionItemDTO {
+  stock_code: string
+  /** 百分比形式 (5.23 = 5.23%) */
+  auction_pct: number
+  /** 万元 */
+  auction_amount: number
+  /** 万元 */
+  auction_zt_buy: number
+  /** 万元 */
+  open_amount_pre: number
+  /** 手 */
+  open_vol_pre: number
+  l2_order_num: number
+  l2_tic_num: number
+  /** 0-100 综合评分 */
+  auction_score: number
+  score_detail: {
+    surge: number
+    zt_flag: number
+    vol_ratio: number
+    l2: number
+  }
+  fetched_at: string
+}
+
+/** R13-2c: 竞价强弱响应 */
+export interface AuctionResponseDTO {
+  items: AuctionItemDTO[]
+  count: number
+  in_auction_hours: boolean
+}
+
 // ===== 通用请求 =====
 
 export class APIError extends Error {
@@ -310,13 +343,61 @@ export const monitorAPI = {
     ),
   /** P1: 引擎健康度 */
   getHealth: () => fetchAPI<EngineHealthDTO>('/api/monitor?action=health'),
+  /** R13-1b: 列出 alert_templates (供 MatchStrategyManager 编辑 alert_type 下拉) */
+  getRules: () =>
+    fetchAPI<{ templates: AlertTemplateDTO[]; count: number }>(
+      '/api/monitor/rules'
+    ),
+  /** R13-2c: 竞价强弱排行 (codes 可选, 逗号分隔; count 仅在 codes 未传时生效) */
+  getAuction: (codes?: string, count = 50) =>
+    fetchAPI<AuctionResponseDTO>(
+      `/api/monitor/auction?count=${count}${codes ? `&codes=${encodeURIComponent(codes)}` : ''}`
+    ),
+}
+
+/** R13-1b: alert_template 单条 DTO (对齐后端 GET /api/monitor/rules) */
+export interface AlertTemplateDTO {
+  alert_type: string
+  label: string
+  emoji: string
+  description: string
+  condition: string
+  default_params: Record<string, number>
+  priority: 'high' | 'medium' | 'low'
+  channels: string[]
 }
 
 export const themeAPI = {
   get: () => fetchAPI<ThemeDTO>('/api/theme'),
 }
 
+/** R13-3a: GET /api/config 摘要响应 (对齐后端 ConfigSummaryResponse) */
+export interface ConfigSummaryDTO {
+  app: {
+    name: string
+    version: string
+    adapter_mode: string
+    log_level: string
+  }
+  server: {
+    host: string
+    port: number
+  }
+  paths: Record<string, string>
+  strategies_count: number
+  strategies_enabled_count: number
+  alert_templates_count: number
+  match_strategies_count: number
+  channels: Array<{ name: string; enabled: boolean }>
+  config_files?: string[]
+  last_reload_at?: string
+  /** 后端降级标记 (前端代理无法连接 FastAPI 时为 true) */
+  fallback?: boolean
+}
+
 export const configAPI = {
+  /** R13-3a: 获取配置摘要 (GET /api/config) */
+  getSummary: () => fetchAPI<ConfigSummaryDTO>('/api/config'),
   reload: () => fetchAPI<{ ok: boolean; reloaded: string[] }>('/api/config', { method: 'POST' }),
   listStrategyConfigs: () =>
     fetchAPI<Array<{
@@ -696,6 +777,21 @@ export interface WatchlistAddResponse {
   message: string
 }
 
+/**
+ * R13-3b: 按板块批量加入响应。
+ *
+ * 后端实际返回 WatchlistAddResponse (ok/added/skipped/message)，
+ * sector_code / sector_name 字段为前端展示用, 由 UI 端拼接, 后端不一定返回。
+ */
+export interface WatchlistBySectorResponse {
+  ok: boolean
+  added: number
+  skipped: number
+  message: string
+  sector_code?: string
+  sector_name?: string
+}
+
 export const watchlistAPI = {
   list: () => fetchAPI<WatchlistItemDTO[]>('/api/monitor/watchlist'),
   add: (body: WatchlistAddRequest) =>
@@ -708,4 +804,19 @@ export const watchlistAPI = {
       `/api/monitor/watchlist/${encodeURIComponent(code)}`,
       { method: 'DELETE' }
     ),
+  /**
+   * R13-3b: 按板块批量加入监控池。
+   *
+   * 后端把 strategy_id / subscriber 作为 **query 参数**接收
+   * (FastAPI 默认对未注解的 str 参数走 query)，因此这里走 URL query 而非 body。
+   */
+  addBySector: (sector_code: string, strategy_id = '_manual') => {
+    const sp = new URLSearchParams()
+    if (strategy_id) sp.set('strategy_id', strategy_id)
+    const q = sp.toString()
+    return fetchAPI<WatchlistBySectorResponse>(
+      `/api/monitor/watchlist/by-sector/${encodeURIComponent(sector_code)}${q ? `?${q}` : ''}`,
+      { method: 'POST' }
+    )
+  },
 }

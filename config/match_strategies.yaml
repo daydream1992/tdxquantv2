@@ -34,6 +34,12 @@ match_strategies:
     channels:
     - websocket
     priority: low
+  - alert_type: auction_surge
+    params: {}
+    channels:
+    - websocket
+    - feishu
+    priority: high
   debounce_override: 60
   trading_hours_override: null
 - match_id: qzrfc_default

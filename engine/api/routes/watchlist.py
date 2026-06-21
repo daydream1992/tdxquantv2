@@ -160,7 +160,13 @@ async def add_by_sector(
 
     调 ``SectorManager.get_stocks(sector_code)`` 取板块成分股，
     然后批量 upsert_subscription。
+
+    Mock 模式 / TDX 未连接时，``adapter.get_user_sector`` 返回空列表。
+    此时 fallback 读 ``sector_snapshots`` 表（与
+    ``/api/sectors/{code}/stocks`` 端点同源），避免"板块不存在"假报错。
     """
+    import json as _json
+
     try:
         from engine.data_adapter.factory import get_adapter
         from engine.sector.manager import SectorManager
@@ -172,6 +178,25 @@ async def add_by_sector(
         raise HTTPException(
             status_code=500, detail=f"取板块成分股失败: {exc}"
         ) from exc
+
+    # Fallback: adapter 未联通（如 mock 模式）时读 sector_snapshots 表
+    # (与 /api/sectors/{code}/stocks 同源, 修复 R13-3b mock 模式假 404)
+    if not stocks and storage is not None and hasattr(storage, "table_exists"):
+        try:
+            if storage.table_exists("sector_snapshots"):
+                row = storage.fetchone(
+                    "SELECT stock_list FROM sector_snapshots "
+                    "WHERE sector_code = ? ORDER BY snapshot_at DESC LIMIT 1",
+                    (sector_code,),
+                )
+                if row and row[0]:
+                    stocks = list(_json.loads(str(row[0])))
+                    logger.info(
+                        "by-sector %s: adapter 空, fallback sector_snapshots 取 %d 只",
+                        sector_code, len(stocks),
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("fallback sector_snapshots(%s) 失败: %s", sector_code, exc)
 
     if not stocks:
         raise HTTPException(
