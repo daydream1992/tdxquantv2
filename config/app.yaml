@@ -43,6 +43,11 @@ tqcenter:
   burst: 20
   acquire_timeout: 5
 
+# R14-3: 板块热度 + 同板块联动开关的实际配置在 config/monitor_rules.yaml 的 monitor 段下
+# （ConfigLoader 按 alphabetical 加载 yaml，monitor_rules.yaml 后于 app.yaml 加载，
+#  故 monitor.* 配置统一放在 monitor_rules.yaml，避免被覆盖）
+# 修改后调 POST /api/config/reload 热加载，前端按 enabled 字段决定是否显示
+
 # R14-2: FastAPI 端点限流（Mock/Real 都生效，保护 Next 代理层 CPU）
 api:
   rate_limit:

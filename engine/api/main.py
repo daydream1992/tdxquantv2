@@ -34,6 +34,8 @@ from engine.api.routes import (
     config as config_routes,
     match_strategy as match_strategy_routes,
     monitor as monitor_routes,
+    sector_heatmap as sector_heatmap_routes,
+    sector_linkage as sector_linkage_routes,
     sectors as sectors_routes,
     search as search_routes,
     selection as selection_routes,
@@ -287,6 +289,9 @@ def create_app() -> FastAPI:
     app.include_router(backtest_routes.router, prefix="/api/backtest")
     app.include_router(search_routes.router, prefix="/api/search")
     app.include_router(stocks_routes.router, prefix="/api/stocks")
+    # R14-3: 监控池概念热度（方案 B）+ 信号同板块联动（方案 C）
+    app.include_router(sector_heatmap_routes.router, prefix="/api/monitor")
+    app.include_router(sector_linkage_routes.router, prefix="/api/signals")
 
     return app
 

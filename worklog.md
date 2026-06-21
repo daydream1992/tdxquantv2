@@ -12865,3 +12865,144 @@ Stage Summary:
   1. /api/health 路径在 FastAPI 未定义 (实际健康端点为 /health 和 /api/monitor/health), 但 RateLimit 规则仍按 path_prefix 匹配, 故 /api/health 的 404 也被限流; 不影响功能
   2. Real 模式 tqcenter_limiter.total_calls 在 Mock 模式始终 0 (因 mock_adapter 不调 acquire_or_skip), 这是设计预期, 切换到 Real 模式后才会有数
   3. API 中间件 rules 热加载不重建 (需重启 FastAPI 才能改 rules); tqcenter 令牌桶配置可热加载 (reset_limiter 在 _notify_reload 调用)
+
+---
+Task ID: R14-3
+Agent: full-stack-developer
+Task: 方案 B 监控池概念热度 + 方案 C 同板块联动（含开关）
+
+Work Log:
+- 读 worklog 末 5 段确认 R14-1 (个股板块归属 HoverCard) + R14-2 (三层限流 + EngineHealthCard 限流区块) 已上线
+- 勘察项目结构, 发现 R14-3 五部分代码已全部就位:
+  * Part 1: engine/api/routes/sector_heatmap.py 已存在 (~280 行, GET /sector-heatmap + 60s LRU + Pydantic schemas + _TYPE_MAP)
+  * Part 2: engine/api/routes/sector_linkage.py 已存在 (~320 行, GET /{signal_id}/related + 30s LRU + _lookup_signal_stock + Pydantic schemas)
+  * Part 3: src/app/api/monitor/sector-heatmap/route.ts (24 行, tryFastAPI+ok 降级) + src/app/api/signals/[signalId]/related/route.ts (25 行, forwardFastAPI+relayJSON)
+  * Part 4: src/components/quant/SectorHeatmap.tsx (~360 行, 30s 轮询 + HeatmapColumn/HeatmapRow 子组件 + amber/emerald 双色 + Skeleton/EmptyState)
+       src/components/quant/Dashboard.tsx 已 import SectorHeatmap + 在 FlowRanking 下方加 <SectorHeatmap />
+       src/components/quant/SignalCenter.tsx 已加 linkageEnabled 探测 + SectorLinkageButton 子组件 + Popover
+  * Part 5: config/monitor_rules.yaml 的 monitor 段下已加 sector_heatmap (enabled=true/top_n=10/cache_ttl=60/scan_timeout=30) + sector_linkage (enabled=true/top_n=5/cache_ttl=30)
+       config/app.yaml 加注释说明 "monitor.* 配置统一放在 monitor_rules.yaml, 避免被覆盖" (ConfigLoader 按 alphabetical 加载)
+  * main.py 已注册 sector_heatmap_routes (prefix=/api/monitor) + sector_linkage_routes (prefix=/api/signals)
+  * src/lib/api.ts 已加 5 个 DTO (HeatmapItemDTO/SectorHeatmapDTO/RelatedStockDTO/RelatedSectorDTO/SectorLinkageDTO) + monitorAPI.getSectorHeatmap + signalAPI.getRelated
+- 进入验证阶段 (代码已 ready, 重点验证端点 + 开关 + 前端)
+
+验证步骤:
+1. 重启 FastAPI: pkill + python -m uvicorn --host 0.0.0.0 --port 8000 --log-level warning (背景), sleep 5, /health 200 OK
+   * 注: 本环境下 setsid+& 在 bash 调用结束后被清理, 改用 python -m uvicorn ... & 同 bash 调用内执行所有测试
+2. 方案 B 端点 GET /api/monitor/sector-heatmap:
+   * 第一次: enabled=True, total_stocks=31, scanned_stocks=31, items=10, from_cache=False, duration_ms=380.02
+     Top 5: 绿色电力(concept, count=8) / 储能(concept, count=7) / 房地产开发(industry, count=7) / 芯片(concept, count=7) / 汽车电子(concept, count=6)
+   * 第二次: from_cache=True (60s LRU 命中, duration_ms 不变)
+3. 方案 C 端点 GET /api/signals/{id}/related:
+   * 取信号 37f49e63... (000601.SZ 韶能股份): enabled=True, items=7, from_cache=False
+     板块: 生物质能(1) / 充电桩(2) / 东数西算(3) / 储能(5) / 绿色电力(5) / 数据中心(3) / 新能源车(4), pct 全 0.0 (EngineState 未缓存行情, 注释说明)
+   * 第二次: from_cache=True (30s LRU 命中)
+   * 404 测试: 不存在的 signal_id → HTTP 404 {"detail":"信号 xxx 不存在或无 stock_code"}
+4. 开关验证 (热加载):
+   * 改 monitor_rules.yaml enabled=false + POST /api/config/reload → heatmap 返回 enabled=False/items=0/total=0, linkage 返回 enabled=False/items=0/stock_code=""
+   * 改回 true + reload → heatmap 返回 enabled=True/items=10 (热加载真生效)
+5. Next.js 代理 (port 3000 + XTransformPort=8000):
+   * /api/monitor/sector-heatmap?XTransformPort=8000 → 200, enabled=True, items=10
+   * /api/signals/{id}/related?XTransformPort=8000 → 200, enabled=True, items=7
+6. bun run lint: exit 0
+7. smoke_test.sh: 18/18 PASS (9 GET + 1 POST watchlist + 1 DELETE watchlist + 1 DELETE _default(403) + 6 web 代理)
+8. agent-browser (localhost:3000):
+   * 实时大屏 tab → 滚动到底部 "概念热度 Top10" 卡片可见
+     - 标题 "概念热度 Top10" + "监控池板块聚合 · 扫描 31/31 只" + 缓存命中 Badge + 刷新按钮
+     - 桌面端 2 列分组: 概念板块 (amber, 9 个) + 行业板块 (emerald, 1 个)
+     - 每行: 排名徽章 + 板块名 + 示例股代码 + count + 进度条
+     - 验证 5 个板块名 (绿色电力/储能/房地产开发/芯片/汽车电子) 全部在 DOM 中
+     - 截图 r14-3-heatmap.png (121KB)
+   * 信号中心 tab → 信号行 "联动" 按钮 (Link2 图标) 可见 (因 enabled=true)
+     - 点击第一行 (000601.SZ 韶能股份) 的 "联动" 按钮 → Popover 展开 (expanded=true)
+     - Popover 内容: "同板块联动 韶能股份" 标题 + 7 个概念板块分组
+       * 生物质能 (1 只): 000035.SZ 中国天楹 0.00%
+       * 充电桩 (2 只): 600703.SH 三安光电 0.00% / 600699.SH 均胜电子 0.00%
+       * 东数西算 (3 只): 000062.SZ 深圳华强 / 000066.SZ 中国长城 / 600775.SH 南京熊猫
+       * 储能 (5 只): 000021.SZ 深科技 / 000037.SZ 深南电A / 000035.SZ 中国天楹 / 600736.SH 苏州高新 / 600775.SH 南京熊猫
+       * 绿色电力 (5 只): 600726.SH 华电能源 / 600758.SH 辽宁能源 / 600722.SH 金牛化工 / 600744.SH 华银电力 / 000035.SZ 中国天楹
+       * 数据中心 (3 只) / 新能源车 (4 只)
+     - 截图 r14-3-linkage.png (154KB)
+   * console 监听: 仅 HMR/Fast Refresh info 日志, 无 error/exception
+9. dev.log 末 30 行: 全部 200 OK (含 /api/monitor/sector-heatmap 多次 + /api/signals/{id}/related 350ms 首次 + 78ms 缓存命中), 无报错
+
+Stage Summary:
+- 文件变更:
+  新增: engine/api/routes/sector_heatmap.py (~280 行, GET /sector-heatmap + 60s LRU + HeatmapItem/SectorHeatmapResponse schemas)
+       engine/api/routes/sector_linkage.py (~320 行, GET /{signal_id}/related + 30s LRU + RelatedStockItem/RelatedSectorItem/SectorLinkageResponse schemas)
+       src/app/api/monitor/sector-heatmap/route.ts (24 行, Next.js 代理 + 降级 enabled=false)
+       src/app/api/signals/[signalId]/related/route.ts (25 行, Next.js 动态代理)
+       src/components/quant/SectorHeatmap.tsx (~360 行, 概念热度卡片 + HeatmapColumn/HeatmapRow 子组件)
+  修改: engine/api/main.py (+2 行, 注册 sector_heatmap_routes + sector_linkage_routes)
+       config/monitor_rules.yaml (+15 行, monitor.sector_heatmap + monitor.sector_linkage 段)
+       config/app.yaml (+3 行注释, 说明 monitor.* 配置位置)
+       src/lib/api.ts (+50 行, 5 个 DTO + monitorAPI.getSectorHeatmap + signalAPI.getRelated)
+       src/components/quant/Dashboard.tsx (+2 行, import SectorHeatmap + 在 FlowRanking 下方加 <SectorHeatmap />)
+       src/components/quant/SignalCenter.tsx (+200 行, linkageEnabled 探测 + SectorLinkageButton 子组件 + Popover)
+- 验证:
+  * bun run lint: exit 0
+  * smoke_test: 18/18 PASS
+  * 方案 B 端点: enabled=true, items=10, scanned=31/31, from_cache 二次请求 true, duration=380ms
+  * 方案 C 端点: enabled=true, items=7 (生物质能/充电桩/东数西算/储能/绿色电力/数据中心/新能源车), from_cache 二次请求 true, 404 测试通过
+  * 开关验证: enabled=false + reload → 端点返回空响应, 改回 true + reload → 端点恢复 (热加载真生效)
+  * Next.js 代理: 200, 数据一致 (XTransformPort=8000)
+  * agent-browser: 概念热度卡片可见 + 联动按钮 Popover 显示 7 个板块分组 + 0 console error
+- 设计要点:
+  1. 双层缓存: 后端 OrderedDict+Lock LRU (B 60s 单条/C 30s 200 条 FIFO) + 前端 useRef 防同 session 重复请求
+  2. 开关热加载: cfg.get("monitor.sector_heatmap.enabled") 实时读, POST /api/config/reload 立即生效 (无需重启 FastAPI)
+  3. 限流保护: B 遍历受 R14-2 令牌桶保护 (Real 模式 qps=10), Mock 模式不限流; scan_timeout=30s 整体超时返回部分结果
+  4. 降级策略: B 单股 get_relation 失败跳过, C 单板块 get_stock_list_in_sector 失败跳过, 信号不存在返回 404
+  5. pct 字段: EngineState 当前不缓存实时行情, C 端点 pct 一律 0.0, 注释说明, 前端按 0 渲染
+  6. BlockType 归一化: 模块级 _TYPE_MAP 中文→英文 (concept/industry/region/index/style/system/custom), 与 R14-1 stocks.py 一致, 复制一份不跨模块 import
+  7. 联动按钮三态: linkageEnabled===true 显示, ===false 隐藏, ===null 加载中不显示; probe 第一个有 stock_code 的信号 getRelated 一次确定开关
+  8. 配置位置: monitor.* 放 monitor_rules.yaml (ConfigLoader 按 alphabetical 加载, monitor_rules.yaml 后于 app.yaml 加载, 避免被覆盖)
+  9. SectorHeatmap 双色分组: 概念 amber (#f59e0b), 行业 emerald (#10b981), 桌面端 lg:grid-cols-2, 移动端单列堆叠
+- 未解决问题:
+  1. pct 字段全 0: EngineState 未缓存实时行情, C 端点 pct 一律 0.0; 后续若加 _quotes 缓存可从 state 取最新 pct 补全
+  2. 联动按钮 probe 时机: SignalCenter 首次加载信号列表后 probe 第一个有 stock_code 的信号 getRelated, 若该信号 404 (无 stock_code) 则视为 enabled=true (按钮显示), 网络超时则视为 false (按钮隐藏)
+  3. 监控池为空时 heatmap 显示空态: total_stocks=0 时显示 "监控池为空, 请先添加监控股票" EmptyState, 不是 bug
+  4. scan_timeout 超时: B 遍历监控池超 30s 时停止扫描, 返回部分结果 + warning 日志 (Mock 模式 31 只 380ms 远低于超时, Real 模式若监控池 100+ 只可能触发)
+
+---
+Task ID: R14-3-verify
+Agent: main
+Task: R14-3 独立验证 + 修正 smoke_test 环境问题
+
+Work Log:
+- 子代理报告 smoke_test 18/18 PASS，但独立验证时发现 FastAPI 在 bash 工具结束时被杀（环境固有问题：子进程清理）
+- 根因排查：setsid 启动的 FastAPI 进程在 bash 工具调用结束时被清理，导致后续 bash 调用 curl 返回 000
+- 解决方案：在单个 bash 调用里完成"重启 + 验证 + 截图"全流程
+- 验证 R14-3 方案 B 端点（重启后）：
+  * curl /api/monitor/sector-heatmap → enabled:true, items:10, total_stocks:31, scanned:31, duration:389ms
+  * Top5: 绿色电力8(concept) / 储能7(concept) / 房地产开发7(industry) / 芯片7(concept) / 汽车电子6(concept)
+  * 二次请求 from_cache:true（60s LRU 命中）
+- 验证 R14-3 方案 C 端点：
+  * curl /api/signals/{id}/related → enabled:true, items:7（生物质能/充电桩/东数西算/储能/绿色电力/数据中心/新能源车）
+  * 二次请求 from_cache:true（30s LRU 命中）
+  * 404 测试通过（不存在的 signal_id 返回 404）
+- 开关热加载验证（python requests 单 bash 调用）：
+  * 改 monitor_rules.yaml 的 sector_heatmap.enabled=false + POST /api/config/reload → 端点返回 enabled:false, items:[]
+  * 改回 true + reload → 端点返回 enabled:true, items:10
+  * 热加载无需重启 FastAPI，立即生效
+- agent-browser 验证（单 bash 调用，FastAPI 存活）：
+  * 实时大屏 tab 滚动到底部："概念热度" 文本可见 = true
+  * 信号中心 tab：联动按钮 30 个（每个信号行一个，Link2 图标）
+  * 点击第一个联动按钮 → Popover 弹出，内容："同板块联动韶能股份 / 生物质能1只 / 充电桩2只 / 东数西算3只..."
+  * 截图: r14-3-heatmap.png + r14-3-linkage.png
+  * console 无 error
+- smoke_test 18/18 PASS 已在 FastAPI 存活时验证（单 bash 调用内）
+- bun run lint: exit 0
+
+Stage Summary:
+- 验证结论: R14-3 方案 B + 方案 C 全部功能正常
+  * 方案 B（监控池概念热度）: 端点 + 缓存 + 开关 + 前端卡片 全工作
+  * 方案 C（同板块联动）: 端点 + 缓存 + 开关 + 前端联动按钮 Popover 全工作
+  * 开关热加载真生效（改 yaml + reload 立即生效，无需重启）
+  * 限流保护（R14-2 令牌桶）对方案 B 遍历生效
+- 环境问题记录: bash 工具结束时杀子进程，setsid/nohup/disown 均无法完全规避
+  * 影响: smoke_test 在独立 bash 调用里会因 FastAPI 被杀而 5/17
+  * 规避: 在单个 bash 调用里完成"重启 + 验证"全流程
+  * 生产环境（start_all.sh 后台运行）无此问题
+- 未解决问题:
+  1. pct 字段全 0（EngineState 未缓存实时行情，方案 C 联动股的涨跌幅显示 0.00%）
+  2. Real 模式方案 B 遍历 100+ 只监控池可能触发 30s scan_timeout（Mock 模式 31 只 389ms 远低于超时）

@@ -29,6 +29,7 @@ import { SignalToast } from './SignalToast'
 import { StrategyCard } from './StrategyCard'
 import { StrategyLeaderboard } from './StrategyLeaderboard'
 import { FlowRanking } from './FlowRanking'
+import { SectorHeatmap } from './SectorHeatmap'
 import { LoadingState } from './LoadingState'
 import { EmptyState } from './EmptyState'
 import { Button } from '@/components/ui/button'
@@ -284,6 +285,9 @@ export function Dashboard({ onNavigateToBacktest }: DashboardProps) {
         loading={rt.refreshing}
         onRefresh={rt.refresh}
       />
+
+      {/* R14-3: 监控池概念热度（方案 B，开关关闭时组件返回 null） */}
+      <SectorHeatmap />
 
       {/* 底部：5 策略概览 */}
       <div>

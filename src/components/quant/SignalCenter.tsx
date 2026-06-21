@@ -50,6 +50,8 @@ import {
   Hash,
   Type as TypeIcon,
   Download,
+  Link2,
+  Database,
 } from 'lucide-react'
 import { StockTable, type Column } from './StockTable'
 import { LoadingState } from './LoadingState'
@@ -59,6 +61,11 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -75,6 +82,7 @@ import {
   channelAPI,
   type SignalDTO,
   type StrategyDTO,
+  type SectorLinkageDTO,
 } from '@/lib/api'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
@@ -139,6 +147,8 @@ export function SignalCenter() {
   const [channelFilter, setChannelFilter] = React.useState<Set<string>>(new Set())
   // 正在重推的 signal id 集合
   const [repushing, setRepushing] = React.useState<Set<string>>(new Set())
+  // R14-3: 同板块联动开关状态（首次打开 Popover 时检测，false 时隐藏按钮）
+  const [linkageEnabled, setLinkageEnabled] = React.useState<boolean | null>(null)
   // 用于刷新新信号判定
   const [, setTick] = React.useState(0)
   // R7-A: 信号详情抽屉
@@ -150,6 +160,29 @@ export function SignalCenter() {
   React.useEffect(() => {
     strategyAPI.list().then(setStrategies).catch(() => {})
   }, [])
+
+  // R14-3: 信号列表加载后探测联动开关（用第一个有 stock_code 的信号）
+  // - response.enabled === false → 关闭，按钮隐藏
+  // - response.enabled === true → 开启，按钮显示
+  // - 404 (信号不存在) → 说明 enabled=true，按钮显示
+  // - 网络/超时 → 默认 false，按钮隐藏
+  React.useEffect(() => {
+    if (!signals.length) return
+    const probe = signals.find((s) => s.stock_code)
+    if (!probe) {
+      setLinkageEnabled(false)
+      return
+    }
+    signalAPI
+      .getRelated(probe.id)
+      .then((r) => setLinkageEnabled(!!r.enabled))
+      .catch((e: unknown) => {
+        // 404 表示 enabled=true 但信号在 signal_events 中无 stock_code（或被删）
+        // 此时按钮仍显示，让用户点其它信号时也能触发请求
+        const status = (e as { status?: number })?.status
+        setLinkageEnabled(status === 404)
+      })
+  }, [signals])
 
   const load = React.useCallback(async () => {
     setLoading(true)
@@ -529,24 +562,29 @@ export function SignalCenter() {
       key: 'actions',
       header: '操作',
       align: 'center',
-      width: '4rem',
+      width: '7rem',
       render: (s) => {
         const isRepushing = repushing.has(s.id)
+        const showLinkage = linkageEnabled === true && !!s.stock_code
         return (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 px-2 text-xs hover:bg-amber-500/10 hover:text-amber-400"
-            disabled={isRepushing}
-            onClick={(e) => {
-              e.stopPropagation()
-              handleRepush(s)
-            }}
-            title="重新推送到所有启用通道"
-          >
-            <RefreshCw className={cn('size-3', isRepushing && 'animate-spin')} />
-            <span className="hidden lg:inline">{isRepushing ? '推送中' : '重推'}</span>
-          </Button>
+          <div className="flex items-center justify-center gap-0.5">
+            {/* R14-3: 同板块联动按钮（开关关闭或无 stock_code 时隐藏） */}
+            {showLinkage && <SectorLinkageButton signalId={s.id} stockCode={s.stock_code!} />}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-xs hover:bg-amber-500/10 hover:text-amber-400"
+              disabled={isRepushing}
+              onClick={(e) => {
+                e.stopPropagation()
+                handleRepush(s)
+              }}
+              title="重新推送到所有启用通道"
+            >
+              <RefreshCw className={cn('size-3', isRepushing && 'animate-spin')} />
+              <span className="hidden lg:inline">{isRepushing ? '推送中' : '重推'}</span>
+            </Button>
+          </div>
         )
       },
     },
@@ -856,6 +894,164 @@ export function SignalCenter() {
         onCopyJson={handleCopyJson}
       />
     </div>
+  )
+}
+
+// ============================================================================
+// R14-3: 同板块联动按钮 + Popover
+// ============================================================================
+
+interface SectorLinkageButtonProps {
+  signalId: string
+  stockCode: string
+}
+
+function SectorLinkageButton({ signalId, stockCode }: SectorLinkageButtonProps) {
+  const [open, setOpen] = React.useState(false)
+  const [data, setData] = React.useState<SectorLinkageDTO | null>(null)
+  const [loading, setLoading] = React.useState(false)
+  const [error, setError] = React.useState<string | null>(null)
+
+  const load = React.useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const r = await signalAPI.getRelated(signalId)
+      setData(r)
+    } catch (e) {
+      setError((e as Error).message || '查询联动股失败')
+    } finally {
+      setLoading(false)
+    }
+  }, [signalId])
+
+  // Popover 打开时加载数据（关闭后再打开重新加载，确保数据新鲜）
+  React.useEffect(() => {
+    if (open) {
+      load()
+    }
+  }, [open, load])
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 px-2 text-xs hover:bg-cyan-500/10 hover:text-cyan-400"
+          onClick={(e) => e.stopPropagation()}
+          title={`查看 ${stockCode} 同板块联动股`}
+        >
+          <Link2 className="size-3" />
+          <span className="hidden lg:inline">联动</span>
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        side="left"
+        align="center"
+        className="w-80 p-3 bg-quant-card border-quant text-foreground"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* 标题 */}
+        <div className="flex items-center gap-1.5 mb-2 pb-2 border-b border-quant">
+          <Link2 className="size-3.5 text-cyan-400" />
+          <span className="text-xs font-semibold">同板块联动</span>
+          {data?.stock_code && (
+            <span className="text-[10px] text-muted-foreground font-mono ml-auto">
+              {data.stock_name || data.stock_code}
+            </span>
+          )}
+        </div>
+
+        {/* 加载中 */}
+        {loading && (
+          <div className="flex items-center justify-center py-6 text-xs text-muted-foreground">
+            <Loader2 className="size-4 mr-2 animate-spin text-cyan-400" />
+            正在查询联动股...
+          </div>
+        )}
+
+        {/* 错误 */}
+        {!loading && error && (
+          <div className="py-4">
+            <EmptyState
+              icon={AlertCircle}
+              text="查询失败"
+              description={error}
+            />
+          </div>
+        )}
+
+        {/* 空数据 */}
+        {!loading && !error && data && data.items.length === 0 && (
+          <div className="py-4">
+            <EmptyState
+              icon={Database}
+              text="无联动股"
+              description="该信号股无概念板块，或联动股不在监控池"
+            />
+          </div>
+        )}
+
+        {/* 正常显示：每个概念板块一组 */}
+        {!loading && !error && data && data.items.length > 0 && (
+          <div className="space-y-2.5 max-h-80 overflow-y-auto quant-scroll">
+            {data.items.map((sector) => (
+              <div
+                key={sector.sector_code}
+                className="rounded-md border border-quant/60 bg-quant-bg/40 p-2"
+              >
+                {/* 板块标题 */}
+                <div className="flex items-center gap-1.5 mb-1.5">
+                  <span
+                    className="inline-block size-1.5 rounded-full"
+                    style={{ backgroundColor: '#f59e0b' }}
+                  />
+                  <span className="text-xs font-semibold truncate">
+                    {sector.sector_name}
+                  </span>
+                  <Badge
+                    variant="outline"
+                    className="text-[9px] ml-auto border-quant font-mono"
+                  >
+                    {sector.stocks.length} 只
+                  </Badge>
+                </div>
+                {/* 联动股列表 */}
+                <div className="space-y-0.5">
+                  {sector.stocks.map((st) => (
+                    <div
+                      key={st.code}
+                      className="flex items-center justify-between text-[11px] hover:bg-quant-bg/80 rounded px-1 py-0.5"
+                    >
+                      <span className="font-mono text-muted-foreground truncate">
+                        {st.code}
+                      </span>
+                      <span className="text-foreground/80 truncate ml-1">
+                        {st.name || '—'}
+                      </span>
+                      <span
+                        className="ml-auto tabular-nums font-mono"
+                        style={{
+                          color:
+                            st.pct > 0
+                              ? 'var(--quant-up)'
+                              : st.pct < 0
+                              ? 'var(--quant-down)'
+                              : 'var(--quant-flat)',
+                        }}
+                      >
+                        {(st.pct * 100).toFixed(2)}%
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </PopoverContent>
+    </Popover>
   )
 }
 

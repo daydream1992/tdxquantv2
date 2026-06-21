@@ -90,6 +90,57 @@ export interface StockSectorsDTO {
   fetched_at: string
 }
 
+/** R14-3: 监控池概念热度 DTO */
+export interface HeatmapItemDTO {
+  /** 板块代码 */
+  code: string
+  /** 板块名 */
+  name: string
+  /** 板块类型: concept / industry */
+  type: 'concept' | 'industry' | string
+  /** 监控池中属于该板块的股票数 */
+  count: number
+  /** 股票代码列表（最多 5 个示例） */
+  stocks: string[]
+}
+
+export interface SectorHeatmapDTO {
+  enabled: boolean
+  items: HeatmapItemDTO[]
+  /** 监控池总数 */
+  total_stocks: number
+  /** 实际扫描数（失败的跳过） */
+  scanned_stocks: number
+  from_cache: boolean
+  fetched_at: string
+  duration_ms: number
+}
+
+/** R14-3: 信号同板块联动 DTO */
+export interface RelatedStockDTO {
+  code: string
+  name: string
+  /** 当前涨跌幅（EngineState 未缓存行情时为 0） */
+  pct: number
+}
+
+export interface RelatedSectorDTO {
+  sector_code: string
+  sector_name: string
+  sector_type: string
+  stocks: RelatedStockDTO[]
+}
+
+export interface SectorLinkageDTO {
+  enabled: boolean
+  signal_id: string
+  stock_code: string
+  stock_name: string
+  items: RelatedSectorDTO[]
+  from_cache: boolean
+  fetched_at: string
+}
+
 export interface MonitorStatusDTO {
   engine_status: 'running' | 'stopped' | 'error'
   adapter_mode: 'mock' | 'real'
@@ -308,6 +359,9 @@ export const signalAPI = {
   /** R7-A: 信号详情 (含 snapshot JSON) */
   getDetail: (id: string) =>
     fetchAPI<SignalDTO>(`/api/signals/${encodeURIComponent(id)}`),
+  /** R14-3: 信号同板块联动股（方案 C，受 monitor.sector_linkage.enabled 开关控制） */
+  getRelated: (id: string) =>
+    fetchAPI<SectorLinkageDTO>(`/api/signals/${encodeURIComponent(id)}/related`),
 }
 
 export const sectorAPI = {
@@ -401,6 +455,9 @@ export const monitorAPI = {
     fetchAPI<AuctionResponseDTO>(
       `/api/monitor/auction?count=${count}${codes ? `&codes=${encodeURIComponent(codes)}` : ''}`
     ),
+  /** R14-3: 监控池概念热度 Top N (方案 B, 受 monitor.sector_heatmap.enabled 开关控制) */
+  getSectorHeatmap: () =>
+    fetchAPI<SectorHeatmapDTO>('/api/monitor/sector-heatmap'),
 }
 
 /** R13-1b: alert_template 单条 DTO (对齐后端 GET /api/monitor/rules) */

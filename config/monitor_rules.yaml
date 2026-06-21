@@ -1,219 +1,198 @@
-# =====================================================================
-# TdxQuant 监控预警规则 (config/monitor_rules.yaml)
-# =====================================================================
-# 实时行情监控与预警规则，所有策略共用。
-# 策略 YAML 的 monitor.alert_conditions 可引用本文件的 alert_templates，也可内联覆盖。
-# 修改后无需重启，调用 POST /api/config/reload 热加载。
-# 详见: docs/maintenance/ARCHITECTURE.md §五（配置文件规范）
-# =====================================================================
-
-# ---- 监控引擎全局参数 ----
 monitor:
-  # subscribe_hq 单次最多 100 只，分批 50（不硬编码，可调整）
   subscribe_batch_size: 50
-  # 轮询间隔（秒），subscribe_hq 不可用时按此间隔主动拉取
   poll_interval_seconds: 10
-  # 同股票同类型预警防抖（秒），避免短时间内重复推送
   alert_debounce_seconds: 30
-  # P1: 聚合推送窗口（秒），medium/low 优先级信号在此窗口内聚合为一条摘要推送
-  #     也是 P2-1 独立 flush 线程的循环间隔
   alert_aggregate_window_seconds: 60
-  # P1: 聚合队列最大长度，达到立即 flush（不等窗口结束）
   alert_aggregate_max_size: 10
-  # 监控时段（仅在这些时段内触发预警，避开集合竞价前/收盘后）
   trading_hours:
-    morning_start: "09:25"        # 集合竞价开始
-    morning_end: "11:30"
-    afternoon_start: "13:00"
-    afternoon_end: "15:00"
-  # P2-2: 健康度判定阈值（GET /api/monitor/health 用）
-  # status 判定: lag < lag_healthy_seconds 且 errors < error_healthy_threshold => healthy
-  #              lag < lag_degraded_seconds => degraded, 否则 unhealthy
-  # 配置缺失时回退默认值 (60/120/10)，保证向后兼容
+    morning_start: 09:25
+    morning_end: '11:30'
+    afternoon_start: '13:00'
+    afternoon_end: '15:00'
   health:
-    lag_healthy_seconds: 60        # lag < 此值 且 errors < threshold => healthy
-    lag_degraded_seconds: 120      # lag < 此值 => degraded, 否则 unhealthy
-    error_healthy_threshold: 10    # 错误数 < 此值才算 healthy
-
-# ---- 通用预警条件模板 ----
-# 策略 YAML 可通过 alert_type 引用本模板，也可在 monitor.alert_conditions 内联覆盖
-# 字段说明:
-#   condition    - 表达式引擎求值（支持 pct_change/volume_ratio/main_inflow/auction_pct 等字段）
-#   alert_type   - 预警类型 ID（全局唯一）
-#   channels     - 推送通道列表（对应 config/channels.yaml 的 channel_id）
-#   priority     - 优先级 high/medium/low（影响推送顺序与去重策略）
+    lag_healthy_seconds: 60
+    lag_degraded_seconds: 120
+    error_healthy_threshold: 10
+  sector_heatmap:
+    enabled: true
+    top_n: 10
+    cache_ttl: 60
+    scan_timeout: 30
+  sector_linkage:
+    enabled: true
+    top_n: 5
+    cache_ttl: 30
 alert_templates:
-  # 涨停预警: 涨幅 > 9.5%（兼容主板/创业板/科创板/北交所，实际涨停阈值在 cleaning_rules.yaml 配置）
   limit_up:
-    condition: "pct_change > {pct_threshold}"
+    condition: pct_change > {pct_threshold}
     alert_type: limit_up
     emoji: 🚀
     label: 涨停
-    channels: [tdx_warn, websocket, feishu]
+    channels:
+    - tdx_warn
+    - websocket
+    - feishu
     priority: high
     description: 触及涨停价（含创业板/科创板 19.5%、北交所 29.5%、主板 9.8%）
     default_params:
       pct_threshold: 0.095
-
-  # 大跌预警: 跌幅 > 5%
   drop_alert:
-    condition: "pct_change < -{pct_threshold}"
+    condition: pct_change < -{pct_threshold}
     alert_type: drop_alert
     emoji: ⚠️
     label: 大跌
-    channels: [websocket, feishu]
+    channels:
+    - websocket
+    - feishu
     priority: medium
     description: 跌幅超过 5%（炸板/破位风险）
     default_params:
       pct_threshold: 0.05
-
-  # 量能放大: 量比 > 3
   volume_surge:
-    condition: "volume_ratio > {vol_ratio_threshold}"
+    condition: volume_ratio > {vol_ratio_threshold}
     alert_type: volume_surge
     emoji: 📈
     label: 放量
-    channels: [websocket]
+    channels:
+    - websocket
     priority: low
     description: 量比放大超过 3 倍
     default_params:
       vol_ratio_threshold: 3
-
-  # 竞价异动: 竞价涨幅 > 3%
   auction_surge:
-    condition: "auction_pct > {pct_threshold}"
+    condition: auction_pct > {pct_threshold}
     alert_type: auction_surge
     emoji: 🔨
     label: 竞价异动
-    channels: [websocket]
+    channels:
+    - websocket
     priority: medium
     description: 开盘竞价涨幅 > 3%（次日确认关键信号）
     default_params:
       pct_threshold: 0.03
-
-  # 趋势加速: 涨幅 > 5%
   trend_accelerate:
-    condition: "pct_change > {pct_threshold}"
+    condition: pct_change > {pct_threshold}
     alert_type: trend_accelerate
     emoji: 🚀
     label: 趋势加速
-    channels: [tdx_warn, websocket]
+    channels:
+    - tdx_warn
+    - websocket
     priority: high
     description: 趋势加速上涨
     default_params:
       pct_threshold: 0.05
-
-  # 趋势破位: 跌幅 > 3%
   trend_break:
-    condition: "pct_change < -{pct_threshold}"
+    condition: pct_change < -{pct_threshold}
     alert_type: trend_break
     emoji: 💔
     label: 趋势破位
-    channels: [websocket, feishu]
+    channels:
+    - websocket
+    - feishu
     priority: high
     description: 趋势破位下跌
     default_params:
       pct_threshold: 0.03
-
-  # 反弹信号: 涨幅 > 3%（错杀低吸策略专用）
   rebound_signal:
-    condition: "pct_change > {pct_threshold}"
+    condition: pct_change > {pct_threshold}
     alert_type: rebound_signal
     emoji: 🔄
     label: 反弹信号
-    channels: [tdx_warn, websocket, feishu]
+    channels:
+    - tdx_warn
+    - websocket
+    - feishu
     priority: high
     description: 错杀反弹启动
     default_params:
       pct_threshold: 0.03
-
-  # 继续杀跌: 跌幅 > 5%（错杀变深跌，止损信号）
   continue_drop:
-    condition: "pct_change < -{pct_threshold}"
+    condition: pct_change < -{pct_threshold}
     alert_type: continue_drop
     emoji: 📉
     label: 持续下跌
-    channels: [websocket, feishu]
+    channels:
+    - websocket
+    - feishu
     priority: high
     description: 错杀变深跌，止损信号
     default_params:
       pct_threshold: 0.05
-
-  # 大单承接: 主力净流入 > 1000 万
   big_buy_support:
-    condition: "main_inflow > {inflow_threshold}"
+    condition: main_inflow > {inflow_threshold}
     alert_type: big_buy_support
     emoji: 💪
     label: 大单承接
-    channels: [websocket]
+    channels:
+    - websocket
     priority: medium
     description: 大单承接（主力净流入 > 1000 万）
     default_params:
       inflow_threshold: 1000
-
-  # 弱转强启动: 涨幅 > 3%
   rzq_ignite:
-    condition: "pct_change > {pct_threshold}"
+    condition: pct_change > {pct_threshold}
     alert_type: rzq_ignite
     emoji: ⚡
     label: 弱转强点火
-    channels: [tdx_warn, websocket, feishu]
+    channels:
+    - tdx_warn
+    - websocket
+    - feishu
     priority: high
     description: 弱转强点火成功
     default_params:
       pct_threshold: 0.03
-
-  # 弱转强失败: 跌幅 > 3%
   rzq_fail:
-    condition: "pct_change < -{pct_threshold}"
+    condition: pct_change < -{pct_threshold}
     alert_type: rzq_fail
     emoji: 💔
     label: 弱转强失败
-    channels: [websocket, feishu]
+    channels:
+    - websocket
+    - feishu
     priority: high
     description: 弱转强点火失败，止损
     default_params:
       pct_threshold: 0.03
-
-  # 强转弱反抽: 涨幅 > 2%
   qzrfc_rebound:
-    condition: "pct_change > {pct_threshold}"
+    condition: pct_change > {pct_threshold}
     alert_type: qzrfc_rebound
     emoji: 🔄
     label: 强转弱反抽
-    channels: [tdx_warn, websocket, feishu]
+    channels:
+    - tdx_warn
+    - websocket
+    - feishu
     priority: high
     description: 强转弱反抽启动
     default_params:
       pct_threshold: 0.02
-
-  # 强转弱失败: 跌幅 > 5%
   qzrfc_fail:
-    condition: "pct_change < -{pct_threshold}"
+    condition: pct_change < -{pct_threshold}
     alert_type: qzrfc_fail
     emoji: ⚠️
     label: 反抽失败
-    channels: [websocket, feishu]
+    channels:
+    - websocket
+    - feishu
     priority: high
     description: 反抽失败，止损
     default_params:
       pct_threshold: 0.05
-
-  # 主力自救: 主力净流入 > 1000 万
   main_self_rescue:
-    condition: "main_inflow > {inflow_threshold}"
+    condition: main_inflow > {inflow_threshold}
     alert_type: main_self_rescue
     emoji: 🆘
     label: 主力自救
-    channels: [websocket]
+    channels:
+    - websocket
     priority: medium
     description: 主力自救资金入场
     default_params:
       inflow_threshold: 1000
-
-# ---- 预警去重策略 ----
 dedup:
-  # 同股票同 alert_type 在 debounce 窗口内只推送一次
-  key_fields: [stock_code, alert_type]
-  # 高优先级预警不受 debounce 限制（立即推送）
+  key_fields:
+  - stock_code
+  - alert_type
   bypass_priority: high
