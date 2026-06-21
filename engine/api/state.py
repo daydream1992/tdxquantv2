@@ -41,6 +41,13 @@ class EngineState:
         self._today_alerts: int = 0
         # 监控订阅缓存（key=stock_code）
         self._subscriptions: dict[str, dict[str, Any]] = {}
+        # R14-2: API 限流监控计数（线程安全）
+        self._api_call_total: int = 0
+        self._api_rejected_total: int = 0
+        self._api_avg_latency_ms: float = 0.0
+        self._api_latency_samples: int = 0
+        self._tqcenter_call_total: int = 0
+        self._tqcenter_rejected_total: int = 0
 
     # ------------------------------------------------------------------
     # 心跳
@@ -123,6 +130,75 @@ class EngineState:
     def monitored_count(self) -> int:
         with self._lock:
             return len(self._subscriptions)
+
+    # ------------------------------------------------------------------
+    # R14-2: API 限流监控计数
+    # ------------------------------------------------------------------
+
+    def record_api_call(self, latency_ms: float, rejected: bool = False) -> None:
+        """记录一次 API 调用（线程安全，增量平均算法）。
+
+        Args:
+            latency_ms: 本次请求耗时（毫秒）
+            rejected: 是否被限流中间件拒绝（status=429）
+        """
+        with self._lock:
+            self._api_call_total += 1
+            if rejected:
+                self._api_rejected_total += 1
+            # 增量平均：avg = avg + (new - avg) / n
+            self._api_latency_samples += 1
+            n = self._api_latency_samples
+            self._api_avg_latency_ms = (
+                self._api_avg_latency_ms + (float(latency_ms) - self._api_avg_latency_ms) / n
+            )
+
+    def record_tqcenter_call(self, rejected: bool = False) -> None:
+        """记录一次 tqcenter 适配器调用（含被令牌桶拒绝）。
+
+        Args:
+            rejected: 是否被令牌桶拒绝（acquire_or_skip 返回 False）
+        """
+        with self._lock:
+            self._tqcenter_call_total += 1
+            if rejected:
+                self._tqcenter_rejected_total += 1
+
+    def api_stats(self) -> dict[str, Any]:
+        """返回 API 限流相关统计快照。"""
+        with self._lock:
+            data = {
+                "api_call_total": self._api_call_total,
+                "api_rejected_total": self._api_rejected_total,
+                "api_avg_latency_ms": round(self._api_avg_latency_ms, 2),
+                "tqcenter_call_total": self._tqcenter_call_total,
+                "tqcenter_rejected_total": self._tqcenter_rejected_total,
+            }
+        # rate_limit_status：从模块级单例取
+        try:
+            from engine.data_adapter.rate_limiter import get_limiter
+
+            lim = get_limiter()
+            if lim is not None:
+                data["tqcenter_limiter"] = lim.snapshot()
+            else:
+                data["tqcenter_limiter"] = {"enabled": False}
+        except Exception:  # noqa: BLE001
+            data["tqcenter_limiter"] = {"enabled": False}
+        try:
+            from engine.api.middleware.rate_limit import get_global_limiter
+
+            api_lim = get_global_limiter()
+            if api_lim is not None:
+                data["api_middleware"] = {
+                    "enabled": True,
+                    "rules_count": api_lim.rules_count,
+                }
+            else:
+                data["api_middleware"] = {"enabled": False, "rules_count": 0}
+        except Exception:  # noqa: BLE001
+            data["api_middleware"] = {"enabled": False, "rules_count": 0}
+        return data
 
     # ------------------------------------------------------------------
     # 测试用：重置单例

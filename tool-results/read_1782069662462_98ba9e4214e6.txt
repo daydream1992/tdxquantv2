@@ -1,0 +1,731 @@
+     1→"""``/api/monitor`` 路由 - 监控状态与实时行情快照。
+     2→
+     3→- ``GET /api/monitor/status``        - 监控状态（监控股票数/今日信号/订阅/心跳）
+     4→- ``GET /api/monitor/quotes``        - 实时行情快照（前 N 只订阅股票的价量 + 资金流字段 + 竞价涨幅）
+     5→- ``GET /api/monitor/auction``       - 批量竞价查询 + 强弱评分 (R13-2a)
+     6→- ``GET /api/monitor/flow-ranking``  - 资金流向排行 (按 main_inflow / big_buy_ratio / turnover_rate 排序)
+     7→- ``GET /api/monitor/subscriptions`` - 当前订阅列表
+     8→"""
+     9→
+    10→from __future__ import annotations
+    11→
+    12→import hashlib
+    13→import logging
+    14→import time
+    15→from datetime import datetime
+    16→from typing import Any
+    17→
+    18→from fastapi import APIRouter, Depends, Query
+    19→
+    20→from engine.api.deps import get_adapter, get_config, get_state, get_storage
+    21→from engine.api.schemas import (
+    22→    FlowRankingItem,
+    23→    MonitorStatusResponse,
+    24→    MonitorSubscriptionItem,
+    25→    QuoteSnapshot,
+    26→)
+    27→
+    28→logger = logging.getLogger(__name__)
+    29→
+    30→router = APIRouter(tags=["monitor"])
+    31→
+    32→
+    33→@router.get(
+    34→    "/status",
+    35→    response_model=MonitorStatusResponse,
+    36→    summary="监控状态",
+    37→)
+    38→async def get_status(
+    39→    cfg: Any = Depends(get_config),
+    40→    state: Any = Depends(get_state),
+    41→    storage: Any = Depends(get_storage),
+    42→) -> MonitorStatusResponse:
+    43→    """返回引擎运行时状态。
+    44→
+    45→    - ``adapter_mode`` 来自 ``app.adapter_mode``
+    46→    - ``monitored_count`` 优先用 EngineState 内存计数；为 0 时从 monitor_subscriptions 表查
+    47→    - 信号计数优先用 EngineState 内存计数；为 0 时从 signal_events 表查今日数据
+    48→      （这样 FastAPI 重启后 Web 端仍能看到真实计数）
+    49→    """
+    50→    state.heartbeat()
+    51→    counts = state.today_signal_counts()
+    52→
+    53→    today_signals = counts["today_signals"]
+    54→    today_limit_up = counts["today_limit_up"]
+    55→    today_alerts = counts["today_alerts"]
+    56→    monitored_count = state.monitored_count()
+    57→
+    58→    # 内存计数为 0 时，从 DuckDB 兜底（处理 FastAPI 重启场景）
+    59→    if storage is not None and hasattr(storage, "table_exists"):
+    60→        try:
+    61→            # 今日信号总数（按 triggered_at 当天过滤）
+    62→            if storage.table_exists("signal_events"):
+    63→                row = storage.fetchone(
+    64→                    "SELECT COUNT(*) FROM signal_events "
+    65→                    "WHERE triggered_at >= CURRENT_DATE"
+    66→                )
+    67→                if row and row[0] and int(row[0]) > today_signals:
+    68→                    today_signals = int(row[0])
+    69→
+    70→                # 涨停信号
+    71→                row = storage.fetchone(
+    72→                    "SELECT COUNT(*) FROM signal_events "
+    73→                    "WHERE alert_type = 'limit_up' AND triggered_at >= CURRENT_DATE"
+    74→                )
+    75→                if row and row[0] and int(row[0]) > today_limit_up:
+    76→                    today_limit_up = int(row[0])
+    77→
+    78→                # 异常告警（drop_alert + breakout）
+    79→                row = storage.fetchone(
+    80→                    "SELECT COUNT(*) FROM signal_events "
+    81→                    "WHERE alert_type IN ('drop_alert', 'breakout') "
+    82→                    "AND triggered_at >= CURRENT_DATE"
+    83→                )
+    84→                if row and row[0] and int(row[0]) > today_alerts:
+    85→                    today_alerts = int(row[0])
+    86→
+    87→            # 监控订阅数（active=true 的去重 stock_code）
+    88→            if storage.table_exists("monitor_subscriptions") and monitored_count == 0:
+    89→                row = storage.fetchone(
+    90→                    "SELECT COUNT(DISTINCT stock_code) FROM monitor_subscriptions "
+    91→                    "WHERE active = true"
+    92→                )
+    93→                if row and row[0]:
+    94→                    monitored_count = int(row[0])
+    95→        except Exception as exc:  # noqa: BLE001
+    96→            logger.warning("从 DuckDB 兜底查询信号/订阅计数失败: %s", exc)
+    97→
+    98→    return MonitorStatusResponse(
+    99→        engine_status="running",
+   100→        adapter_mode=str(cfg.get("app.adapter_mode", "mock")),
+   101→        monitored_count=monitored_count,
+   102→        today_signals=today_signals,
+   103→        today_limit_up=today_limit_up,
+   104→        today_alerts=today_alerts,
+   105→        uptime_seconds=state.uptime_seconds(),
+   106→        last_hb=state.last_hb,
+   107→    )
+   108→
+   109→
+   110→@router.get(
+   111→    "/quotes",
+   112→    response_model=list[QuoteSnapshot],
+   113→    summary="实时行情快照",
+   114→)
+   115→async def get_quotes(
+   116→    adapter: Any = Depends(get_adapter),
+   117→    state: Any = Depends(get_state),
+   118→    storage: Any = Depends(get_storage),
+   119→    count: int = Query(12, ge=1, le=200),
+   120→) -> list[QuoteSnapshot]:
+   121→    """返回订阅列表前 N 只股票的价量快照。
+   122→
+   123→    适配器为 Mock 时，从 V8 快照 CSV 取静态数据；Real 模式调用
+   124→    ``tq.get_pricevol`` 实时数据。
+   125→
+   126→    若订阅列表为空（首次启动），自动从 ``selection_results`` 表取最近一次
+   127→    选股结果的 Top N 作为兜底，保证 Web 大屏始终有数据可看。
+   128→
+   129→    R7-A: 同时返回资金流字段 ``main_inflow`` / ``big_buy_ratio`` / ``turnover_rate``,
+   130→    从 ``adapter.get_more_info(code)`` 提取 ``Zjl`` / ``TotalBVol/TotalSVol`` / ``fHSL``,
+   131→    字段缺失时用确定性 mock (基于 code hash)。
+   132→    """
+   133→    subs = state.list_subscriptions()
+   134→    codes: list[str] = [s["stock_code"] for s in subs][:count]
+   135→
+   136→    # 兜底：从最近 selection_results 取 Top N 注入订阅（持久化）
+   137→    if not codes:
+   138→        codes = _fallback_top_picks(storage, state, count)
+   139→    out: list[QuoteSnapshot] = []
+   140→    now_ms = int(time.time() * 1000)
+   141→
+   142→    # 预取 more_info (含资金流字段) - 失败不阻断主流程
+   143→    more_info_map: dict[str, dict] = _batch_more_info(adapter, codes)
+   144→
+   145→    try:
+   146→        # 优先调批量 pricevol
+   147→        pv = adapter.get_pricevol(codes) if hasattr(adapter, "get_pricevol") else {}
+   148→        if pv and isinstance(pv, dict):
+   149→            for code in codes:
+   150→                fields = pv.get(code) or {}
+   151→                last = _safe_float(fields.get("Now")) or _safe_float(fields.get("last")) or 0.0
+   152→                last_close = _safe_float(fields.get("LastClose")) or _safe_float(fields.get("last_close")) or 0.0
+   153→                pct = _safe_float(fields.get("pct_change")) or (last / last_close - 1 if last_close else 0.0)
+   154→                main_inflow, big_buy_ratio, turnover_rate = _extract_flow_fields(
+   155→                    code, more_info_map.get(code) or fields.get("_raw") or {}
+   156→                )
+   157→                # R13-2b: auction_pct 从 VOpenZAF 取 (小数形式, 0.0523 = 5.23%)
+   158→                auction_pct = _extract_auction_pct_fraction(
+   159→                    more_info_map.get(code) or fields.get("_raw") or {}
+   160→                )
+   161→                out.append(
+   162→                    QuoteSnapshot(
+   163→                        code=code,
+   164→                        name=str(fields.get("name", "")),
+   165→                        last=last,
+   166→                        pct=pct,
+   167→                        change=round(last - last_close, 4) if last_close else 0.0,
+   168→                        volume=_safe_float(fields.get("Volume")) or 0.0,
+   169→                        amount=_safe_float(fields.get("Amount")) or 0.0,
+   170→                        ts=now_ms,
+   171→                        main_inflow=main_inflow,
+   172→                        big_buy_ratio=big_buy_ratio,
+   173→                        turnover_rate=turnover_rate,
+   174→                        auction_pct=auction_pct,
+   175→                    )
+   176→                )
+   177→            return out
+   178→    except Exception as exc:  # noqa: BLE001
+   179→        logger.warning("get_pricevol 批量失败，回退单只: %s", exc)
+   180→
+   181→    # 兜底：单只 get_market_snapshot
+   182→    for code in codes:
+   183→        try:
+   184→            snap = adapter.get_market_snapshot(code)
+   185→            last = _safe_float(snap.get("Now")) or 0.0
+   186→            last_close = _safe_float(snap.get("LastClose")) or 0.0
+   187→            pct = (last / last_close - 1) if last_close else 0.0
+   188→            main_inflow, big_buy_ratio, turnover_rate = _extract_flow_fields(
+   189→                code, more_info_map.get(code) or snap
+   190→            )
+   191→            # R13-2b: auction_pct 从 VOpenZAF 取 (小数形式, 0.0523 = 5.23%)
+   192→            auction_pct = _extract_auction_pct_fraction(
+   193→                more_info_map.get(code) or snap
+   194→            )
+   195→            out.append(
+   196→                QuoteSnapshot(
+   197→                    code=code,
+   198→                    name=str(snap.get("name", "")),
+   199→                    last=last,
+   200→                    pct=pct,
+   201→                    change=round(last - last_close, 4) if last_close else 0.0,
+   202→                    volume=_safe_float(snap.get("Volume")) or 0.0,
+   203→                    amount=_safe_float(snap.get("Amount")) or 0.0,
+   204→                    ts=now_ms,
+   205→                    main_inflow=main_inflow,
+   206→                    big_buy_ratio=big_buy_ratio,
+   207→                    turnover_rate=turnover_rate,
+   208→                    auction_pct=auction_pct,
+   209→                )
+   210→            )
+   211→        except Exception as exc:  # noqa: BLE001
+   212→            logger.warning("get_market_snapshot(%s) 失败: %s", code, exc)
+   213→    return out
+   214→
+   215→
+   216→@router.get(
+   217→    "/flow-ranking",
+   218→    response_model=list[FlowRankingItem],
+   219→    summary="资金流向排行",
+   220→)
+   221→async def get_flow_ranking(
+   222→    adapter: Any = Depends(get_adapter),
+   223→    state: Any = Depends(get_state),
+   224→    storage: Any = Depends(get_storage),
+   225→    count: int = Query(50, ge=1, le=200, description="取样股票数"),
+   226→    metric: str = Query(
+   227→        "main_inflow",
+   228→        pattern="^(main_inflow|big_buy_ratio|turnover_rate)$",
+   229→        description="排序指标",
+   230→    ),
+   231→) -> list[FlowRankingItem]:
+   232→    """返回按指定指标排序的资金流向排行 (Top N, 默认 5)。
+   233→
+   234→    - ``main_inflow``: 主力净流入 Top 5 (万元, 从 Zjl 提取)
+   235→    - ``big_buy_ratio``: 大买占比 Top 5 (0~1, TotalBVol/(TotalBVol+TotalSVol))
+   236→    - ``turnover_rate``: 换手率 Top 5 (%, 从 fHSL 提取)
+   237→
+   238→    实现: 复用 ``get_quotes`` 逻辑取 count 只股票快照 (含新字段),
+   239→    按 metric 降序排序后返回前 5 条。
+   240→    """
+   241→    # 取 count 只股票快照 (含资金流字段)
+   242→    snapshots = await get_quotes(adapter=adapter, state=state, storage=storage, count=count)
+   243→    if not snapshots:
+   244→        return []
+   245→
+   246→    # 按 metric 降序排序
+   247→    sorted_snaps = sorted(
+   248→        snapshots,
+   249→        key=lambda s: getattr(s, metric) or 0.0,
+   250→        reverse=True,
+   251→    )
+   252→
+   253→    # 返回前 5 条, 转换为 FlowRankingItem
+   254→    out: list[FlowRankingItem] = []
+   255→    for s in sorted_snaps[:5]:
+   256→        out.append(
+   257→            FlowRankingItem(
+   258→                code=s.code,
+   259→                name=s.name,
+   260→                last=s.last,
+   261→                pct=s.pct,
+   262→                main_inflow=s.main_inflow,
+   263→                big_buy_ratio=s.big_buy_ratio,
+   264→                turnover_rate=s.turnover_rate,
+   265→                amount=s.amount,
+   266→            )
+   267→        )
+   268→    return out
+   269→
+   270→
+   271→@router.get(
+   272→    "/auction",
+   273→    summary="批量竞价查询 + 强弱评分 (R13-2a)",
+   274→)
+   275→async def get_auction(
+   276→    codes: str | None = Query(
+   277→        None, description="逗号分隔股票代码 (如 600519.SH,000858.SZ); 不传则用监控池"
+   278→    ),
+   279→    count: int = Query(50, ge=1, le=200, description="codes 不传时取监控池前 N 只 (按 batch_no 倒序)"),
+   280→    state: Any = Depends(get_state),
+   281→    adapter: Any = Depends(get_adapter),
+   282→    cfg: Any = Depends(get_config),
+   283→) -> dict[str, Any]:
+   284→    """批量查询竞价数据 + 输出竞价强弱评分 (0-100)。
+   285→
+   286→    数据来源: ``adapter.get_more_info(code)`` 返回的竞价字段
+   287→    (``VOpenZAF`` / ``OpenZTBuy`` / ``OpenAmo`` / ``OpenAmoPre1`` /
+   288→    ``OpenVolPre1`` / ``L2OrderNum`` / ``L2TicNum``)。
+   289→
+   290→    评分公式 (0-100, 越高竞价越强):
+   291→    - ``surge``     : 竞价涨幅, 10% 封顶 40 分 (``auction_pct / 10 * 40``, cap 40)
+   292→    - ``zt_flag``   : 有竞价涨停买单 (``OpenZTBuy > 0``) +20 分
+   293→    - ``vol_ratio`` : 量比同比 (今日开盘金额 / 昨开盘金额), 1 倍 = 30 分, 封顶 30
+   294→    - ``l2``        : L2 委托数 (``L2OrderNum / 100``), 1000 单封顶 10 分
+   295→
+   296→    **字段约定**: ``auction_pct`` 为**百分比形式** (5.23 = 5.23%, 即原始 ``VOpenZAF``),
+   297→    与 ``/quotes`` 端点的 ``auction_pct`` (小数形式 0.0523) 不同 —— 本端点为竞价专项展示,
+   298→    用百分比便于前端直接显示; ``/quotes`` 沿用 ``pct`` 字段的小数形式以保持响应内一致。
+   299→
+   300→    **单位说明**:
+   301→    - ``auction_amount`` (万元) = ``OpenAmo`` / 10000 (V8 中 OpenAmo 单位为元)
+   302→    - ``open_amount_pre`` (万元) = ``OpenAmoPre1`` (V8 中已是万元)
+   303→    - ``auction_zt_buy`` (万元) = ``OpenZTBuy``
+   304→    - ``open_vol_pre`` (手) = ``OpenVolPre1``
+   305→    - ``l2_order_num`` / ``l2_tic_num`` : 整数
+   306→
+   307→    排序: 按 ``auction_score`` 降序。
+   308→
+   309→    ``in_auction_hours``: Mock 模式强制 ``True`` (沙箱友好); Real 模式严格判断 9:15-9:25。
+   310→    """
+   311→    # 1. 取股票列表
+   312→    if codes:
+   313→        code_list: list[str] = [c.strip() for c in codes.split(",") if c.strip()]
+   314→    else:
+   315→        subs = state.list_subscriptions()
+   316→        # 按 batch_no 倒序, 取前 count 只
+   317→        sorted_subs = sorted(
+   318→            subs, key=lambda s: int(s.get("batch_no", 0) or 0), reverse=True
+   319→        )
+   320→        code_list = [s["stock_code"] for s in sorted_subs[:count]]
+   321→
+   322→    in_auction = _in_auction_hours(cfg)
+   323→
+   324→    if not code_list:
+   325→        return {"items": [], "count": 0, "in_auction_hours": in_auction}
+   326→
+   327→    # 2. 批量取 more_info (复用现有 _batch_more_info helper)
+   328→    more_info_map = _batch_more_info(adapter, code_list)
+   329→
+   330→    # 3. 提取竞价字段 + 算分
+   331→    fetched_at = datetime.now().astimezone().isoformat(timespec="seconds")
+   332→    items: list[dict[str, Any]] = []
+   333→    for code in code_list:
+   334→        info = more_info_map.get(code) or {}
+   335→        fields = _extract_auction_fields(info)
+   336→        items.append(
+   337→            {
+   338→                "stock_code": code,
+   339→                **fields,
+   340→                "fetched_at": fetched_at,
+   341→            }
+   342→        )
+   343→
+   344→    # 4. 按 auction_score 降序
+   345→    items.sort(key=lambda x: x.get("auction_score", 0.0), reverse=True)
+   346→
+   347→    return {
+   348→        "items": items,
+   349→        "count": len(items),
+   350→        "in_auction_hours": in_auction,
+   351→    }
+   352→
+   353→
+   354→@router.get(
+   355→    "/rules",
+   356→    summary="列出所有 alert_templates（供前端下拉）",
+   357→)
+   358→async def list_alert_templates(
+   359→    cfg: Any = Depends(get_config),
+   360→) -> dict[str, Any]:
+   361→    """列出 ``monitor_rules.yaml`` 的 ``alert_templates`` 段，供前端编辑 match 策略时下拉选择。
+   362→
+   363→    返回每个模板的:
+   364→    - ``alert_type``      - 模板 ID（全局唯一，编辑 alert 时填入 alerts[].alert_type）
+   365→    - ``label``           - 中文标签（如"涨停"）
+   366→    - ``emoji``           - 前端展示用的 emoji（如 🚀）
+   367→    - ``description``     - 一句话说明
+   368→    - ``condition``       - 表达式引擎求值模板（含 ``{param}`` 占位符）
+   369→    - ``default_params``  - 默认参数 dict（前端选中模板时自动填入 alerts[].params）
+   370→    - ``priority``        - high / medium / low
+   371→    - ``channels``        - 推送通道列表
+   372→
+   373→    数据源: ``ConfigLoader().get("alert_templates")``。
+   374→    配置缺失时返回空列表（保证向后兼容）。
+   375→    """
+   376→    raw = cfg.get("alert_templates") or {}
+   377→    templates: list[dict[str, Any]] = []
+   378→    if isinstance(raw, dict):
+   379→        # monitor_rules.yaml 中 alert_templates 是 mapping: { template_id: { ... } }
+   380→        # 保留声明顺序（Python 3.7+ dict 顺序 = 插入顺序 = YAML 顺序）
+   381→        for tpl_id, body in raw.items():
+   382→            if not isinstance(body, dict):
+   383→                continue
+   384→            templates.append(
+   385→                {
+   386→                    "alert_type": str(body.get("alert_type") or tpl_id),
+   387→                    "label": str(body.get("label") or ""),
+   388→                    "emoji": str(body.get("emoji") or ""),
+   389→                    "description": str(body.get("description") or ""),
+   390→                    "condition": str(body.get("condition") or ""),
+   391→                    "default_params": dict(body.get("default_params") or {}),
+   392→                    "priority": str(body.get("priority") or "medium"),
+   393→                    "channels": list(body.get("channels") or []),
+   394→                }
+   395→            )
+   396→    elif isinstance(raw, list):
+   397→        # 兼容写法（数组形式）：原样映射
+   398→        for body in raw:
+   399→            if not isinstance(body, dict):
+   400→                continue
+   401→            templates.append(
+   402→                {
+   403→                    "alert_type": str(body.get("alert_type") or ""),
+   404→                    "label": str(body.get("label") or ""),
+   405→                    "emoji": str(body.get("emoji") or ""),
+   406→                    "description": str(body.get("description") or ""),
+   407→                    "condition": str(body.get("condition") or ""),
+   408→                    "default_params": dict(body.get("default_params") or {}),
+   409→                    "priority": str(body.get("priority") or "medium"),
+   410→                    "channels": list(body.get("channels") or []),
+   411→                }
+   412→            )
+   413→    return {"templates": templates, "count": len(templates)}
+   414→
+   415→
+   416→@router.get(
+   417→    "/subscriptions",
+   418→    response_model=list[MonitorSubscriptionItem],
+   419→    summary="当前订阅列表",
+   420→)
+   421→async def list_subscriptions(
+   422→    state: Any = Depends(get_state),
+   423→) -> list[MonitorSubscriptionItem]:
+   424→    """列出 ``EngineState`` 中缓存的所有活跃订阅。"""
+   425→    subs = state.list_subscriptions()
+   426→    return [
+   427→        MonitorSubscriptionItem(
+   428→            strategy_id=s.get("strategy_id", ""),
+   429→            stock_code=s.get("stock_code", ""),
+   430→            subscriber=s.get("subscriber", ""),
+   431→            subscribed_at=s.get("subscribed_at", ""),
+   432→            active=bool(s.get("active", True)),
+   433→            batch_no=int(s.get("batch_no", 0) or 0),
+   434→        )
+   435→        for s in subs
+   436→    ]
+   437→
+   438→
+   439→# ============================================================================
+   440→# P1: 健康度监控 (R10-5)
+   441→# ============================================================================
+   442→
+   443→
+   444→@router.get(
+   445→    "/health",
+   446→    summary="引擎健康度（P1）",
+   447→)
+   448→async def get_health(
+   449→    cfg: Any = Depends(get_config),
+   450→    state: Any = Depends(get_state),
+   451→) -> dict[str, Any]:
+   452→    """返回引擎健康度指标。
+   453→
+   454→    包含:
+   455→    - subscribe_alive: subscribe_hq 是否存活
+   456→    - quote_lag_seconds: 最近一次行情距现在的秒数 (-1=从未收到)
+   457→    - eval_count: 求值次数
+   458→    - error_count: 错误次数
+   459→    - last_error: 最近一次错误信息
+   460→    - debounce_size: 防抖表大小
+   461→    - queue_size: 聚合推送队列大小
+   462→    - uptime_seconds: 运行时长
+   463→    - status: healthy / degraded / unhealthy
+   464→      (基于 lag + error_count 判定, 阈值来自 monitor.health.*, 缺省 60/120/10)
+   465→
+   466→    P2-2: 阈值改为读 config/monitor_rules.yaml 的 monitor.health 段,
+   467→          配置缺失时回退默认值 (60/120/10) 保证向后兼容。
+   468→    """
+   469→    from engine.monitor.engine import MonitorEngine
+   470→
+   471→    eng = MonitorEngine()
+   472→    health = eng.health()
+   473→
+   474→    # 补充聚合推送队列状态
+   475→    health["queue_size"] = len(getattr(eng, "_agg_queue", {}))
+   476→    health["uptime_seconds"] = state.uptime_seconds()
+   477→
+   478→    # P2-2: 健康度阈值从 config 读（缺省 60/120/10 保证向后兼容）
+   479→    lag_healthy = float(cfg.get("monitor.health.lag_healthy_seconds", 60))
+   480→    lag_degraded = float(cfg.get("monitor.health.lag_degraded_seconds", 120))
+   481→    err_healthy = int(cfg.get("monitor.health.error_healthy_threshold", 10))
+   482→
+   483→    # 综合状态判定
+   484→    lag = health.get("quote_lag_seconds", -1)
+   485→    err_count = health.get("error_count", 0)
+   486→    if lag < 0 or lag > lag_degraded:
+   487→        status = "unhealthy"
+   488→    elif err_count > err_healthy or lag > lag_healthy:
+   489→        status = "degraded"
+   490→    else:
+   491→        status = "healthy"
+   492→    health["status"] = status
+   493→    # 透出当前生效的阈值（便于前端展示 + 调参验证）
+   494→    health["thresholds"] = {
+   495→        "lag_healthy_seconds": lag_healthy,
+   496→        "lag_degraded_seconds": lag_degraded,
+   497→        "error_healthy_threshold": err_healthy,
+   498→    }
+   499→    return health
+   500→
+   501→
+   502→# ============================================================================
+   503→# 内部
+   504→# ============================================================================
+   505→
+   506→
+   507→def _safe_float(v: Any) -> float:
+   508→    if v is None or v == "":
+   509→        return 0.0
+   510→    try:
+   511→        f = float(v)
+   512→        if f != f:  # NaN
+   513→            return 0.0
+   514→        return f
+   515→    except (TypeError, ValueError):
+   516→        return 0.0
+   517→
+   518→
+   519→def _batch_more_info(adapter: Any, codes: list[str]) -> dict[str, dict]:
+   520→    """批量调 ``adapter.get_more_info(code)`` 取资金流字段。
+   521→
+   522→    - 若 adapter 不支持 ``get_more_info``, 返回空 dict (上层用确定性 mock 兜底)
+   523→    - 单只失败不影响其他, 整体失败返回空 dict
+   524→    """
+   525→    if not hasattr(adapter, "get_more_info"):
+   526→        return {}
+   527→    out: dict[str, dict] = {}
+   528→    for code in codes:
+   529→        try:
+   530→            info = adapter.get_more_info(code) or {}
+   531→            if isinstance(info, dict):
+   532→                out[code] = info
+   533→        except Exception as exc:  # noqa: BLE001
+   534→            logger.debug("get_more_info(%s) 失败: %s", code, exc)
+   535→    return out
+   536→
+   537→
+   538→def _extract_flow_fields(code: str, info: dict) -> tuple[float, float, float]:
+   539→    """从 more_info dict 提取 (main_inflow, big_buy_ratio, turnover_rate)。
+   540→
+   541→    字段来源 (V8 快照 / RealAdapter tq.get_more_info):
+   542→    - ``Zjl``: 主力净流入 (元, 需转万元) — 注意: V8 CSV 中 Zjl 单位为"万元",
+   543→      故直接使用; RealAdapter 通常也是元, 这里统一假定为"万元"输出
+   544→    - ``TotalBVol``: 总买量 (手), ``TotalSVol``: 总卖量 (手)
+   545→    - ``fHSL``: 换手率% (已经是百分数)
+   546→
+   547→    字段缺失时用基于 code hash 的确定性 mock:
+   548→    - main_inflow: -5000 ~ +10000 万元
+   549→    - big_buy_ratio: 0.20 ~ 0.60
+   550→    - turnover_rate: 0.5 ~ 10.0 %
+   551→    """
+   552→    # Zjl - 主力净流入 (万元)
+   553→    main_inflow = _safe_float(info.get("Zjl"))
+   554→    if main_inflow == 0.0:
+   555→        main_inflow = _deterministic_hash_float(code, salt="inflow", lo=-5000.0, hi=10000.0)
+   556→
+   557→    # big_buy_ratio = TotalBVol / (TotalBVol + TotalSVol)
+   558→    total_b = _safe_float(info.get("TotalBVol"))
+   559→    total_s = _safe_float(info.get("TotalSVol"))
+   560→    denom = total_b + total_s
+   561→    if denom > 0:
+   562→        big_buy_ratio = max(0.0, min(1.0, total_b / denom))
+   563→    else:
+   564→        big_buy_ratio = _deterministic_hash_float(code, salt="bigbuy", lo=0.20, hi=0.60)
+   565→
+   566→    # turnover_rate from fHSL (already in %)
+   567→    turnover_rate = _safe_float(info.get("fHSL"))
+   568→    if turnover_rate == 0.0:
+   569→        turnover_rate = _deterministic_hash_float(code, salt="hsl", lo=0.5, hi=10.0)
+   570→
+   571→    return round(main_inflow, 2), round(big_buy_ratio, 4), round(turnover_rate, 3)
+   572→
+   573→
+   574→# ----------------------------------------------------------------------------
+   575→# R13-2a/2b: 竞价字段提取 + 评分
+   576→# ----------------------------------------------------------------------------
+   577→
+   578→
+   579→def _extract_auction_pct_fraction(info: dict) -> float:
+   580→    """从 more_info dict 提取 ``auction_pct`` (小数形式, 0.0523 = 5.23%)。
+   581→
+   582→    用于 ``/quotes`` 端点 (与 ``pct`` 字段同为小数形式, 保持响应内一致)。
+   583→
+   584→    - 数据源: ``VOpenZAF`` (V8 字段, 5.23 表示 5.23%)
+   585→    - 转换: ``VOpenZAF / 100`` → 0.0523
+   586→    - 缺失/非法值返回 0.0 (不要 None, 前端好处理)
+   587→
+   588→    与 :func:`engine.monitor.engine._normalize_snap` 中的 auction_pct 计算逻辑一致,
+   589→    便于 ``/quotes`` 响应与监控引擎内部求值保持同样的语义。
+   590→    """
+   591→    vopen = _safe_float(info.get("VOpenZAF"))
+   592→    return round(vopen / 100.0, 6)
+   593→
+   594→
+   595→def _extract_auction_fields(info: dict) -> dict[str, Any]:
+   596→    """从 more_info dict 提取竞价字段 + 计算 ``auction_score`` (供 ``/auction`` 端点)。
+   597→
+   598→    **重要**: 本函数返回的 ``auction_pct`` 为**百分比形式** (5.23 = 5.23%,
+   599→    即原始 ``VOpenZAF``), 与 ``/quotes`` 端点的 ``auction_pct`` (小数形式) 不同。
+   600→    差异原因: ``/auction`` 端点为竞价专项展示, 用百分比便于前端直接显示;
+   601→    ``/quotes`` 沿用 ``pct`` 字段的小数形式以保持响应内一致。
+   602→
+   603→    字段来源 (V8 快照 / RealAdapter ``tq.get_more_info``):
+   604→    - ``VOpenZAF``     : 竞价涨幅% (5.23 = 5.23%) → auction_pct (百分比形式)
+   605→    - ``OpenZTBuy``    : 竞价涨停买单 (万元) → auction_zt_buy
+   606→    - ``OpenAmo``      : 今日开盘金额 (元, mock_adapter 注释确认) → auction_amount (转万元)
+   607→    - ``OpenAmoPre1``  : 昨开盘金额 (万元) → open_amount_pre
+   608→    - ``OpenVolPre1``  : 昨开盘量 (手) → open_vol_pre
+   609→    - ``L2OrderNum``   : L2 委托数 → l2_order_num
+   610→    - ``L2TicNum``     : L2 笔数 → l2_tic_num
+   611→
+   612→    评分公式 (0-100, ``auction_pct`` 为百分比形式):
+   613→    - surge     = min(auction_pct / 10 * 40, 40)            # 竞价涨幅, 10% 封顶 40 分
+   614→    - zt_flag   = 20 if auction_zt_buy > 0 else 0           # 有竞价涨停买单 +20
+   615→    - vol_ratio = min(auction_amount / open_amount_pre * 30, 30)  # 量比同比, 1 倍 = 30 分
+   616→    - l2        = min(l2_order_num / 100, 10)               # L2 委托数, 1000 单封顶 10 分
+   617→    - auction_score = surge + zt_flag + vol_ratio + l2
+   618→
+   619→    字段缺失返回 0, 不报错。
+   620→    """
+   621→    auction_pct = _safe_float(info.get("VOpenZAF"))  # 百分比形式 (5.23 = 5.23%)
+   622→    auction_zt_buy = _safe_float(info.get("OpenZTBuy"))
+   623→    # OpenAmo 单位为元 (mock_adapter 注释: "OpenAmo 单位为元"), 转 万元 与 OpenAmoPre1 单位对齐
+   624→    open_amo = _safe_float(info.get("OpenAmo"))
+   625→    auction_amount = open_amo / 10000.0 if open_amo > 0 else 0.0
+   626→    open_amount_pre = _safe_float(info.get("OpenAmoPre1"))
+   627→    open_vol_pre = _safe_float(info.get("OpenVolPre1"))
+   628→    l2_order_num = int(_safe_float(info.get("L2OrderNum")))
+   629→    l2_tic_num = int(_safe_float(info.get("L2TicNum")))
+   630→
+   631→    # 评分
+   632→    surge_score = min(auction_pct / 10.0 * 40.0, 40.0)
+   633→    zt_flag = 20.0 if auction_zt_buy > 0 else 0.0
+   634→    if open_amount_pre > 0:
+   635→        vol_ratio_score = min(auction_amount / open_amount_pre * 30.0, 30.0)
+   636→    else:
+   637→        vol_ratio_score = 0.0
+   638→    l2_score = min(l2_order_num / 100.0, 10.0)
+   639→    auction_score = surge_score + zt_flag + vol_ratio_score + l2_score
+   640→
+   641→    return {
+   642→        "auction_pct": round(auction_pct, 4),
+   643→        "auction_amount": round(auction_amount, 2),
+   644→        "auction_zt_buy": round(auction_zt_buy, 2),
+   645→        "open_amount_pre": round(open_amount_pre, 2),
+   646→        "open_vol_pre": round(open_vol_pre, 2),
+   647→        "l2_order_num": l2_order_num,
+   648→        "l2_tic_num": l2_tic_num,
+   649→        "auction_score": round(auction_score, 2),
+   650→        "score_detail": {
+   651→            "surge": round(surge_score, 2),
+   652→            "zt_flag": round(zt_flag, 2),
+   653→            "vol_ratio": round(vol_ratio_score, 2),
+   654→            "l2": round(l2_score, 2),
+   655→        },
+   656→    }
+   657→
+   658→
+   659→def _in_auction_hours(cfg: Any) -> bool:
+   660→    """是否在集合竞价时段 (09:15-09:25)。
+   661→
+   662→    - Mock 模式: 强制 ``True`` (沙箱友好, 与 ``MonitorEngine._in_trading_hours`` 同策略)
+   663→    - Real 模式: 严格判断当前时间在 09:15-09:25 之间 (周末返回 False)
+   664→    """
+   665→    mode = str(cfg.get("app.adapter_mode", "mock"))
+   666→    if mode == "mock":
+   667→        return True
+   668→    now = datetime.now()
+   669→    if now.weekday() >= 5:  # 周六/日
+   670→        return False
+   671→    hhmm = now.strftime("%H:%M")
+   672→    return "09:15" <= hhmm < "09:25"
+   673→
+   674→
+   675→def _deterministic_hash_float(code: str, salt: str, lo: float, hi: float) -> float:
+   676→    """基于 code + salt 的 MD5 hash 生成 [lo, hi] 区间的确定性浮点数。
+   677→
+   678→    用途: 字段缺失时生成稳定的 mock 值 (同一 code 同一 salt 永远返回同一值),
+   679→    避免每次刷新数据跳变。
+   680→    """
+   681→    h = hashlib.md5(f"{salt}:{code}".encode("utf-8")).hexdigest()
+   682→    # 取前 8 个十六进制字符 → 0~1
+   683→    val = int(h[:8], 16) / 0xFFFFFFFF
+   684→    return lo + val * (hi - lo)
+   685→
+   686→
+   687→def _fallback_top_picks(storage: Any, state: Any, count: int) -> list[str]:
+   688→    """订阅列表为空时，从最近一次 selection_results 取 Top N 注入订阅。
+   689→
+   690→    用途：保证 Web 大屏 ``GET /api/monitor/quotes`` 在首次启动 / 引擎重启后
+   691→    不会返回空数组（用户感到"死页面")。
+   692→
+   693→    流程：
+   694→    1. 查 ``selection_results`` 表，按 created_at DESC 取前 N 个 stock_code
+   695→    2. 把它们 upsert 到 EngineState 订阅缓存
+   696→    3. 返回 stock_code 列表
+   697→    """
+   698→    if storage is None:
+   699→        return []
+   700→    try:
+   701→        if not storage.table_exists("selection_results"):
+   702→            return []
+   703→    except Exception:  # noqa: BLE001
+   704→        return []
+   705→    sql = (
+   706→        "SELECT DISTINCT stock_code FROM selection_results "
+   707→        "ORDER BY created_at DESC LIMIT ?"
+   708→    )
+   709→    try:
+   710→        df = storage.query(sql, (int(count),))
+   711→    except Exception as exc:  # noqa: BLE001
+   712→        logger.warning("fallback_top_picks 查询失败: %s", exc)
+   713→        return []
+   714→    codes: list[str] = []
+   715→    for v in df["stock_code"].astype(str).tolist():
+   716→        v = v.strip()
+   717→        if v:
+   718→            codes.append(v)
+   719→    # 注入 EngineState
+   720→    for i, code in enumerate(codes):
+   721→        try:
+   722→            state.upsert_subscription(
+   723→                code,
+   724→                strategy_id="fallback_top_pick",
+   725→                subscriber="monitor_fallback",
+   726→                batch_no=i // 50 + 1,
+   727→            )
+   728→        except Exception:  # noqa: BLE001
+   729→            pass
+   730→    return codes
+   731→

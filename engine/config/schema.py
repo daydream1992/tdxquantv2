@@ -78,12 +78,28 @@ class TqCenterConfig:
     initialize_file: str = "__file__"
     subscribe_batch_size: int = 50
     kline_max_count: int = 24000
+    # R14-2: 适配器层令牌桶（保护终端 GUI 线程，Real 模式生效）
+    # 默认 0 表示禁用；显式配 > 0 才启用
+    global_qps: float = 0.0
+    burst: int = 0
+    acquire_timeout: float = 0.0
 
     def validate(self) -> None:
         if self.subscribe_batch_size <= 0:
             raise ValueError("tqcenter.subscribe_batch_size 必须 > 0")
         if self.kline_max_count <= 0:
             raise ValueError("tqcenter.kline_max_count 必须 > 0")
+        # 限流参数：要么全 0（禁用），要么全 > 0（启用）
+        cfg_vals = (self.global_qps, self.burst, self.acquire_timeout)
+        if all(v > 0 for v in cfg_vals):
+            return
+        if all(v == 0 for v in cfg_vals):
+            return
+        raise ValueError(
+            f"tqcenter 限流配置需全 > 0 或全 0（禁用），当前: "
+            f"global_qps={self.global_qps}, burst={self.burst}, "
+            f"acquire_timeout={self.acquire_timeout}"
+        )
 
 
 @dataclass
@@ -92,6 +108,37 @@ class MockConfig:
 
     data_dir: str = "./docs/v8-data/stock_selection_v8_1_standalone/data"
     push_interval: int = 3  # Mock subscribe_hq 模拟推送间隔（秒）
+
+
+# ----------------------------------------------------------------------------
+# R14-2: API 限流配置
+# ----------------------------------------------------------------------------
+
+
+@dataclass
+class ApiRateLimitRule:
+    """单条端点限流规则。"""
+
+    path_prefix: str = ""
+    qpm: int = 60
+    methods: list[str] = field(default_factory=list)  # 空列表表示不限方法
+
+
+@dataclass
+class ApiRateLimitConfig:
+    """``config/app.yaml`` 中 ``api.rate_limit`` 段。"""
+
+    enabled: bool = False
+    rules: list[ApiRateLimitRule] = field(default_factory=list)
+    default_qpm: int = 60
+    cleanup_interval: int = 300  # 后台清理线程周期（秒）
+
+
+@dataclass
+class ApiConfig:
+    """``config/app.yaml`` 中 ``api`` 段。"""
+
+    rate_limit: ApiRateLimitConfig = field(default_factory=ApiRateLimitConfig)
 
 
 @dataclass
@@ -204,6 +251,7 @@ class AppConfigRoot:
     server: ServerConfig = field(default_factory=ServerConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
     tqcenter: TqCenterConfig = field(default_factory=TqCenterConfig)
+    api: ApiConfig = field(default_factory=ApiConfig)
     mock: MockConfig = field(default_factory=MockConfig)
 
     def validate(self) -> None:
@@ -214,11 +262,32 @@ class AppConfigRoot:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AppConfigRoot":
         """从原始 dict 构造，缺失字段走默认值。"""
+        # R14-2: api.rate_limit.rules 需要逐项解析为 ApiRateLimitRule
+        api_raw = data.get("api") or {}
+        rl_raw = api_raw.get("rate_limit") or {}
+        rules_raw = rl_raw.get("rules") or []
+        rules = [
+            ApiRateLimitRule(
+                path_prefix=str(r.get("path_prefix", "")),
+                qpm=int(r.get("qpm", 60)),
+                methods=list(r.get("methods") or []),
+            )
+            for r in rules_raw
+            if isinstance(r, dict)
+        ]
+        rl = ApiRateLimitConfig(
+            enabled=bool(rl_raw.get("enabled", False)),
+            rules=rules,
+            default_qpm=int(rl_raw.get("default_qpm", 60)),
+            cleanup_interval=int(rl_raw.get("cleanup_interval", 300)),
+        )
+        api_cfg = ApiConfig(rate_limit=rl)
         return cls(
             app=AppConfig(**(data.get("app") or {})),
             server=ServerConfig(**(data.get("server") or {})),
             paths=PathsConfig(**(data.get("paths") or {})),
             tqcenter=TqCenterConfig(**(data.get("tqcenter") or {})),
+            api=api_cfg,
             mock=MockConfig(**(data.get("mock") or {})),
         )
 

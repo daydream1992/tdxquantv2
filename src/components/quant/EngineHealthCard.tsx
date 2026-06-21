@@ -20,6 +20,7 @@ import {
   AlertTriangle,
   AlertOctagon,
   HelpCircle,
+  Gauge,
 } from 'lucide-react'
 import { monitorAPI, type EngineHealthDTO } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -296,6 +297,91 @@ export function EngineHealthCard() {
         <MetricCell label="运行时长">
           {formatUptime(health?.uptime_seconds ?? 0)}
         </MetricCell>
+      </div>
+
+      {/* R14-2: API 限流区块（4 个指标 + 限流状态行） */}
+      <div className="rounded-md border border-quant/60 bg-quant-bg/20 px-2.5 py-2">
+        <div className="flex items-center gap-1.5 mb-1.5">
+          <Gauge className="size-3.5 text-quant-primary shrink-0" />
+          <span className="text-[11px] font-semibold text-muted-foreground">
+            API 限流
+          </span>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <MetricCell label="API 调用总数">
+            {fmtInt(health?.api_call_total ?? 0)}
+          </MetricCell>
+          <MetricCell label="API 拒绝数">
+            <span
+              className={cn(
+                (health?.api_rejected_total ?? 0) > 0
+                  ? 'text-down font-bold'
+                  : 'text-emerald-500'
+              )}
+            >
+              {fmtInt(health?.api_rejected_total ?? 0)}
+            </span>
+          </MetricCell>
+          <MetricCell label="平均延迟">
+            {(health?.api_avg_latency_ms ?? 0).toFixed(1)}ms
+          </MetricCell>
+          <MetricCell label="tqcenter 调用">
+            <span className="inline-flex items-center gap-1">
+              {fmtInt(health?.tqcenter_call_total ?? 0)}
+              {(health?.tqcenter_rejected_total ?? 0) > 0 && (
+                <Badge
+                  variant="outline"
+                  className="text-[9px] px-1 py-0 h-3.5 bg-rose-500/10 text-rose-400 border-rose-500/30"
+                >
+                  拒 {fmtInt(health?.tqcenter_rejected_total ?? 0)}
+                </Badge>
+              )}
+            </span>
+          </MetricCell>
+        </div>
+        {/* 限流状态行：tqcenter 令牌桶 + API 中间件 */}
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[10px]">
+          {health?.rate_limit?.tqcenter_limiter?.enabled ? (
+            <Badge
+              variant="outline"
+              className="text-[9px] px-1.5 py-0 h-4 gap-0.5 bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+              title={`qps=${health?.rate_limit?.tqcenter_limiter?.qps} burst=${health?.rate_limit?.tqcenter_limiter?.burst}`}
+            >
+              令牌桶 已启用
+              <span className="tabular-nums opacity-80">
+                qps={health?.rate_limit?.tqcenter_limiter?.qps}
+              </span>
+              <span className="tabular-nums opacity-60">
+                ·令牌 {health?.rate_limit?.tqcenter_limiter?.current_tokens ?? 0}
+              </span>
+            </Badge>
+          ) : (
+            <Badge
+              variant="outline"
+              className="text-[9px] px-1.5 py-0 h-4 bg-zinc-500/10 text-zinc-400 border-zinc-500/30"
+            >
+              令牌桶 未启用
+            </Badge>
+          )}
+          {health?.rate_limit?.api_middleware?.enabled ? (
+            <Badge
+              variant="outline"
+              className="text-[9px] px-1.5 py-0 h-4 gap-0.5 bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+            >
+              中间件 已启用
+              <span className="tabular-nums opacity-80">
+                {health?.rate_limit?.api_middleware?.rules_count ?? 0} 条规则
+              </span>
+            </Badge>
+          ) : (
+            <Badge
+              variant="outline"
+              className="text-[9px] px-1.5 py-0 h-4 bg-zinc-500/10 text-zinc-400 border-zinc-500/30"
+            >
+              中间件 未启用
+            </Badge>
+          )}
+        </div>
       </div>
 
       {/* 底部: 最近错误 / 拉取异常提示 */}

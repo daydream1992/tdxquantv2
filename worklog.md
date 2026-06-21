@@ -12798,3 +12798,70 @@ Stage Summary:
   1. "缓存命中" badge 仅在后端 LRU 命中时显示 (如页面刷新 60s 内再次 hover), 因 useRef 命中后不调后端 from_cache 始终 false; 严格遵循"from_cache 由后端控制"语义
   2. 000001.SH (上证综指) 返回空 - CSV 数据特性非 bug
   3. Real 模式字段名 (BlockCode/BlockName/BlockType/GPNume) 需真实环境验证, Mock 已对齐
+
+---
+Task ID: R14-2
+Agent: full-stack-developer
+Task: API 限流方案 A - 适配器层令牌桶 + FastAPI 端点限流中间件 + 监控计数器 + EngineHealthCard 限流区块
+
+Work Log:
+- 读 worklog 末 5 段确认 R13 完成 (8 tab) + R14-1 (个股板块归属 HoverCard) 已上线
+- 勘察项目结构, 发现 R14-2 四部分代码已全部就位:
+  * Part 1: engine/data_adapter/rate_limiter.py 已存在 (232行, TokenBucket + RateLimitError + 模块级单例 + acquire_or_skip)
+  * engine/data_adapter/real_adapter.py 已 import acquire_or_skip / RateLimitError 并在 18 个查询类方法开头加限流 (subscribe_hq / unsubscribe_hq / create_sector 等被动/低频操作未加)
+  * Part 2: engine/api/middleware/__init__.py + rate_limit.py 已存在 (421行, _IPBucket + IPRateLimiter + RateLimitMiddleware + create_rate_limit_middleware)
+  * engine/api/main.py 已 import 并在 CORS 之后调用 create_rate_limit_middleware(app), 请求日志中间件已加 record_api_call
+  * config/app.yaml 的 tqcenter 段已加 global_qps/burst/acquire_timeout, api.rate_limit 段已配 6 条规则
+  * Part 3: engine/api/state.py 已加 _api_call_total/_api_rejected_total/_api_avg_latency_ms/_api_latency_samples/_tqcenter_call_total/_tqcenter_rejected_total 6 个字段 + record_api_call + record_tqcenter_call + api_stats (含 tqcenter_limiter + api_middleware 状态)
+  * engine/api/routes/monitor.py health 端点已 merge api_stats 到顶层 + rate_limit 子对象
+  * src/lib/api.ts EngineHealthDTO 已加 5 个 optional 字段 + rate_limit.{tqcenter_limiter, api_middleware}
+  * src/components/quant/EngineHealthCard.tsx 已在趋势图下方/last_error 上方加 "API 限流" 区块 (Gauge 图标 + 4 MetricCell + 令牌桶 Badge + 中间件 Badge)
+  * Part 4: engine/config/loader.py _notify_reload 已调 reset_limiter (热加载 app.yaml 后令牌桶重建)
+
+验证步骤:
+1. 重启 FastAPI: setsid nohup uvicorn --host 0.0.0.0 --port 8000, /health 200 OK
+2. 令牌桶单测:
+   * get_limiter() 返回 TokenBucket 实例 (qps=10, burst=20, timeout=5)
+   * acquire 15 次 → snapshot.total_calls=15, rejected_calls=0, current_tokens=5.0 ✓
+3. 端点限流验证:
+   * 连续 curl /api/health (qpm=120) 200 次 → 前 120 个 404 (path 不存在但限流先过) + 后续 429
+   * curl -i /health 200 → 响应头含 x-ratelimit-limit=60 + x-ratelimit-remaining=59
+   * curl -i 429 body: {"error":"rate_limit_exceeded","detail":"请求过于频繁，请稍后重试","retry_after":1} + Retry-After: 1 header
+4. 健康端点透出: curl /api/monitor/health 含 api_call_total=430 / api_rejected_total=178 / api_avg_latency_ms=1.05 / tqcenter_call_total=0 / rate_limit.tqcenter_limiter.enabled=true / rate_limit.api_middleware.{enabled=true, rules_count=6} ✓
+5. bun run lint: exit 0 ✓
+6. agent-browser: 打开 localhost:3000 实时大屏 tab (默认选中), "API 限流" 区块可见, 显示 "API 调用总数 478 / API 拒绝数 178 / 平均延迟 3.2ms / tqcenter 调用 0 / 令牌桶 已启用 qps=10 ·令牌 20 / 中间件 已启用 6 条规则", 截图 r14-2-rate-limit-card.png (117KB), console 监听 3s 无 error
+7. dev.log 末 30 行无报错 (仅 Next.js HMR Fast Refresh 日志)
+
+Stage Summary:
+- 文件变更:
+  新增: engine/data_adapter/rate_limiter.py (232行)
+       engine/api/middleware/__init__.py (1行)
+       engine/api/middleware/rate_limit.py (421行)
+  修改: engine/data_adapter/real_adapter.py (+18 处限流点, import + acquire_or_skip 模式)
+       engine/api/main.py (+40行, 注册中间件 + 请求日志加 record_api_call)
+       engine/api/state.py (+65行, 6 字段 + 3 方法 + api_stats)
+       engine/api/routes/monitor.py (+20行, health 端点 merge api_stats)
+       engine/config/loader.py (+10行, _notify_reload 调 reset_limiter)
+       config/app.yaml (+25行, tqcenter.global_qps/burst/acquire_timeout + api.rate_limit 段)
+       src/lib/api.ts (+25行, EngineHealthDTO 加 5 字段 + rate_limit 子对象)
+       src/components/quant/EngineHealthCard.tsx (+85行, API 限流区块 + 4 MetricCell + 2 Badge)
+- 验证:
+  * bun run lint: exit 0
+  * 令牌桶单测: get_limiter()=TokenBucket(qps=10,burst=20), acquire×15 → total_calls=15, current_tokens=5.0
+  * 中间件 429: /api/health 200 次连续 → 120 个 404 + 80 个 429; 429 body 含 error/retry_after, Retry-After header 1
+  * /health 透出: api_call_total/api_rejected_total/api_avg_latency_ms/tqcenter_call_total/tqcenter_rejected_total/rate_limit.{tqcenter_limiter, api_middleware} 全部就位
+  * agent-browser: API 限流区块可见 + 4 指标 + 2 Badge + 0 console error, 截图 r14-2-rate-limit-card.png
+- 设计要点:
+  1. 三层限流各司其职: Layer 1 (TokenBucket, Real 模式生效, 阻塞 acquire 超时抛 RateLimitError) / Layer 2 (IPRateLimiter, Mock+Real 都生效, 429 + Retry-After + X-RateLimit-* headers) / Layer 3 (EngineState 计数器, 透出 /api/monitor/health 供前端展示)
+  2. Mock 模式零开销: mock_adapter 不 import rate_limiter, 开发环境不受限流影响
+  3. 限流点选取: 18 个查询类方法加限流 (get_market_snapshot/get_more_info/get_stock_info/get_relation/get_kzz_info/get_trackzs_etf_info/get_gb_info/get_gb_info_by_date/get_ipo_info/get_pricevol/get_market_data/get_financial_data/get_gp_one_data/get_gpjy_value/get_gpjy_value_by_date/get_stock_list/get_sector_list/get_stock_list_in_sector/get_user_sector), 被动/低频操作不加 (subscribe_hq/unsubscribe_hq/create_sector)
+  4. 热加载边界: tqcenter 令牌桶配置 (global_qps/burst/acquire_timeout) 可热加载 (reset_limiter 重建); API 中间件 rules 在启动时读取, 热加载不重建中间件 (需重启生效, 设计上接受)
+  5. fail-open 设计: RateLimitMiddleware 内部异常不阻断请求 (try-except 包裹 try_request, 仅 logger.warning)
+  6. 内存保护: IPRateLimiter dict 容量上限 10000, 超限清最旧 20% (按 last_access); 后台 daemon 线程定期清理 30 分钟未访问 IP (cleanup_interval=300s)
+  7. 中间件注册顺序: 后注册先执行, RateLimit 在 CORS 之后注册 = CORS 之外层, 但 RateLimit 跳过 OPTIONS 让 CORS 预检不被限流
+  8. acquire_or_skip 副作用: 调 EngineState.record_tqcenter_call 累计计数 (Real 模式生效; Mock 因 mock_adapter 不调本函数故不计)
+  9. EngineHealthCard 区块布局: grid grid-cols-2 sm:grid-cols-4 gap-2 (移动 2 列 / 桌面 4 列), 拒绝数 >0 红色, tqcenter 调用 >0 加红色"拒 N"Badge
+- 未解决问题:
+  1. /api/health 路径在 FastAPI 未定义 (实际健康端点为 /health 和 /api/monitor/health), 但 RateLimit 规则仍按 path_prefix 匹配, 故 /api/health 的 404 也被限流; 不影响功能
+  2. Real 模式 tqcenter_limiter.total_calls 在 Mock 模式始终 0 (因 mock_adapter 不调 acquire_or_skip), 这是设计预期, 切换到 Real 模式后才会有数
+  3. API 中间件 rules 热加载不重建 (需重启 FastAPI 才能改 rules); tqcenter 令牌桶配置可热加载 (reset_limiter 在 _notify_reload 调用)

@@ -27,6 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from engine.api import state as engine_state_mod
+from engine.api.middleware.rate_limit import create_rate_limit_middleware
 from engine.api.routes import (
     backtest as backtest_routes,
     channels as channels_routes,
@@ -201,12 +202,17 @@ def create_app() -> FastAPI:
         expose_headers=["*"],
     )
 
-    # 请求日志中间件
+    # R14-2: 端点限流中间件（在 CORS 之后注册 = 外层，先于 CORS 执行）
+    # 注意：Starlette 中间件"后注册先执行"，RateLimitMiddleware 跳过 OPTIONS
+    # 让 CORS 预检不被限流；rules 在启动时读取，热加载不重建（需重启生效 rules 变更）
+    create_rate_limit_middleware(app)
+
+    # 请求日志中间件（最外层，记录总延迟 + 调 state.record_api_call）
     @app.middleware("http")
     async def _log_requests(request: Request, call_next):
         start = time.time()
-        # 跳过健康检查的日志
         path = request.url.path
+        response: Any = None
         try:
             response = await call_next(request)
         except Exception as exc:  # noqa: BLE001
@@ -215,6 +221,11 @@ def create_app() -> FastAPI:
                 "REQ %s %s 500 %.1fms ERR=%s",
                 request.method, path, duration, exc,
             )
+            # R14-2: 记录失败调用（500 视为非拒绝）
+            try:
+                engine_state_mod.get_engine_state().record_api_call(duration, rejected=False)
+            except Exception:  # noqa: BLE001
+                pass
             return JSONResponse(
                 status_code=500,
                 content={"error": "internal_server_error", "detail": str(exc)},
@@ -231,6 +242,13 @@ def create_app() -> FastAPI:
                 "REQ %s %s %d %.1fms",
                 request.method, path, response.status_code, duration,
             )
+        # R14-2: 记录 API 调用计数（429 视为被拒绝，其他都记入总调用）
+        try:
+            engine_state_mod.get_engine_state().record_api_call(
+                duration, rejected=(response.status_code == 429)
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return response
 
     # 健康检查

@@ -38,6 +38,7 @@ import pandas as pd
 
 from engine.config.loader import ConfigLoader
 from engine.data_adapter.base import BaseDataAdapter, Callback, DateList, FieldList, StockList
+from engine.data_adapter.rate_limiter import RateLimitError, acquire_or_skip
 from engine.utils.stock_code import normalize
 from engine.utils.time import normalize_date
 
@@ -131,6 +132,8 @@ class RealAdapter(BaseDataAdapter):
 
     def get_market_snapshot(self, code: str, field_list: FieldList | None = None) -> dict:
         """``tq.get_market_snapshot(stock_code, field_list)``。"""
+        if not acquire_or_skip():
+            raise RateLimitError(f"tqcenter 限流: get_market_snapshot({code}) 被拒绝")
         tq = self._tq()
         try:
             ncode = normalize(code)
@@ -142,6 +145,8 @@ class RealAdapter(BaseDataAdapter):
 
     def get_pricevol(self, stock_list: StockList) -> dict:
         """``tq.get_pricevol(stock_list)``。"""
+        if not acquire_or_skip():
+            raise RateLimitError(f"tqcenter 限流: get_pricevol({len(stock_list)} codes) 被拒绝")
         tq = self._tq()
         try:
             codes = [normalize(c) for c in stock_list]
@@ -167,6 +172,10 @@ class RealAdapter(BaseDataAdapter):
         1. 若 ``count`` ≤ 0 或 ``count * len(stock_list) ≤ kline_max_count`` → 单次调用
         2. 否则按 ``count // N`` 折算单次 count，多次调用并合并
         """
+        if not acquire_or_skip():
+            raise RateLimitError(
+                f"tqcenter 限流: get_market_data({len(stock_list)} codes) 被拒绝"
+            )
         tq = self._tq()
         try:
             codes = [normalize(c) for c in stock_list]
@@ -254,6 +263,8 @@ class RealAdapter(BaseDataAdapter):
 
     def get_more_info(self, code: str, field_list: FieldList | None = None) -> dict:
         """``tq.get_more_info(stock_code, field_list)``。"""
+        if not acquire_or_skip():
+            raise RateLimitError(f"tqcenter 限流: get_more_info({code}) 被拒绝")
         tq = self._tq()
         try:
             ncode = normalize(code)
@@ -264,6 +275,8 @@ class RealAdapter(BaseDataAdapter):
 
     def get_stock_info(self, code: str, field_list: FieldList | None = None) -> dict:
         """``tq.get_stock_info(stock_code, field_list)``。"""
+        if not acquire_or_skip():
+            raise RateLimitError(f"tqcenter 限流: get_stock_info({code}) 被拒绝")
         tq = self._tq()
         try:
             ncode = normalize(code)
@@ -274,6 +287,8 @@ class RealAdapter(BaseDataAdapter):
 
     def get_gb_info(self, code: str, date_list: DateList, count: int = 1) -> list:
         """``tq.get_gb_info(stock_code, date_list, count)``。"""
+        if not acquire_or_skip():
+            raise RateLimitError(f"tqcenter 限流: get_gb_info({code}) 被拒绝")
         tq = self._tq()
         try:
             ncode = normalize(code)
@@ -284,6 +299,8 @@ class RealAdapter(BaseDataAdapter):
 
     def get_gb_info_by_date(self, code: str, start_date: str, end_date: str = "") -> list:
         """``tq.get_gb_info_by_date(stock_code, start_date, end_date)``。"""
+        if not acquire_or_skip():
+            raise RateLimitError(f"tqcenter 限流: get_gb_info_by_date({code}) 被拒绝")
         tq = self._tq()
         try:
             ncode = normalize(code)
@@ -301,6 +318,8 @@ class RealAdapter(BaseDataAdapter):
 
     def get_relation(self, code: str) -> list:
         """``tq.get_relation(stock_code)``。"""
+        if not acquire_or_skip():
+            raise RateLimitError(f"tqcenter 限流: get_relation({code}) 被拒绝")
         tq = self._tq()
         try:
             ncode = normalize(code)
@@ -311,6 +330,8 @@ class RealAdapter(BaseDataAdapter):
 
     def get_ipo_info(self, ipo_type: int = 0, ipo_date: int = 0) -> list:
         """``tq.get_ipo_info(ipo_type, ipo_date)``。"""
+        if not acquire_or_skip():
+            raise RateLimitError("tqcenter 限流: get_ipo_info 被拒绝")
         tq = self._tq()
         try:
             return tq.get_ipo_info(ipo_type=ipo_type, ipo_date=ipo_date) or []
@@ -324,6 +345,8 @@ class RealAdapter(BaseDataAdapter):
 
     def get_stock_list(self, list_type: str = "0", market: str = "") -> list:
         """``tq.get_stock_list(market, list_type)``。"""
+        if not acquire_or_skip():
+            raise RateLimitError("tqcenter 限流: get_stock_list 被拒绝")
         tq = self._tq()
         try:
             kwargs: dict[str, Any] = {"list_type": int(list_type) if list_type.isdigit() else 0}
@@ -336,6 +359,8 @@ class RealAdapter(BaseDataAdapter):
 
     def get_sector_list(self, list_type: str = "0", market: str = "") -> list:
         """``tq.get_sector_list(list_type)``。"""
+        if not acquire_or_skip():
+            raise RateLimitError("tqcenter 限流: get_sector_list 被拒绝")
         tq = self._tq()
         try:
             kwargs: dict[str, Any] = {"list_type": int(list_type) if list_type.isdigit() else 0}
@@ -348,6 +373,10 @@ class RealAdapter(BaseDataAdapter):
         self, block_code: str, block_type: int = 0, list_type: str = "0"
     ) -> list:
         """``tq.get_stock_list_in_sector(code, list_type)``。"""
+        if not acquire_or_skip():
+            raise RateLimitError(
+                f"tqcenter 限流: get_stock_list_in_sector({block_code}) 被拒绝"
+            )
         tq = self._tq()
         try:
             kwargs: dict[str, Any] = {
@@ -367,6 +396,8 @@ class RealAdapter(BaseDataAdapter):
         self, code: str, date_list: DateList, count: int = 1
     ) -> list:
         """``tq.get_gpjy_value(stock_code, date_list, count)``。"""
+        if not acquire_or_skip():
+            raise RateLimitError(f"tqcenter 限流: get_gpjy_value({code}) 被拒绝")
         tq = self._tq()
         try:
             ncode = normalize(code)
@@ -382,6 +413,8 @@ class RealAdapter(BaseDataAdapter):
         self, code: str, start_date: str, end_date: str = ""
     ) -> list:
         """``tq.get_gpjy_value_by_date(stock_code, start_date, end_date)``。"""
+        if not acquire_or_skip():
+            raise RateLimitError(f"tqcenter 限流: get_gpjy_value_by_date({code}) 被拒绝")
         tq = self._tq()
         try:
             ncode = normalize(code)
@@ -410,6 +443,10 @@ class RealAdapter(BaseDataAdapter):
         Real 返回可能是 ``dict[code -> list[dict]]`` 或 DataFrame，本方法统一转
         DataFrame 输出（列：``stock_code`` + 各 field）。
         """
+        if not acquire_or_skip():
+            raise RateLimitError(
+                f"tqcenter 限流: get_financial_data({len(stock_list)} codes) 被拒绝"
+            )
         tq = self._tq()
         try:
             codes = [normalize(c) for c in stock_list]
@@ -432,6 +469,10 @@ class RealAdapter(BaseDataAdapter):
         self, stock_list: StockList, field_list: FieldList
     ) -> dict:
         """``tq.get_gp_one_data(stock_list, field_list)``。"""
+        if not acquire_or_skip():
+            raise RateLimitError(
+                f"tqcenter 限流: get_gp_one_data({len(stock_list)} codes) 被拒绝"
+            )
         tq = self._tq()
         try:
             codes = [normalize(c) for c in stock_list]
@@ -446,6 +487,8 @@ class RealAdapter(BaseDataAdapter):
 
     def get_kzz_info(self, code: str, field_list: FieldList | None = None) -> dict:
         """``tq.get_kzz_info(stock_code, field_list)``。"""
+        if not acquire_or_skip():
+            raise RateLimitError(f"tqcenter 限流: get_kzz_info({code}) 被拒绝")
         tq = self._tq()
         try:
             ncode = normalize(code)
@@ -456,6 +499,8 @@ class RealAdapter(BaseDataAdapter):
 
     def get_trackzs_etf_info(self, index_code: str) -> list:
         """``tq.get_trackzs_etf_info(etf_code)``。"""
+        if not acquire_or_skip():
+            raise RateLimitError(f"tqcenter 限流: get_trackzs_etf_info({index_code}) 被拒绝")
         tq = self._tq()
         try:
             return tq.get_trackzs_etf_info(etf_code=index_code) or []
@@ -519,6 +564,8 @@ class RealAdapter(BaseDataAdapter):
             return False
 
     def get_user_sector(self, block_code: str = "") -> list:
+        if not acquire_or_skip():
+            raise RateLimitError(f"tqcenter 限流: get_user_sector({block_code}) 被拒绝")
         tq = self._tq()
         try:
             if block_code:

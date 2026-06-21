@@ -496,6 +496,27 @@ async def get_health(
         "lag_degraded_seconds": lag_degraded,
         "error_healthy_threshold": err_healthy,
     }
+
+    # R14-2: 透出 API 限流统计（展开到顶层 + rate_limit 子对象）
+    try:
+        stats = state.api_stats()
+        # 展开顶层（api_call_total / api_rejected_total / api_avg_latency_ms /
+        # tqcenter_call_total / tqcenter_rejected_total）
+        for k, v in stats.items():
+            if k in ("tqcenter_limiter", "api_middleware"):
+                continue
+            health[k] = v
+        health["rate_limit"] = {
+            "tqcenter_limiter": stats.get("tqcenter_limiter", {"enabled": False}),
+            "api_middleware": stats.get("api_middleware", {"enabled": False, "rules_count": 0}),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("api_stats 透出失败: %s", exc)
+        health["rate_limit"] = {
+            "tqcenter_limiter": {"enabled": False},
+            "api_middleware": {"enabled": False, "rules_count": 0},
+        }
+
     return health
 
 

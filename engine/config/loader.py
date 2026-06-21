@@ -303,6 +303,15 @@ class ConfigLoader:
             reload_channel_config()
         except Exception as exc:  # noqa: BLE001
             logger.debug("reload_channel_config 失败（可忽略）: %s", exc)
+        # R14-2: 令牌桶重置（让 tqcenter.global_qps / burst / acquire_timeout
+        # 修改后无需重启，下次 acquire_or_skip 时 get_limiter 重建）
+        # 注：API 中间件的 rules 在启动时读取，热加载不重建中间件（需重启生效）
+        try:
+            from engine.data_adapter.rate_limiter import reset_limiter
+
+            reset_limiter()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("reset_limiter 失败（可忽略）: %s", exc)
 
     def _watch_loop(self) -> None:
         """轮询 mtime，发现变化则触发 ``reload()`` 与监听回调。"""

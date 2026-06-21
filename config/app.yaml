@@ -36,6 +36,40 @@ tqcenter:
   subscribe_batch_size: 50
   # get_market_data 单次最大 K 线条数，超出自动分批续传
   kline_max_count: 24000
+  # R14-2: 适配器层令牌桶（保护终端 GUI 线程，Real 模式生效）
+  # - Mock 模式下 mock_adapter 不调 acquire_or_skip，故本配置不生效（开发体验优先）
+  # - 配置变更通过 POST /api/config/reload 热加载（reset_limiter 重建）
+  global_qps: 10
+  burst: 20
+  acquire_timeout: 5
+
+# R14-2: FastAPI 端点限流（Mock/Real 都生效，保护 Next 代理层 CPU）
+api:
+  rate_limit:
+    enabled: true
+    rules:
+      # /health 是 FastAPI 根健康端点；/api/monitor/health 是引擎健康度（前端高频轮询）
+      - path_prefix: "/health"
+        qpm: 120
+      - path_prefix: "/api/monitor/health"
+        qpm: 120
+      # 个股板块归属（hover 高频，缓存兜底）
+      - path_prefix: "/api/stocks"
+        qpm: 30
+      # 板块查询 GET 宽松，POST refresh 重操作严格
+      - path_prefix: "/api/sectors"
+        qpm: 60
+        methods: ["GET"]
+      - path_prefix: "/api/sectors"
+        qpm: 3
+        methods: ["POST"]
+      # 监控/信号常规轮询
+      - path_prefix: "/api/monitor"
+        qpm: 60
+      - path_prefix: "/api/signals"
+        qpm: 60
+    default_qpm: 60
+    cleanup_interval: 300
 
 mock:
   # Mock 适配器读取 V8 CSV 样本数据的目录

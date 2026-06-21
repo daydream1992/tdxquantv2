@@ -356,6 +356,28 @@ export interface EngineHealthDTO {
     lag_degraded_seconds: number
     error_healthy_threshold: number
   }
+  /** R14-2: API 限流监控计数（全部 optional, 向后兼容旧后端） */
+  api_call_total?: number
+  api_rejected_total?: number
+  api_avg_latency_ms?: number
+  tqcenter_call_total?: number
+  tqcenter_rejected_total?: number
+  /** R14-2: 限流配置状态（令牌桶 + 中间件） */
+  rate_limit?: {
+    tqcenter_limiter?: {
+      enabled: boolean
+      qps?: number
+      burst?: number
+      current_tokens?: number
+      total_calls?: number
+      rejected_calls?: number
+      total_wait_ms?: number
+    }
+    api_middleware?: {
+      enabled: boolean
+      rules_count: number
+    }
+  }
 }
 
 export const monitorAPI = {
