@@ -1,6 +1,8 @@
 /**
  * GET /api/monitor/status — 监控状态
  * GET /api/monitor/quotes — 实时行情快照（mock）
+ * GET /api/monitor?action=health — 引擎健康度（P1）
+ * GET /api/monitor?action=subscriptions — 订阅列表
  */
 
 import { tryFastAPI, ok } from '@/lib/api-proxy'
@@ -16,6 +18,19 @@ export async function GET(req: Request) {
     const r = await tryFastAPI(`/api/monitor/quotes?count=${count}`)
     if (r) return ok(await r.json())
     return ok(genQuotes(Number(count) || 12))
+  }
+
+  if (path === 'health') {
+    // P1: 引擎健康度
+    const r = await tryFastAPI('/api/monitor/health')
+    if (r) return ok(await r.json())
+    return ok({ status: 'unknown', error: 'FastAPI 不可达' })
+  }
+
+  if (path === 'subscriptions') {
+    const r = await tryFastAPI('/api/monitor/subscriptions')
+    if (r) return ok(await r.json())
+    return ok([])
   }
 
   // status

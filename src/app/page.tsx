@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { Activity, BarChart3, Cpu, Layers, Bell, Sun, Moon, RefreshCw, Settings, Play, Loader2, Search } from 'lucide-react'
+import { Activity, BarChart3, Cpu, Layers, Bell, Sun, Moon, RefreshCw, Settings, Play, Loader2, Search, Crosshair, Star } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
@@ -15,6 +15,8 @@ import { StrategyManager } from '@/components/quant/StrategyManager'
 import { SelectionResults } from '@/components/quant/SelectionResults'
 import { SignalCenter } from '@/components/quant/SignalCenter'
 import { SectorManager } from '@/components/quant/SectorManager'
+import { MatchStrategyManager } from '@/components/quant/MatchStrategyManager'
+import { WatchlistManager } from '@/components/quant/WatchlistManager'
 import { ChannelSettingsDialog } from '@/components/quant/ChannelSettingsDialog'
 import { GlobalSearch, type GlobalSearchHandle } from '@/components/quant/GlobalSearch'
 import { NotificationCenter } from '@/components/quant/NotificationCenter'
@@ -25,6 +27,8 @@ const TABS = [
   { value: 'selections', label: '选股结果', icon: BarChart3 },
   { value: 'signals', label: '信号中心', icon: Bell },
   { value: 'sectors', label: '板块管理', icon: Layers },
+  { value: 'match-strategies', label: '匹配策略', icon: Crosshair },
+  { value: 'watchlist', label: '自选股', icon: Star },
 ] as const
 
 export default function Home() {
@@ -255,7 +259,7 @@ export default function Home() {
 
           {/* Tabs */}
           <Tabs value={tab} onValueChange={setTab} className="w-full">
-            <TabsList className="bg-transparent border-0 p-0 h-11 w-full grid grid-flow-col auto-cols-min sm:grid-cols-5 sm:w-full overflow-x-auto quant-scroll rounded-none">
+            <TabsList className="bg-transparent border-0 p-0 h-11 w-full grid grid-flow-col auto-cols-min sm:grid-cols-7 sm:w-full overflow-x-auto quant-scroll rounded-none">
               {TABS.map((t) => {
                 const Icon = t.icon
                 return (
@@ -299,6 +303,8 @@ export default function Home() {
         {tab === 'selections' && <SelectionResults />}
         {tab === 'signals' && <SignalCenter />}
         {tab === 'sectors' && <SectorManager />}
+        {tab === 'match-strategies' && <MatchStrategyManager />}
+        {tab === 'watchlist' && <WatchlistManager />}
       </main>
 
       {/* ===== Footer (sticky to bottom) ===== */}

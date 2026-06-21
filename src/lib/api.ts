@@ -279,6 +279,20 @@ export const sectorAPI = {
   },
 }
 
+/** P1: 引擎健康度 DTO */
+export interface EngineHealthDTO {
+  subscribe_alive: boolean
+  last_quote_ts: number
+  quote_lag_seconds: number
+  eval_count: number
+  error_count: number
+  last_error: string
+  debounce_size: number
+  queue_size: number
+  uptime_seconds: number
+  status: 'healthy' | 'degraded' | 'unhealthy' | 'unknown'
+}
+
 export const monitorAPI = {
   getStatus: () => fetchAPI<MonitorStatusDTO>('/api/monitor?action=status'),
   getQuotes: (count = 100) =>
@@ -288,6 +302,8 @@ export const monitorAPI = {
     fetchAPI<FlowRankingItemDTO[]>(
       `/api/monitor/flow-ranking?count=${count}&metric=${metric}`
     ),
+  /** P1: 引擎健康度 */
+  getHealth: () => fetchAPI<EngineHealthDTO>('/api/monitor?action=health'),
 }
 
 export const themeAPI = {
@@ -538,4 +554,152 @@ export const searchAPI = {
     sp.set('limit', String(limit))
     return fetchAPI<SearchResponseDTO>(`/api/search?${sp.toString()}`)
   },
+}
+
+// ===== 匹配策略 (match-strategies) =====
+
+export interface MatchScopeDTO {
+  markets: string[]
+  exclude_st: boolean
+  exclude_suspended: boolean
+  exclude_codes: string[]
+  include_only: string[]
+}
+
+export type MatchPriority = 'high' | 'medium' | 'low'
+
+export interface MatchAlertDTO {
+  alert_type: string
+  params: Record<string, number>
+  channels: string[]
+  priority: MatchPriority
+}
+
+export interface MatchStrategyDTO {
+  match_id: string
+  name: string
+  enabled: boolean
+  strategy_id: string
+  scope: MatchScopeDTO
+  alerts: MatchAlertDTO[]
+  debounce_override: number | null
+  trading_hours_override: Record<string, unknown> | null
+}
+
+export interface MatchListResponse {
+  items: MatchStrategyDTO[]
+  count?: number
+}
+
+/** PUT 部分更新（与后端 MatchUpdateModel 对齐，所有字段可选） */
+export interface MatchUpdateRequest {
+  name?: string
+  enabled?: boolean
+  strategy_id?: string
+  scope?: MatchScopeDTO
+  alerts?: MatchAlertDTO[]
+  debounce_override?: number | null
+  trading_hours_override?: Record<string, unknown> | null
+}
+
+/** POST 新建（与后端 MatchStrategyModel 对齐） */
+export interface MatchCreateRequest {
+  match_id: string
+  name: string
+  enabled: boolean
+  strategy_id: string
+  scope: MatchScopeDTO
+  alerts: MatchAlertDTO[]
+  debounce_override: number | null
+  trading_hours_override: Record<string, unknown> | null
+}
+
+export interface MatchTestHitDTO {
+  alert_type: string
+  condition: string
+  hit: boolean
+  priority?: MatchPriority
+  channels?: string[]
+  error?: string
+}
+
+export interface MatchTestResponse {
+  match_id: string
+  hits: MatchTestHitDTO[]
+}
+
+export interface MatchTestParams {
+  code: string
+  pct_change?: number
+  volume_ratio?: number
+  main_inflow?: number
+  auction_pct?: number
+  [k: string]: unknown
+}
+
+export const matchStrategyAPI = {
+  list: () => fetchAPI<MatchListResponse>('/api/monitor/match-strategies'),
+  create: (body: MatchCreateRequest) =>
+    fetchAPI<{ ok: boolean; match_id: string; message: string }>(
+      '/api/monitor/match-strategies',
+      { method: 'POST', body: JSON.stringify(body) }
+    ),
+  update: (id: string, body: MatchUpdateRequest) =>
+    fetchAPI<{ ok: boolean; match_id: string; message: string }>(
+      `/api/monitor/match-strategies/${encodeURIComponent(id)}`,
+      { method: 'PUT', body: JSON.stringify(body) }
+    ),
+  remove: (id: string) =>
+    fetchAPI<{ ok: boolean; match_id: string; message: string }>(
+      `/api/monitor/match-strategies/${encodeURIComponent(id)}`,
+      { method: 'DELETE' }
+    ),
+  reload: () =>
+    fetchAPI<{ ok: boolean; count: number; message: string }>(
+      '/api/monitor/match-strategies?action=reload',
+      { method: 'POST' }
+    ),
+  test: (id: string, params: MatchTestParams) =>
+    fetchAPI<MatchTestResponse>(
+      `/api/monitor/match-strategies/${encodeURIComponent(id)}/test`,
+      { method: 'POST', body: JSON.stringify(params) }
+    ),
+}
+
+// ===== 自选股 (watchlist) =====
+
+export interface WatchlistItemDTO {
+  stock_code: string
+  strategy_id: string
+  subscriber: string
+  subscribed_at: string
+  active: boolean
+  batch_no: number
+}
+
+export interface WatchlistAddRequest {
+  codes: string[]
+  strategy_id?: string
+  subscriber?: string
+}
+
+export interface WatchlistAddResponse {
+  ok: boolean
+  added: number
+  skipped: number
+  message: string
+}
+
+export const watchlistAPI = {
+  list: () => fetchAPI<WatchlistItemDTO[]>('/api/monitor/watchlist'),
+  add: (body: WatchlistAddRequest) =>
+    fetchAPI<WatchlistAddResponse>('/api/monitor/watchlist', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  remove: (code: string) =>
+    fetchAPI<{ ok: boolean; code: string; message: string }>(
+      `/api/monitor/watchlist/${encodeURIComponent(code)}`,
+      { method: 'DELETE' }
+    ),
 }

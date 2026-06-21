@@ -85,6 +85,12 @@ class MonitorEngine:
         self._error_count: int = 0
         self._last_error: str = ""
 
+        # P1: 聚合推送队列
+        # key = (strategy_id, priority), value = list[payload]
+        # 窗口内同 strategy+priority 的信号聚合为一条摘要推送
+        self._agg_queue: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        self._agg_last_flush: dict[tuple[str, str], float] = {}
+
         # 跨日检测
         self._last_date: datetime.date = datetime.now().date()
 
@@ -167,9 +173,10 @@ class MonitorEngine:
         if self._should_poll(cfg):
             self._poll_and_eval()
         else:
-            # subscribe 模式：行情由 callback 推送，主循环保活 + 顺带清 debounce
+            # subscribe 模式：行情由 callback 推送，主循环保活 + 顺带清 debounce + flush 聚合
             self._ensure_subscribed()
             self._cleanup_debounce()
+            self._flush_all_aggregation()
             self._stop_event.wait(
                 float(cfg.get("monitor.poll_interval_seconds", 10))
             )
@@ -291,7 +298,9 @@ class MonitorEngine:
         for match, alert_ref, _condition in match_hits:
             fired_by_type.setdefault(alert_ref.alert_type, []).append(match.match_id)
 
-        self._eval_count += 1
+        # _eval_count 放在锁内，避免 subscribe 模式下并发计数丢失（bug #10）
+        with self._lock:
+            self._eval_count += 1
         # 遍历 match_hits，跳过已 debounced / 已 fire 的同类型
         fired_types: set[str] = set()
         for match, alert_ref, condition in match_hits:
@@ -364,8 +373,14 @@ class MonitorEngine:
             self._debounce[(code, alert_type)] = time.time()
 
     def _cleanup_debounce(self) -> None:
-        """清理超过 1 天的旧 key（避免内存泄漏）。"""
-        cutoff = time.time() - 86400  # 1 天前
+        """清理过期 debounce key（避免内存泄漏）。
+
+        cutoff 取 ``max(window*10, 3600)`` 秒前（bug #11：原 86400s 频率太低，
+        subscribe 模式下窗口短时 key 会堆积几小时才清）。
+        """
+        cfg = ConfigLoader()
+        window = float(cfg.get("monitor.alert_debounce_seconds", 30))
+        cutoff = time.time() - max(window * 10, 3600)
         with self._lock:
             stale = [k for k, ts in self._debounce.items() if ts < cutoff]
             for k in stale:
@@ -478,6 +493,7 @@ class MonitorEngine:
         EngineState().record_signal(alert_ref.alert_type)
 
         # 3. 推送通道（extra.match_ids 标注所有命中 match）
+        # P1: 分级值班 — high 优先级立即推, medium/low 走聚合队列
         payload = ChannelPayload(
             signal_id=signal_id,
             signal_type=alert_ref.alert_type,
@@ -496,17 +512,39 @@ class MonitorEngine:
                 "match_ids": match_ids,
             },
         )
-        try:
-            results = get_registry().dispatch(payload, channels=channels)
-            logger.info(
-                "预警触发 %s %s %s match=%s -> %s",
-                code, alert_ref.alert_type, name, match_ids,
-                [(r.channel, r.ok) for r in results],
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._error_count += 1
-            self._last_error = str(exc)
-            logger.warning("推送通道异常 %s %s: %s", code, alert_ref.alert_type, exc)
+
+        # P1 分级值班: high 立即推全通道; medium 立即推 websocket, feishu 走聚合;
+        #            low 只推 websocket, 其他走聚合
+        if alert_ref.priority == "high":
+            try:
+                results = get_registry().dispatch(payload, channels=channels)
+                logger.info(
+                    "预警触发 %s %s %s match=%s -> %s",
+                    code, alert_ref.alert_type, name, match_ids,
+                    [(r.channel, r.ok) for r in results],
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._error_count += 1
+                self._last_error = str(exc)
+                logger.warning("推送通道异常 %s %s: %s", code, alert_ref.alert_type, exc)
+        else:
+            # medium/low: websocket 立即推, 其他通道聚合
+            immediate_ch = [c for c in channels if c == "websocket"]
+            agg_ch = [c for c in channels if c != "websocket"]
+            if immediate_ch:
+                try:
+                    get_registry().dispatch(payload, channels=immediate_ch)
+                except Exception as exc:  # noqa: BLE001
+                    self._error_count += 1
+                    self._last_error = str(exc)
+                    logger.debug("websocket 推送异常 %s: %s", code, exc)
+            if agg_ch:
+                self._enqueue_aggregation(strategy_id, alert_ref.priority, payload, agg_ch)
+                logger.debug(
+                    "聚合入队 %s %s %s (队列=%d)",
+                    code, alert_ref.alert_type, alert_ref.priority,
+                    len(self._agg_queue.get((strategy_id, alert_ref.priority), [])),
+                )
 
     def _insert_signal_event(
         self,
@@ -625,15 +663,18 @@ class MonitorEngine:
             return default
 
         # pct_change: 优先显式，其次 ZAF/100，否则 Now/LastClose-1
-        pct = _num("pct_change")
-        if not pct:
+        # bug #12: 原 `if not pct:` 把 0.0 当 falsy 跳过, 改为显式 None 判断
+        pct = _num("pct_change", default=float("nan"))
+        if pct != pct:  # NaN 检查
             zaf = _num("ZAF")
             pct = zaf / 100 if zaf else 0.0
-        if not pct:
+        if pct != pct:  # 仍 NaN, 走 Now/LastClose
             now = _num("Now", "MA5Value")
             last_close = _num("LastClose")
             if now > 0 and last_close > 0:
                 pct = now / last_close - 1
+            else:
+                pct = 0.0
 
         # main_inflow: Zjl
         main_inflow = _num("main_inflow", "Zjl")
@@ -643,9 +684,9 @@ class MonitorEngine:
 
         # auction_pct: VOpenZAF/100
         vopen = _num("VOpenZAF")
-        auction_pct = _num("auction_pct")
-        if not auction_pct and vopen:
-            auction_pct = vopen / 100
+        auction_pct = _num("auction_pct", default=float("nan"))
+        if auction_pct != auction_pct:  # NaN
+            auction_pct = vopen / 100 if vopen else 0.0
 
         last = _num("last", "Now", "MA5Value")
         volume = _num("volume", "Volume")
@@ -713,18 +754,29 @@ class MonitorEngine:
         name = str(snap.get("name", "") or "")
         pct = snap.get("pct_change", 0)
         pct_str = f"{pct * 100:+.2f}%" if isinstance(pct, (int, float)) else ""
-        prefix_map = {
-            "limit_up": "🚀 涨停",
-            "drop_alert": "⚠️ 大跌",
-            "volume_surge": "📈 放量",
-            "auction_surge": "🔨 竞价异动",
-            "rzq_ignite": "⚡ 弱转强点火",
-            "rzq_fail": "💔 弱转强失败",
-            "qzrfc_rebound": "🔄 强转弱反抽",
-            "qzrfc_fail": "⚠️ 反抽失败",
-        }
-        prefix = prefix_map.get(alert_type, f"📌 {alert_type}")
+        prefix = self._alert_prefix(alert_type)
         return f"{prefix} {name}({snap.get('code','')}) {pct_str}".strip()
+
+    @staticmethod
+    def _alert_prefix(alert_type: str) -> str:
+        """alert_type → emoji 前缀。
+
+        bug #17: 原 prefix_map 硬编码 8 项, 新增 alert_type 需同步改字典。
+        改为从 alert_templates YAML 读 ``emoji`` 字段, 没有则用默认 ``📌``。
+        """
+        try:
+            from engine.monitor.rules import RuleSet
+
+            tpl = RuleSet.get_template(alert_type) or {}
+            emoji = str(tpl.get("emoji", "")).strip()
+            label = str(tpl.get("label", "")).strip()
+            if emoji and label:
+                return f"{emoji} {label}"
+            if label:
+                return f"📌 {label}"
+        except Exception:  # noqa: BLE001
+            pass
+        return f"📌 {alert_type}"
 
     def _build_content(self, rule: AlertRule, snap: dict[str, Any]) -> str:
         """构造推送内容（RuleSet 路径）。"""
@@ -761,6 +813,107 @@ class MonitorEngine:
         if p == "medium":
             return "warn"
         return "info"
+
+    # ------------------------------------------------------------------
+    # P1: 聚合推送
+    # ------------------------------------------------------------------
+
+    def _enqueue_aggregation(
+        self,
+        strategy_id: str,
+        priority: str,
+        payload: ChannelPayload,
+        channels: list[str],
+    ) -> None:
+        """把 medium/low 优先级信号入队，窗口内聚合为一条摘要推送。
+
+        聚合 key = (strategy_id, priority)，窗口 = alert_aggregate_window_seconds (默认 60s)。
+        窗口满或队列达到 max_size (默认 10) 时自动 flush。
+        """
+        cfg = ConfigLoader()
+        window = float(cfg.get("monitor.alert_aggregate_window_seconds", 60))
+        max_size = int(cfg.get("monitor.alert_aggregate_max_size", 10))
+        key = (strategy_id, priority)
+        now = time.time()
+
+        with self._lock:
+            self._agg_queue.setdefault(key, []).append({
+                "signal_id": payload.signal_id,
+                "stock_code": payload.stock_code,
+                "stock_name": payload.stock_name,
+                "alert_type": payload.signal_type,
+                "pct_change": payload.extra.get("pct_change"),
+                "title": payload.title,
+                "channels": channels,
+            })
+            last_flush = self._agg_last_flush.get(key, now)
+            should_flush = (
+                len(self._agg_queue[key]) >= max_size
+                or (now - last_flush) >= window
+            )
+            if should_flush:
+                self._flush_aggregation_locked(key, channels)
+
+    def _flush_aggregation_locked(
+        self, key: tuple[str, str], channels: list[str]
+    ) -> None:
+        """刷新聚合队列（调用方需持锁）。"""
+        items = self._agg_queue.pop(key, [])
+        if not items:
+            return
+        self._agg_last_flush[key] = time.time()
+        strategy_id, priority = key
+        # 构造摘要 payload
+        codes = [it["stock_code"] for it in items[:10]]
+        names = [it.get("stock_name", "") for it in items[:10]]
+        summary = ChannelPayload(
+            signal_id=f"agg_{int(time.time())}_{strategy_id}_{priority}",
+            signal_type="aggregate",
+            strategy_id=strategy_id,
+            stock_code=",".join(codes[:3]) + ("..." if len(codes) > 3 else ""),
+            stock_name=",".join(n for n in names[:3] if n),
+            title=f"📊 [{strategy_id}] {priority}级信号聚合 x{len(items)}",
+            content=self._format_aggregate_content(items),
+            severity=self._priority_to_severity(priority),
+            priority=priority,
+            extra={
+                "aggregate": True,
+                "count": len(items),
+                "items": items,
+            },
+        )
+        try:
+            get_registry().dispatch(summary, channels=channels)
+            logger.info(
+                "聚合推送 flush: strategy=%s priority=%s count=%d -> %s",
+                strategy_id, priority, len(items), channels,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._error_count += 1
+            self._last_error = str(exc)
+            logger.warning("聚合推送异常: %s", exc)
+
+    def _flush_all_aggregation(self) -> None:
+        """刷新所有聚合队列（tick 循环定期调）。"""
+        with self._lock:
+            for key in list(self._agg_queue.keys()):
+                if self._agg_queue[key]:
+                    self._flush_aggregation_locked(key, self._agg_queue[key][0].get("channels", []))
+
+    @staticmethod
+    def _format_aggregate_content(items: list[dict[str, Any]]) -> str:
+        """格式化聚合推送内容。"""
+        lines = [f"聚合 {len(items)} 条信号:"]
+        for i, it in enumerate(items[:10], 1):
+            pct = it.get("pct_change", 0)
+            pct_str = f"{pct * 100:+.2f}%" if isinstance(pct, (int, float)) else ""
+            lines.append(
+                f"  {i}. {it.get('stock_name','')}({it.get('stock_code','')}) "
+                f"{it.get('alert_type','')} {pct_str}"
+            )
+        if len(items) > 10:
+            lines.append(f"  ... 共 {len(items)} 条")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # 健康度查询（供 /api/monitor/health 用，P1）

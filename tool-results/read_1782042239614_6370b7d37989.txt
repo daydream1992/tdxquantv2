@@ -1,0 +1,900 @@
+     1→'use client'
+     2→
+     3→/**
+     4→ * 策略管理
+     5→ * - 5 策略卡片列表
+     6→ * - 启用/禁用开关 + 运行按钮 + 查看/编辑配置 + 复制 + 删除
+     7→ * - 顶部批量操作（全部启用/全部禁用/批量运行）+ 刷新配置
+     8→ * - 配置编辑：Dialog 展示 YAML + 在线编辑保存（PUT /api/config/strategies/[id]）
+     9→ * - 复制策略：Dialog 输入新 ID/名/emoji + YAML 预览（POST /api/config/strategies）
+    10→ * - 删除策略：确认 Dialog 输入策略 ID 二次确认（DELETE /api/config/strategies/[id]）
+    11→ */
+    12→
+    13→import * as React from 'react'
+    14→import { Card } from '@/components/ui/card'
+    15→import { Button } from '@/components/ui/button'
+    16→import { Input } from '@/components/ui/input'
+    17→import { Label } from '@/components/ui/label'
+    18→import {
+    19→  Dialog,
+    20→  DialogContent,
+    21→  DialogHeader,
+    22→  DialogTitle,
+    23→  DialogDescription,
+    24→  DialogFooter,
+    25→} from '@/components/ui/dialog'
+    26→import {
+    27→  Sheet,
+    28→  SheetContent,
+    29→  SheetHeader,
+    30→  SheetTitle,
+    31→  SheetDescription,
+    32→} from '@/components/ui/sheet'
+    33→import { Badge } from '@/components/ui/badge'
+    34→import { Play, Power, PowerOff, RefreshCw, FileCode, CheckCircle2, Save, Pencil, RotateCcw, AlertCircle, History, Clock, CheckCircle, XCircle, Copy, Trash2, AlertTriangle } from 'lucide-react'
+    35→import { StrategyCard } from './StrategyCard'
+    36→import { LoadingState } from './LoadingState'
+    37→import { toast } from 'sonner'
+    38→import { notifySuccess, notifyError, notifyWarning } from '@/lib/notifications'
+    39→import { strategyAPI, configAPI, type StrategyDTO, type StrategyRunRecord } from '@/lib/api'
+    40→import { cn } from '@/lib/utils'
+    41→
+    42→// ----------------------------------------------------------------------------
+    43→// YAML 复制辅助：行级替换 strategy_id / strategy_name / strategy_emoji / sector.code / sector.name
+    44→// ----------------------------------------------------------------------------
+    45→
+    46→interface YamlTransformOpts {
+    47→  newId: string
+    48→  newName: string
+    49→  newEmoji: string
+    50→}
+    51→
+    52→function transformStrategyYaml(yaml: string, opts: YamlTransformOpts): string {
+    53→  const lines = yaml.split('\n')
+    54→  let inSector = false
+    55→  let sectorIndent = 0
+    56→  const out: string[] = []
+    57→  for (const line of lines) {
+    58→    const trimmed = line.replace(/^\s+/, '')
+    59→    // 进入 sector: 块
+    60→    if (!inSector && /^sector:\s*$/.test(line)) {
+    61→      inSector = true
+    62→      sectorIndent = 0
+    63→      out.push(line)
+    64→      continue
+    65→    }
+    66→    if (inSector) {
+    67→      // 空行/注释行直接保留
+    68→      if (line.trim() === '' || line.trim().startsWith('#')) {
+    69→        out.push(line)
+    70→        continue
+    71→      }
+    72→      const indent = line.length - trimmed.length
+    73→      // 缩进回到 <= sectorIndent 表示出了 sector 块
+    74→      if (indent <= sectorIndent) {
+    75→        inSector = false
+    76→      } else {
+    77→        // 在 sector 块内
+    78→        if (/^code:\s/.test(trimmed)) {
+    79→          out.push(`${' '.repeat(indent)}code: ZD_${opts.newId.toUpperCase()}01`)
+    80→          continue
+    81→        }
+    82→        if (/^name:\s/.test(trimmed)) {
+    83→          out.push(`${' '.repeat(indent)}name: ${opts.newName}选股`)
+    84→          continue
+    85→        }
+    86→        out.push(line)
+    87→        continue
+    88→      }
+    89→    }
+    90→    // 顶层 key（column 0）
+    91→    if (/^strategy_id:\s/.test(line)) {
+    92→      out.push(`strategy_id: ${opts.newId}`)
+    93→      continue
+    94→    }
+    95→    if (/^strategy_name:\s/.test(line)) {
+    96→      out.push(`strategy_name: ${opts.newName}`)
+    97→      continue
+    98→    }
+    99→    if (/^strategy_emoji:\s/.test(line)) {
+   100→      out.push(`strategy_emoji: ${opts.newEmoji}`)
+   101→      continue
+   102→    }
+   103→    out.push(line)
+   104→  }
+   105→  return out.join('\n')
+   106→}
+   107→
+   108→const ID_REGEX = /^[a-zA-Z0-9_]{2,30}$/
+   109→
+   110→export function StrategyManager() {
+   111→  const [strategies, setStrategies] = React.useState<StrategyDTO[]>([])
+   112→  const [loading, setLoading] = React.useState(true)
+   113→  const [running, setRunning] = React.useState<string | null>(null)
+   114→  const [configOpen, setConfigOpen] = React.useState<StrategyDTO | null>(null)
+   115→  // YAML 编辑模式
+   116→  const [editMode, setEditMode] = React.useState(false)
+   117→  const [yamlDraft, setYamlDraft] = React.useState('')
+   118→  const [yamlSaving, setYamlSaving] = React.useState(false)
+   119→  const [yamlDirty, setYamlDirty] = React.useState(false)
+   120→  // 运行历史
+   121→  const [historyOpen, setHistoryOpen] = React.useState<StrategyDTO | null>(null)
+   122→  const [runs, setRuns] = React.useState<StrategyRunRecord[]>([])
+   123→  const [runsLoading, setRunsLoading] = React.useState(false)
+   124→  // 复制策略 Dialog
+   125→  const [copyOpen, setCopyOpen] = React.useState<StrategyDTO | null>(null)
+   126→  const [copyId, setCopyId] = React.useState('')
+   127→  const [copyName, setCopyName] = React.useState('')
+   128→  const [copyEmoji, setCopyEmoji] = React.useState('📋')
+   129→  const [copySaving, setCopySaving] = React.useState(false)
+   130→  // 删除策略 Dialog
+   131→  const [deleteOpen, setDeleteOpen] = React.useState<StrategyDTO | null>(null)
+   132→  const [deleteConfirmId, setDeleteConfirmId] = React.useState('')
+   133→  const [deleteSaving, setDeleteSaving] = React.useState(false)
+   134→
+   135→  const load = React.useCallback(async () => {
+   136→    setLoading(true)
+   137→    try {
+   138→      const data = await strategyAPI.list()
+   139→      setStrategies(data)
+   140→    } catch (e) {
+   141→      toast.error('加载策略失败', { description: (e as Error).message })
+   142→    } finally {
+   143→      setLoading(false)
+   144→    }
+   145→  }, [])
+   146→
+   147→  React.useEffect(() => {
+   148→    load()
+   149→  }, [load])
+   150→
+   151→  const handleToggle = async (id: string, next: boolean) => {
+   152→    // 乐观更新
+   153→    setStrategies((prev) =>
+   154→      prev.map((s) => (s.strategy_id === id ? { ...s, enabled: next } : s))
+   155→    )
+   156→    try {
+   157→      if (next) await strategyAPI.enable(id)
+   158→      else await strategyAPI.disable(id)
+   159→      toast.success(`${next ? '已启用' : '已停用'} 策略 ${id}`)
+   160→    } catch (e) {
+   161→      // 回滚
+   162→      setStrategies((prev) =>
+   163→        prev.map((s) => (s.strategy_id === id ? { ...s, enabled: !next } : s))
+   164→      )
+   165→      toast.error('操作失败', { description: (e as Error).message })
+   166→    }
+   167→  }
+   168→
+   169→  const handleRun = async (id: string) => {
+   170→    setRunning(id)
+   171→    try {
+   172→      const r = await strategyAPI.run(id)
+   173→      toast.success(`策略 ${id} 运行完成`, {
+   174→        description: `run_id: ${r.run_id} · 选出 ${r.count} 只`,
+   175→      })
+   176→      await load()
+   177→    } catch (e) {
+   178→      toast.error('运行失败', { description: (e as Error).message })
+   179→    } finally {
+   180→      setRunning(null)
+   181→    }
+   182→  }
+   183→
+   184→  const handleBatch = async (action: 'enable_all' | 'disable_all' | 'run_all') => {
+   185→    try {
+   186→      if (action === 'enable_all') {
+   187→        await strategyAPI.enableAll()
+   188→        toast.success('已全部启用')
+   189→      } else if (action === 'disable_all') {
+   190→        await strategyAPI.disableAll()
+   191→        toast.success('已全部停用')
+   192→      } else {
+   193→        const r = await strategyAPI.runAll()
+   194→        toast.success(`批量运行完成`, {
+   195→          description: r.results.map((x) => `${x.id}: ${x.count}`).join(' · '),
+   196→        })
+   197→      }
+   198→      await load()
+   199→    } catch (e) {
+   200→      toast.error('批量操作失败', { description: (e as Error).message })
+   201→    }
+   202→  }
+   203→
+   204→  const handleReloadConfig = async () => {
+   205→    try {
+   206→      const r = await configAPI.reload()
+   207→      toast.success('配置已热加载', {
+   208→        description: `重载 ${r.reloaded.length} 项: ${r.reloaded.join(', ')}`,
+   209→      })
+   210→      await load()
+   211→    } catch (e) {
+   212→      toast.error('配置加载失败', { description: (e as Error).message })
+   213→    }
+   214→  }
+   215→
+   216→  // ===== 复制策略 =====
+   217→  const handleOpenCopy = (id: string) => {
+   218→    const target = strategies.find((x) => x.strategy_id === id)
+   219→    if (!target) return
+   220→    setCopyOpen(target)
+   221→    setCopyId(`${id}_copy`)
+   222→    setCopyName(`${target.strategy_name} 副本`)
+   223→    setCopyEmoji('📋')
+   224→  }
+   225→
+   226→  const copyYamlPreview = React.useMemo(() => {
+   227→    if (!copyOpen) return ''
+   228→    return transformStrategyYaml(copyOpen.yaml_content || '', {
+   229→      newId: copyId.trim(),
+   230→      newName: copyName.trim() || `${copyOpen.strategy_name} 副本`,
+   231→      newEmoji: copyEmoji.trim() || '📋',
+   232→    })
+   233→  }, [copyOpen, copyId, copyName, copyEmoji])
+   234→
+   235→  const copyIdError = React.useMemo(() => {
+   236→    const v = copyId.trim()
+   237→    if (!v) return '不能为空'
+   238→    if (!ID_REGEX.test(v)) return '只能包含英文字母、数字、下划线，2-30 字符'
+   239→    if (strategies.some((s) => s.strategy_id === v)) return 'ID 已存在，请换一个'
+   240→    return ''
+   241→  }, [copyId, strategies])
+   242→
+   243→  const handleConfirmCopy = async () => {
+   244→    if (!copyOpen) return
+   245→    const id = copyId.trim()
+   246→    if (!ID_REGEX.test(id)) {
+   247→      notifyError('策略 ID 不合法', '只能包含英文字母、数字、下划线，2-30 字符')
+   248→      return
+   249→    }
+   250→    if (strategies.some((s) => s.strategy_id === id)) {
+   251→      notifyError('ID 已存在', `策略 ${id} 已存在，请更换 ID`)
+   252→      return
+   253→    }
+   254→    setCopySaving(true)
+   255→    try {
+   256→      await configAPI.createStrategy(id, copyYamlPreview, false)
+   257→      notifySuccess('策略已复制', `${copyOpen.strategy_name} → ${id}（已可编辑/运行）`)
+   258→      setCopyOpen(null)
+   259→      await load()
+   260→    } catch (e) {
+   261→      const msg = (e as Error).message || ''
+   262→      if (msg.includes('409') || msg.includes('已存在')) {
+   263→        notifyError('ID 冲突', `策略 ${id} 已存在，请换一个 ID`)
+   264→      } else if (msg.includes('YAML') || msg.includes('解析')) {
+   265→        notifyError('YAML 解析失败', msg)
+   266→      } else {
+   267→        notifyError('复制失败', msg)
+   268→      }
+   269→    } finally {
+   270→      setCopySaving(false)
+   271→    }
+   272→  }
+   273→
+   274→  // ===== 删除策略 =====
+   275→  const handleOpenDelete = (id: string) => {
+   276→    const target = strategies.find((x) => x.strategy_id === id)
+   277→    if (!target) return
+   278→    setDeleteOpen(target)
+   279→    setDeleteConfirmId('')
+   280→  }
+   281→
+   282→  const deleteIdMatch = deleteOpen !== null && deleteConfirmId.trim() === deleteOpen.strategy_id
+   283→
+   284→  const handleConfirmDelete = async () => {
+   285→    if (!deleteOpen) return
+   286→    if (!deleteIdMatch) {
+   287→      notifyWarning('未确认', '请输入策略 ID 以确认删除')
+   288→      return
+   289→    }
+   290→    setDeleteSaving(true)
+   291→    try {
+   292→      const r = await configAPI.deleteStrategy(deleteOpen.strategy_id)
+   293→      notifySuccess('策略已删除', r.message || `策略 ${deleteOpen.strategy_id} 已删除`)
+   294→      setDeleteOpen(null)
+   295→      await load()
+   296→    } catch (e) {
+   297→      const msg = (e as Error).message || ''
+   298→      if (msg.includes('409') || msg.includes('启用')) {
+   299→        notifyError('无法删除', '策略正在启用中，请先禁用再删除')
+   300→      } else if (msg.includes('404') || msg.includes('不存在')) {
+   301→        notifyError('策略不存在', msg)
+   302→      } else {
+   303→        notifyError('删除失败', msg)
+   304→      }
+   305→    } finally {
+   306→      setDeleteSaving(false)
+   307→    }
+   308→  }
+   309→
+   310→  const enabledCount = strategies.filter((s) => s.enabled).length
+   311→
+   312→  return (
+   313→    <div className="space-y-4">
+   314→      {/* 顶部操作栏 */}
+   315→      <Card className="p-3 gap-0 bg-quant-card border-quant">
+   316→        <div className="flex flex-wrap items-center justify-between gap-2">
+   317→          <div className="flex items-center gap-2 text-sm">
+   318→            <span className="font-semibold">策略列表</span>
+   319→            <Badge variant="outline" className="border-quant">
+   320→              {enabledCount}/{strategies.length} 启用
+   321→            </Badge>
+   322→          </div>
+   323→          <div className="flex flex-wrap items-center gap-1">
+   324→            <Button
+   325→              size="sm"
+   326→              variant="outline"
+   327→              className="h-8 border-quant"
+   328→              onClick={() => handleBatch('enable_all')}
+   329→              disabled={loading}
+   330→            >
+   331→              <Power className="size-3.5 text-[var(--quant-down)]" />
+   332→              全部启用
+   333→            </Button>
+   334→            <Button
+   335→              size="sm"
+   336→              variant="outline"
+   337→              className="h-8 border-quant"
+   338→              onClick={() => handleBatch('disable_all')}
+   339→              disabled={loading}
+   340→            >
+   341→              <PowerOff className="size-3.5 text-muted-foreground" />
+   342→              全部停用
+   343→            </Button>
+   344→            <Button
+   345→              size="sm"
+   346→              variant="default"
+   347→              className="h-8"
+   348→              onClick={() => handleBatch('run_all')}
+   349→              disabled={loading}
+   350→            >
+   351→              <Play className="size-3.5" />
+   352→              批量运行
+   353→            </Button>
+   354→            <Button
+   355→              size="sm"
+   356→              variant="ghost"
+   357→              className="h-8"
+   358→              onClick={handleReloadConfig}
+   359→              disabled={loading}
+   360→              title="重新加载 YAML 配置"
+   361→            >
+   362→              <RefreshCw className="size-3.5" />
+   363→              刷新配置
+   364→            </Button>
+   365→          </div>
+   366→        </div>
+   367→      </Card>
+   368→
+   369→      {/* 策略卡片网格 */}
+   370→      {loading ? (
+   371→        <LoadingState variant="cards" rows={5} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3" />
+   372→      ) : (
+   373→        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3">
+   374→          {strategies.map((s) => (
+   375→            <StrategyCard
+   376→              key={s.strategy_id}
+   377→              strategy={{
+   378→                ...s,
+   379→                description: running === s.strategy_id ? '运行中...' : s.description,
+   380→              }}
+   381→              onToggle={handleToggle}
+   382→              onRun={handleRun}
+   383→              onViewConfig={(id) => {
+   384→                const target = strategies.find((x) => x.strategy_id === id)
+   385→                if (target) {
+   386→                  setConfigOpen(target)
+   387→                  setEditMode(false)
+   388→                  setYamlDirty(false)
+   389→                }
+   390→              }}
+   391→              onViewHistory={async (id) => {
+   392→                const target = strategies.find((x) => x.strategy_id === id)
+   393→                if (!target) return
+   394→                setHistoryOpen(target)
+   395→                setRunsLoading(true)
+   396→                setRuns([])
+   397→                try {
+   398→                  const data = await strategyAPI.runs(id)
+   399→                  setRuns(data)
+   400→                } catch (e) {
+   401→                  toast.error('加载历史失败', { description: (e as Error).message })
+   402→                } finally {
+   403→                  setRunsLoading(false)
+   404→                }
+   405→              }}
+   406→              onCopy={handleOpenCopy}
+   407→              onDelete={handleOpenDelete}
+   408→            />
+   409→          ))}
+   410→        </div>
+   411→      )}
+   412→
+   413→      {/* 配置查看/编辑 Dialog */}
+   414→      <Dialog
+   415→        open={!!configOpen}
+   416→        onOpenChange={(v) => {
+   417→          if (!v) {
+   418→            // 关闭时重置编辑模式
+   419→            if (yamlDirty && !confirm('有未保存的修改，确定要关闭吗？')) {
+   420→              return
+   421→            }
+   422→            setConfigOpen(null)
+   423→            setEditMode(false)
+   424→            setYamlDirty(false)
+   425→          }
+   426→        }}
+   427→      >
+   428→        <DialogContent className="sm:max-w-3xl max-h-[88vh] flex flex-col">
+   429→          <DialogHeader>
+   430→            <DialogTitle className="flex items-center gap-2">
+   431→              <FileCode className="size-5 text-quant-primary" />
+   432→              {configOpen?.strategy_emoji} {configOpen?.strategy_name}
+   433→              <Badge variant="outline" className="ml-2 font-mono text-xs border-quant">
+   434→                {configOpen?.strategy_id}
+   435→              </Badge>
+   436→              {editMode && (
+   437→                <Badge variant="secondary" className="ml-1 text-xs gap-1 bg-amber-500/10 text-amber-400 border-amber-500/30">
+   438→                  <Pencil className="size-3" />
+   439→                  编辑中
+   440→                </Badge>
+   441→              )}
+   442→              {yamlDirty && (
+   443→                <span className="text-xs text-amber-400 ml-1">● 未保存</span>
+   444→              )}
+   445→            </DialogTitle>
+   446→            <DialogDescription>
+   447→              板块 {configOpen?.sector_code} · 版本 v{configOpen?.version} · 路径 strategies/strategy_{configOpen?.strategy_id}.yaml
+   448→            </DialogDescription>
+   449→          </DialogHeader>
+   450→
+   451→          {/* 编辑器主体 */}
+   452→          <div className="flex-1 overflow-auto quant-scroll rounded-md border border-quant bg-[#0d0d0d] relative">
+   453→            {editMode ? (
+   454→              <textarea
+   455→                value={yamlDraft}
+   456→                onChange={(e) => {
+   457→                  setYamlDraft(e.target.value)
+   458→                  setYamlDirty(e.target.value !== (configOpen?.yaml_content || ''))
+   459→                }}
+   460→                className="w-full h-full min-h-[480px] p-4 text-xs leading-relaxed font-mono bg-transparent text-foreground/90 outline-none resize-none quant-scroll"
+   461→                spellCheck={false}
+   462→                placeholder="# 编辑策略 YAML..."
+   463→              />
+   464→            ) : (
+   465→              <pre className="text-xs leading-relaxed p-4 text-foreground/90 font-mono whitespace-pre-wrap">
+   466→                {configOpen?.yaml_content || '# 配置内容为空'}
+   467→              </pre>
+   468→            )}
+   469→          </div>
+   470→
+   471→          {/* 底部状态 + 操作 */}
+   472→          <div className="flex items-center justify-between gap-2 text-xs">
+   473→            <div className="flex items-center gap-2 text-muted-foreground">
+   474→              <CheckCircle2 className="size-3.5 text-[var(--quant-down)]" />
+   475→              <span>修改后自动 reload 配置，立即生效</span>
+   476→            </div>
+   477→            <div className="flex items-center gap-2">
+   478→              {editMode ? (
+   479→                <>
+   480→                  <Button
+   481→                    size="sm"
+   482→                    variant="ghost"
+   483→                    className="h-8"
+   484→                    onClick={() => {
+   485→                      setYamlDraft(configOpen?.yaml_content || '')
+   486→                      setEditMode(false)
+   487→                      setYamlDirty(false)
+   488→                    }}
+   489→                    disabled={yamlSaving}
+   490→                  >
+   491→                    <RotateCcw className="size-3.5" />
+   492→                    取消
+   493→                  </Button>
+   494→                  <Button
+   495→                    size="sm"
+   496→                    className="h-8"
+   497→                    onClick={async () => {
+   498→                      if (!configOpen) return
+   499→                      setYamlSaving(true)
+   500→                      try {
+   501→                        const updated = await configAPI.updateStrategyConfig(
+   502→                          configOpen.strategy_id,
+   503→                          yamlDraft,
+   504→                        )
+   505→                        toast.success('YAML 已保存', {
+   506→                          description: `策略 ${configOpen.strategy_id} 配置已重载`,
+   507→                        })
+   508→                        // 更新本地状态
+   509→                        setConfigOpen({
+   510→                          ...configOpen,
+   511→                          yaml_content: updated.yaml_content,
+   512→                          strategy_name: updated.strategy_name,
+   513→                          enabled: updated.enabled,
+   514→                        })
+   515→                        setYamlDirty(false)
+   516→                        setEditMode(false)
+   517→                        await load()
+   518→                      } catch (e) {
+   519→                        const msg = (e as Error).message
+   520→                        toast.error('保存失败', {
+   521→                          description: msg.includes('strategy_id') || msg.includes('YAML')
+   522→                            ? msg
+   523→                            : '请检查 YAML 语法',
+   524→                        })
+   525→                      } finally {
+   526→                        setYamlSaving(false)
+   527→                      }
+   528→                    }}
+   529→                    disabled={yamlSaving || !yamlDirty}
+   530→                  >
+   531→                    {yamlSaving ? (
+   532→                      <RefreshCw className="size-3.5 animate-spin" />
+   533→                    ) : (
+   534→                      <Save className="size-3.5" />
+   535→                    )}
+   536→                    {yamlSaving ? '保存中...' : '保存并热加载'}
+   537→                  </Button>
+   538→                </>
+   539→              ) : (
+   540→                <Button
+   541→                  size="sm"
+   542→                  variant="outline"
+   543→                  className="h-8 border-quant"
+   544→                  onClick={() => {
+   545→                    setYamlDraft(configOpen?.yaml_content || '')
+   546→                    setEditMode(true)
+   547→                    setYamlDirty(false)
+   548→                  }}
+   549→                >
+   550→                  <Pencil className="size-3.5 text-quant-primary" />
+   551→                  编辑配置
+   552→                </Button>
+   553→              )}
+   554→            </div>
+   555→          </div>
+   556→
+   557→          {/* YAML 校验提示 */}
+   558→          {editMode && yamlDirty && (
+   559→            <div className="flex items-start gap-2 text-xs text-amber-400/80 bg-amber-500/5 border border-amber-500/20 rounded p-2">
+   560→              <AlertCircle className="size-3.5 mt-0.5 flex-shrink-0" />
+   561→              <div>
+   562→                保存前请确认：
+   563→                <ol className="list-decimal ml-4 mt-1 space-y-0.5 text-amber-400/60">
+   564→                  <li>YAML 语法正确（缩进一致、引号闭合）</li>
+   565→                  <li>顶层 <code className="text-amber-300">strategy_id</code> 必须与当前策略 <code className="text-amber-300">{configOpen?.strategy_id}</code> 一致</li>
+   566→                  <li>修改权重/阈值后，下次"运行"立即生效</li>
+   567→                </ol>
+   568→              </div>
+   569→            </div>
+   570→          )}
+   571→        </DialogContent>
+   572→      </Dialog>
+   573→
+   574→      {/* 运行历史 Sheet */}
+   575→      <Sheet
+   576→        open={!!historyOpen}
+   577→        onOpenChange={(v) => {
+   578→          if (!v) {
+   579→            setHistoryOpen(null)
+   580→            setRuns([])
+   581→          }
+   582→        }}
+   583→      >
+   584→        <SheetContent className="sm:max-w-2xl w-full flex flex-col gap-0 p-0">
+   585→          <SheetHeader className="p-4 border-b border-quant">
+   586→            <SheetTitle className="flex items-center gap-2">
+   587→              <History className="size-5 text-quant-primary" />
+   588→              {historyOpen?.strategy_emoji} {historyOpen?.strategy_name}
+   589→              <Badge variant="outline" className="ml-2 font-mono text-xs border-quant">
+   590→                {historyOpen?.strategy_id}
+   591→              </Badge>
+   592→            </SheetTitle>
+   593→            <SheetDescription>
+   594→              最近 50 次选股执行记录（来源 DuckDB strategy_runs 表）
+   595→            </SheetDescription>
+   596→          </SheetHeader>
+   597→
+   598→          <div className="flex-1 overflow-auto quant-scroll p-3 space-y-2">
+   599→            {runsLoading ? (
+   600→              <LoadingState rows={5} />
+   601→            ) : runs.length === 0 ? (
+   602→              <div className="text-center py-12 text-xs text-muted-foreground">
+   603→                <History className="size-8 mx-auto mb-2 opacity-30" />
+   604→                暂无执行记录
+   605→                <div className="mt-1 text-[10px]">点击"运行"按钮触发选股后会出现在这里</div>
+   606→              </div>
+   607→            ) : (
+   608→              runs.map((r) => {
+   609→                const isOk = r.status === 'completed' && !r.error_message
+   610→                const dur = r.duration_ms >= 1000
+   611→                  ? `${(r.duration_ms / 1000).toFixed(2)}s`
+   612→                  : `${r.duration_ms}ms`
+   613→                return (
+   614→                  <div
+   615→                    key={r.run_id}
+   616→                    className="rounded-md border border-quant bg-quant-card/50 p-3 hover:bg-quant-card transition-colors"
+   617→                  >
+   618→                    <div className="flex items-start justify-between gap-2">
+   619→                      <div className="flex-1 min-w-0">
+   620→                        <div className="flex items-center gap-2">
+   621→                          {isOk ? (
+   622→                            <CheckCircle className="size-3.5 text-[var(--quant-down)]" />
+   623→                          ) : (
+   624→                            <XCircle className="size-3.5 text-red-400" />
+   625→                          )}
+   626→                          <span className="font-mono text-xs text-foreground/80 truncate">
+   627→                            {r.run_id}
+   628→                          </span>
+   629→                          <Badge variant="outline" className="text-[10px] border-quant">
+   630→                            {r.status}
+   631→                          </Badge>
+   632→                        </div>
+   633→                        <div className="flex items-center gap-3 mt-1.5 text-[10px] text-muted-foreground tabular-nums">
+   634→                          <span className="flex items-center gap-1">
+   635→                            <Clock className="size-3" />
+   636→                            {r.started_at
+   637→                              ? new Date(r.started_at).toLocaleString('zh-CN', {
+   638→                                  month: '2-digit',
+   639→                                  day: '2-digit',
+   640→                                  hour: '2-digit',
+   641→                                  minute: '2-digit',
+   642→                                  second: '2-digit',
+   643→                                })
+   644→                              : '-'}
+   645→                          </span>
+   646→                          <span>耗时 {dur}</span>
+   647→                        </div>
+   648→                      </div>
+   649→                      <div className="flex flex-col items-end gap-1 shrink-0">
+   650→                        <Badge variant="secondary" className="text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20">
+   651→                          选出 {r.result_count}
+   652→                        </Badge>
+   653→                        <span className="text-[10px] text-muted-foreground">
+   654→                          证券池 {r.universe_count}
+   655→                        </span>
+   656→                      </div>
+   657→                    </div>
+   658→                    {r.error_message && (
+   659→                      <div className="mt-2 text-[10px] text-red-400 bg-red-500/5 border border-red-500/20 rounded p-1.5">
+   660→                        {r.error_message}
+   661→                      </div>
+   662→                    )}
+   663→                  </div>
+   664→                )
+   665→              })
+   666→            )}
+   667→          </div>
+   668→
+   669→          <div className="p-3 border-t border-quant text-[10px] text-muted-foreground flex items-center justify-between">
+   670→            <span>共 {runs.length} 条记录</span>
+   671→            <Button
+   672→              size="sm"
+   673→              variant="ghost"
+   674→              className="h-7 text-xs"
+   675→              onClick={async () => {
+   676→                if (!historyOpen) return
+   677→                setRunsLoading(true)
+   678→                try {
+   679→                  const data = await strategyAPI.runs(historyOpen.strategy_id)
+   680→                  setRuns(data)
+   681→                } catch (e) {
+   682→                  toast.error('加载历史失败', { description: (e as Error).message })
+   683→                } finally {
+   684→                  setRunsLoading(false)
+   685→                }
+   686→              }}
+   687→            >
+   688→              <RefreshCw className="size-3" />
+   689→              刷新
+   690→            </Button>
+   691→          </div>
+   692→        </SheetContent>
+   693→      </Sheet>
+   694→
+   695→      {/* ===== 复制策略 Dialog ===== */}
+   696→      <Dialog
+   697→        open={!!copyOpen}
+   698→        onOpenChange={(v) => {
+   699→          if (!v) {
+   700→            if (copySaving) return
+   701→            setCopyOpen(null)
+   702→          }
+   703→        }}
+   704→      >
+   705→        <DialogContent className="sm:max-w-2xl max-h-[90vh] flex flex-col">
+   706→          <DialogHeader>
+   707→            <DialogTitle className="flex items-center gap-2">
+   708→              <Copy className="size-5 text-quant-primary" />
+   709→              复制策略
+   710→            </DialogTitle>
+   711→            <DialogDescription>
+   712→              源策略：{copyOpen?.strategy_emoji} {copyOpen?.strategy_name}
+   713→              <Badge variant="outline" className="ml-2 font-mono text-xs border-quant">
+   714→                {copyOpen?.strategy_id}
+   715→              </Badge>
+   716→              · 修改 ID/名/emoji 后 YAML 自动更新预览
+   717→            </DialogDescription>
+   718→          </DialogHeader>
+   719→
+   720→          <div className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_5rem] gap-3">
+   721→            <div className="space-y-1.5">
+   722→              <Label htmlFor="copy-id" className="text-xs">
+   723→                新策略 ID
+   724→              </Label>
+   725→              <Input
+   726→                id="copy-id"
+   727→                value={copyId}
+   728→                onChange={(e) => setCopyId(e.target.value)}
+   729→                placeholder="如 dbqzt_v2"
+   730→                className={cn(
+   731→                  'h-9 font-mono text-sm focus-visible:border-[var(--quant-primary)] focus-visible:ring-[var(--quant-primary)]/30',
+   732→                  copyIdError && 'border-red-500/60 focus-visible:ring-red-500/20'
+   733→                )}
+   734→                spellCheck={false}
+   735→                autoComplete="off"
+   736→              />
+   737→              <div className={cn('text-[11px]', copyIdError ? 'text-red-400' : 'text-muted-foreground')}>
+   738→                {copyIdError || '英文字母/数字/下划线，2-30 字符'}
+   739→              </div>
+   740→            </div>
+   741→            <div className="space-y-1.5">
+   742→              <Label htmlFor="copy-name" className="text-xs">
+   743→                新策略名
+   744→              </Label>
+   745→              <Input
+   746→                id="copy-name"
+   747→                value={copyName}
+   748→                onChange={(e) => setCopyName(e.target.value)}
+   749→                placeholder="如 打板求涨停 副本"
+   750→                className="h-9 text-sm focus-visible:border-[var(--quant-primary)] focus-visible:ring-[var(--quant-primary)]/30"
+   751→              />
+   752→            </div>
+   753→            <div className="space-y-1.5">
+   754→              <Label htmlFor="copy-emoji" className="text-xs">
+   755→                Emoji
+   756→              </Label>
+   757→              <Input
+   758→                id="copy-emoji"
+   759→                value={copyEmoji}
+   760→                onChange={(e) => setCopyEmoji(e.target.value)}
+   761→                placeholder="📋"
+   762→                className="h-9 text-center text-base focus-visible:border-[var(--quant-primary)] focus-visible:ring-[var(--quant-primary)]/30"
+   763→                maxLength={4}
+   764→              />
+   765→            </div>
+   766→          </div>
+   767→
+   768→          {/* YAML 预览 */}
+   769→          <div className="flex-1 min-h-0 flex flex-col">
+   770→            <div className="flex items-center justify-between mb-1.5">
+   771→              <Label className="text-xs flex items-center gap-1.5">
+   772→                <FileCode className="size-3.5 text-quant-primary" />
+   773→                YAML 预览（已替换 strategy_id / name / emoji / sector.code / sector.name）
+   774→              </Label>
+   775→              <Badge variant="outline" className="text-[10px] font-mono border-quant">
+   776→                {copyYamlPreview.split('\n').length} 行
+   777→              </Badge>
+   778→            </div>
+   779→            <div className="flex-1 overflow-auto quant-scroll rounded-md border border-quant bg-[#0d0d0d] min-h-[260px] max-h-[40vh]">
+   780→              <pre className="text-xs leading-relaxed p-3 text-foreground/90 font-mono whitespace-pre-wrap">
+   781→                {copyYamlPreview || '# YAML 预览'}
+   782→              </pre>
+   783→            </div>
+   784→          </div>
+   785→
+   786→          <DialogFooter className="gap-2 sm:gap-2">
+   787→            <Button
+   788→              variant="ghost"
+   789→              size="sm"
+   790→              className="h-9"
+   791→              onClick={() => setCopyOpen(null)}
+   792→              disabled={copySaving}
+   793→            >
+   794→              取消
+   795→            </Button>
+   796→            <Button
+   797→              size="sm"
+   798→              className="h-9 bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25 hover:text-amber-300"
+   799→              onClick={handleConfirmCopy}
+   800→              disabled={copySaving || !!copyIdError || !copyId.trim()}
+   801→            >
+   802→              {copySaving ? (
+   803→                <RefreshCw className="size-3.5 animate-spin" />
+   804→              ) : (
+   805→                <Copy className="size-3.5" />
+   806→              )}
+   807→              {copySaving ? '复制中...' : '确认复制'}
+   808→            </Button>
+   809→          </DialogFooter>
+   810→        </DialogContent>
+   811→      </Dialog>
+   812→
+   813→      {/* ===== 删除策略 Dialog ===== */}
+   814→      <Dialog
+   815→        open={!!deleteOpen}
+   816→        onOpenChange={(v) => {
+   817→          if (!v) {
+   818→            if (deleteSaving) return
+   819→            setDeleteOpen(null)
+   820→            setDeleteConfirmId('')
+   821→          }
+   822→        }}
+   823→      >
+   824→        <DialogContent className="sm:max-w-md">
+   825→          <DialogHeader>
+   826→            <DialogTitle className="flex items-center gap-2 text-red-400">
+   827→              <AlertTriangle className="size-5" />
+   828→              确认删除策略
+   829→            </DialogTitle>
+   830→            <DialogDescription>
+   831→              即将删除：{deleteOpen?.strategy_emoji} {deleteOpen?.strategy_name}
+   832→              <Badge variant="outline" className="ml-2 font-mono text-xs border-quant">
+   833→                {deleteOpen?.strategy_id}
+   834→              </Badge>
+   835→            </DialogDescription>
+   836→          </DialogHeader>
+   837→
+   838→          <div className="flex items-start gap-2 text-xs text-red-400/90 bg-red-500/5 border border-red-500/25 rounded-md p-3">
+   839→            <AlertTriangle className="size-3.5 mt-0.5 shrink-0" />
+   840→            <div>
+   841→              <div className="font-medium">此操作不可恢复</div>
+   842→              <div className="mt-1 text-red-400/70">
+   843→                将删除 YAML 文件 <code className="font-mono">strategies/strategy_{deleteOpen?.strategy_id}.yaml</code>。
+   844→                启用中的策略无法删除，请先禁用。
+   845→              </div>
+   846→            </div>
+   847→          </div>
+   848→
+   849→          <div className="space-y-1.5">
+   850→            <Label htmlFor="delete-confirm" className="text-xs">
+   851→              请输入策略 ID <code className="font-mono text-red-400">{deleteOpen?.strategy_id}</code> 以确认
+   852→            </Label>
+   853→            <Input
+   854→              id="delete-confirm"
+   855→              value={deleteConfirmId}
+   856→              onChange={(e) => setDeleteConfirmId(e.target.value)}
+   857→              placeholder={deleteOpen?.strategy_id}
+   858→              className={cn(
+   859→                'h-9 font-mono text-sm',
+   860→                deleteConfirmId.trim() && !deleteIdMatch && 'border-red-500/60',
+   861→                deleteIdMatch && 'border-[var(--quant-up)]/60 focus-visible:ring-[var(--quant-up)]/20'
+   862→              )}
+   863→              spellCheck={false}
+   864→              autoComplete="off"
+   865→            />
+   866→          </div>
+   867→
+   868→          <DialogFooter className="gap-2 sm:gap-2">
+   869→            <Button
+   870→              variant="ghost"
+   871→              size="sm"
+   872→              className="h-9"
+   873→              onClick={() => {
+   874→                setDeleteOpen(null)
+   875→                setDeleteConfirmId('')
+   876→              }}
+   877→              disabled={deleteSaving}
+   878→            >
+   879→              取消
+   880→            </Button>
+   881→            <Button
+   882→              size="sm"
+   883→              className="h-9 bg-red-500/15 text-red-400 border border-red-500/40 hover:bg-red-500/25 hover:text-red-300"
+   884→              onClick={handleConfirmDelete}
+   885→              disabled={deleteSaving || !deleteIdMatch}
+   886→            >
+   887→              {deleteSaving ? (
+   888→                <RefreshCw className="size-3.5 animate-spin" />
+   889→              ) : (
+   890→                <Trash2 className="size-3.5" />
+   891→              )}
+   892→              {deleteSaving ? '删除中...' : '确认删除'}
+   893→            </Button>
+   894→          </DialogFooter>
+   895→        </DialogContent>
+   896→      </Dialog>
+   897→    </div>
+   898→  )
+   899→}
+   900→

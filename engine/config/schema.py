@@ -65,6 +65,10 @@ class PathsConfig:
     excel_output: str = "./data/excel"
     logs: str = "./data/logs"
     strategies_dir: str = "./strategies"
+    # bug #15: 原未显式声明，走默认值。现补齐 3 个 YAML 配置路径
+    monitor_rules: str = "./config/monitor_rules.yaml"
+    match_strategies: str = "./config/match_strategies.yaml"
+    channels: str = "./config/channels.yaml"
 
 
 @dataclass

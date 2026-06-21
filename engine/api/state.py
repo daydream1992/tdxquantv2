@@ -130,6 +130,18 @@ class EngineState:
 
     @classmethod
     def _reset_singleton(cls) -> None:
+        """重置单例（仅测试用）。
+
+        bug #13: 生产环境误调会丢全部内存状态（信号计数/订阅缓存清零）。
+        加 DEBUG 环境变量检查，非测试环境调用直接抛 RuntimeError。
+        """
+        import os
+
+        if os.getenv("DEBUG", "").lower() not in ("1", "true", "yes"):
+            raise RuntimeError(
+                "_reset_singleton 仅限测试环境调用（需 DEBUG=1）。"
+                "生产环境调用会清空全部内存状态，已拦截。"
+            )
         with cls._instance_lock:
             cls._instance = None
 

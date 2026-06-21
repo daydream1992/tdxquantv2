@@ -24,6 +24,10 @@ paths:
   logs: ./data/logs
   # 策略 YAML 目录（热加载扫描）
   strategies_dir: ./strategies
+  # 监控规则 / 匹配策略 / 通道配置 YAML（bug #15：原未显式声明，走默认值）
+  monitor_rules: ./config/monitor_rules.yaml
+  match_strategies: ./config/match_strategies.yaml
+  channels: ./config/channels.yaml
 
 tqcenter:
   # Real 模式下 tq.initialize(__file__) 入参，传 __file__ 字符串占位

@@ -280,6 +280,54 @@ async def list_subscriptions(
 
 
 # ============================================================================
+# P1: 健康度监控 (R10-5)
+# ============================================================================
+
+
+@router.get(
+    "/health",
+    summary="引擎健康度（P1）",
+)
+async def get_health(
+    cfg: Any = Depends(get_config),
+    state: Any = Depends(get_state),
+) -> dict[str, Any]:
+    """返回引擎健康度指标。
+
+    包含:
+    - subscribe_alive: subscribe_hq 是否存活
+    - quote_lag_seconds: 最近一次行情距现在的秒数 (-1=从未收到)
+    - eval_count: 求值次数
+    - error_count: 错误次数
+    - last_error: 最近一次错误信息
+    - debounce_size: 防抖表大小
+    - queue_size: 聚合推送队列大小
+    - uptime_seconds: 运行时长
+    - status: healthy / degraded / unhealthy (基于 lag + error_count 判定)
+    """
+    from engine.monitor.engine import MonitorEngine
+
+    eng = MonitorEngine()
+    health = eng.health()
+
+    # 补充聚合推送队列状态
+    health["queue_size"] = len(getattr(eng, "_agg_queue", {}))
+    health["uptime_seconds"] = state.uptime_seconds()
+
+    # 综合状态判定
+    lag = health.get("quote_lag_seconds", -1)
+    err_count = health.get("error_count", 0)
+    if lag < 0 or lag > 120:
+        status = "unhealthy"
+    elif err_count > 10 or lag > 60:
+        status = "degraded"
+    else:
+        status = "healthy"
+    health["status"] = status
+    return health
+
+
+# ============================================================================
 # 内部
 # ============================================================================
 

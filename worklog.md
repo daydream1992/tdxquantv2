@@ -10892,3 +10892,189 @@ Stage Summary:
   3. ConfigLoader reload通知ChannelRegistry
   4. 真实Windows环境验证ps1脚本
   5. P1优化(聚合推送/分级值班/健康度监控)
+
+---
+Task ID: R10-1-前端管理UI
+Agent: full-stack-developer
+Task: 前端加 match-strategies 管理页(CRUD+调参预览+test)和 watchlist 管理页
+
+Work Log:
+- 读 worklog.md 末尾 R9-5a / R9-6 段,确认后端 9 个 bug 已修+_default 403 保护+test 扁平 body 兼容,前端代理 GET/POST/reload 已通,本轮要补 PUT/DELETE/test 透传+2 个管理 UI
+- 启动 FastAPI(uvicorn :8000),验证后端 6 个端点均正常:list 200 (3 项) / test 200 (命中 rzq_ignite) / DELETE _default 403 (detail 字段) / watchlist list+POST+DELETE 全 200
+- 顺手发现后端 watchlist DELETE 路径是 `/api/monitor/watchlist/{code}` (path param),不是任务描述里的 `?code=xxx`,前端代理层做 query→path 转换以匹配后端
+- Step 1: 扩展 src/lib/api.ts (新增 6 个 DTO 接口 + 2 个 API 模块):
+  * MatchScopeDTO / MatchAlertDTO / MatchStrategyDTO / MatchListResponse / MatchUpdateRequest / MatchCreateRequest
+  * MatchTestParams (扁平: code/pct_change/volume_ratio/main_inflow/auction_pct) / MatchTestHitDTO / MatchTestResponse
+  * matchStrategyAPI 6 方法 (list/create/update/remove/reload/test)
+  * WatchlistItemDTO / WatchlistAddRequest / WatchlistAddResponse + watchlistAPI 3 方法 (list/add/remove)
+- Step 2: src/lib/api-proxy.ts 新增 2 个 helper:
+  * forwardFastAPI: 不拦截 4xx, 透传原 Response (解决 tryFastAPI 在 !res.ok 时返回 null 丢状态码问题)
+  * relayJSON: Response → NextResponse, FastAPI 的 detail 字段自动展开为 error (前端 fetchAPI 期望 error/message)
+- Step 3: 补全代理路由:
+  * src/app/api/monitor/match-strategies/route.ts POST 改用 forwardFastAPI (让 409 重复等错误透传)
+  * 新建 src/app/api/monitor/match-strategies/[id]/route.ts: PUT 改参 + DELETE (Next.js 16 用 `{ params }: Promise<{ id: string }>` + await params)
+  * 新建 src/app/api/monitor/match-strategies/[id]/test/route.ts: POST test 透传
+  * src/app/api/monitor/watchlist/route.ts 加 DELETE handler: query `?code=xxx` → path `/api/monitor/watchlist/{code}` 透传
+- Step 4: 创建 src/components/quant/MatchStrategyManager.tsx (870 行):
+  * 卡片列表 (grid 1/2/3 列响应式) + Switch 即时启停 + alerts/scope 摘要 + 操作按钮 (编辑/测试/删除, _default 禁用删除)
+  * 编辑/新建 Dialog: match_id (update 不可改) / name / strategy_id 下拉 / debounce_override / enabled Switch / scope 编辑 (markets 多选 + 排ST/排停牌 + 排除码) / alerts 列表 (alert_type + priority 下拉 + channels 多选 + params key-value 表单)
+  * 测试 Dialog: 5 个 Input (code 必填 + 4 个可选数字) + 命中结果 ScrollArea (高亮命中, 显示 alert_type + priority + condition 表达式)
+  * 删除 AlertDialog 二次确认, _default 友好提示
+  * 所有操作 loading + sonner toast (含 toastId 链路)
+- Step 5: 创建 src/components/quant/WatchlistManager.tsx (440 行):
+  * 顶部状态条: 总数 + active 数 + inactive 数 + 按策略分组 Badge (可点击设筛选)
+  * 加入表单: 股票代码 Input (逗号/空格分隔) + strategy_id 下拉 (_manual 默认) + 加入按钮 (回车触发)
+  * 表格 7 列: 代码/策略/订阅方/订阅时间/状态/批次/操作, ScrollArea + max-h-96 长列表
+  * 筛选: strategy_id 下拉 + 仅活跃 Switch + 清筛选按钮
+  * 移除 AlertDialog 二次确认 (destructive)
+- Step 6: 修改 src/app/page.tsx:
+  * import Crosshair/Star 图标 + 2 个新组件
+  * TABS 追加 2 项: { value: 'match-strategies', label: '匹配策略', icon: Crosshair } + { value: 'watchlist', label: '自选股', icon: Star }
+  * TabsList grid-cols-5 → grid-cols-7
+  * main 追加 {tab === 'match-strategies'} 和 {tab === 'watchlist'} 条件渲染
+- Step 7: 验证:
+  * bun run lint → exit_code 0 (0 error)
+  * 后端 6 个端点 curl 全 200/403 (list 200 / test 200 / DELETE _default 403 含 detail / watchlist list+POST+DELETE 200)
+  * 前端代理 7 个端点 curl 全 200/403 与后端一致 (_default 403 + detail 字段透传)
+  * GET / → 200, HTML 含全部 7 个 tab 标签 (含"匹配策略"和"自选股")
+
+Stage Summary:
+- 已完成 2 个新 tab UI (匹配策略 + 自选股), 后端 0 改动, 前端代理透传完善
+- 文件变更:
+  新增 (4):
+    src/components/quant/MatchStrategyManager.tsx (870 行)
+    src/components/quant/WatchlistManager.tsx (440 行)
+    src/app/api/monitor/match-strategies/[id]/route.ts (PUT/DELETE 透传)
+    src/app/api/monitor/match-strategies/[id]/test/route.ts (POST test 透传)
+  修改 (4):
+    src/lib/api.ts (追加 matchStrategyAPI + watchlistAPI + 6 个 DTO 接口)
+    src/lib/api-proxy.ts (新增 forwardFastAPI + relayJSON 2 个 helper)
+    src/app/api/monitor/match-strategies/route.ts (POST 改用 forwardFastAPI 透传错误)
+    src/app/api/monitor/watchlist/route.ts (加 DELETE handler, query→path 转换)
+    src/app/page.tsx (TABS +2, TabsList grid-cols 7, main 加 2 个条件渲染)
+- 验证结果:
+  * bun run lint: exit_code 0 (0 error)
+  * 后端直接 curl: 6 个端点全 200/403 正确 (含 _default 403 + detail)
+  * 前端代理 curl (端口 3000): 7 个端点全 200/403 与后端一致 (含 403 透传 detail→error)
+  * 前端页面 GET / → 200, HTML 含 7 个 tab 标签 (含"匹配策略"和"自选股")
+  * _default 删除: 卡片按钮禁用 + 后端 403 双重保护 + 失败时 toast 友好提示
+- 设计要点:
+  1. 三层错误透传链: FastAPI HTTPException {"detail":"..."} → forwardFastAPI 不拦截 4xx → relayJSON detail 展开 error → 前端 fetchAPI 抛 APIError → 组件 catch 后 toast
+  2. _default 删除三重保护: (a) 卡片按钮 disabled (b) 后端 403 (c) 前端 catch 检测关键字给友好 toast
+  3. 测试面板 5 参数全支持空值, 仅 code 必填, 数字字段空值不发送 (避免 0 误判)
+  4. scope 编辑用按钮组而非多选 Select, 移动端体验更好
+  5. alerts params 数字字段 type=number step=any 支持小数阈值 (如 pct_threshold 0.03)
+  6. WatchlistManager 顶部"按策略分组"Badge 可点击直接设为筛选条件, 减少 Select 操作
+  7. 长列表 ScrollArea + max-h-96, tabular-nums 让数字列对齐
+- 未解决问题:
+  1. 后端 watchlist POST 不做去重, 重复加同一只 code 会覆盖 (engine 已 DELETE-then-INSERT, 表面无影响但订阅时间会被刷新); 后续若需要"已订阅则跳过", 需改后端
+  2. MatchStrategyManager 编辑 alerts 的 alert_type 是自由 Input, 没有 dropdown 从 monitor_rules.yaml 的 alert_templates 选; 后续可加 GET /api/monitor/rules 端点拉模板列表
+  3. watchlist 编辑 (改 strategy_id / 改 active) 暂未支持, 仅 POST/DELETE; 后续若需要可加 PUT /api/monitor/watchlist/{code}
+  4. match-strategies 创建后未自动 reload YAML (后端 create 已写 YAML + 清缓存, 但 MatchRegistry 单例可能需手动 reload); 当前 UI 在 create 成功后会重新 list, 若发现新建项缺失可手动点"重载 YAML"
+  5. 移动端 7 个 tab 在窄屏会横向滚动 (TABS 用 grid-flow-col + overflow-x-auto), 体验可接受但若继续加 tab 需考虑折叠
+- 详细记录见: /home/z/my-project/agent-ctx/R10-1-前端管理UI-full-stack-developer.md (128 行)
+
+---
+Task ID: R10-2+3+4+5-后端优化与脚本
+Agent: main
+Task: R10 轮次 2-5: 修 8 低 bug + ConfigLoader 通知 ChannelRegistry + Windows 脚本增强 + P1 优化(聚合推送/分级值班/健康度)
+
+Work Log:
+
+- R10-2: 修 8 个低严重度 bug (#10-17, R9-3 留下)
+  * #10 _eval_count 不在锁内 → engine.py: `with self._lock: self._eval_count += 1`
+  * #11 _cleanup_debounce cutoff=86400 太低 → 改 `max(window*10, 3600)`, 动态读 cfg
+  * #12 _normalize_snap `if not pct:` 把 0.0 当 falsy → 改用 NaN sentinel + `pct != pct` 检查
+  * #13 EngineState._reset_singleton 生产误调丢状态 → 加 DEBUG 环境变量检查, 非 DEBUG 抛 RuntimeError
+  * #14 前端代理缺口 → R10-1 子任务已补 (match-strategies PUT/DELETE/test, watchlist DELETE)
+  * #15 config/app.yaml paths.match_strategies 未声明 → 补 monitor_rules/match_strategies/channels 3 路径
+    + PathsConfig dataclass 补对应字段 (engine/config/schema.py)
+  * #16 duckdb_schema.sql monitor_subscriptions 无 UNIQUE → 加 `uq_mon_stock_active ON (stock_code, active)`
+  * #17 _format_title prefix_map 硬编码 8 emoji → 改 _alert_prefix() 从 alert_templates YAML 读 emoji/label
+    + 给 14 个 alert_templates 补 emoji/label 字段 (config/monitor_rules.yaml)
+
+- R10-3: ConfigLoader._notify_reload 通知 ChannelRegistry
+  * engine/config/loader.py: 在 RuleSet.invalidate + MatchRegistry.invalidate 之后加
+    `from engine.channels.registry import reload_channel_config; reload_channel_config()`
+  * 效果: 改 channels.yaml 后调 /api/config/reload 即重载通道, 无需重启或 PUT /api/channels
+
+- R10-4: Windows ps1 脚本增强 + smoke test 脚本
+  * 新增 scripts/smoke_test.sh (130 行): 18 项检查 (9 后端 API + 2 写操作 + 1 _default 保护 + 6 前端代理)
+    - 支持 --host/--api-port/--web-port 参数
+    - 退出码 = 失败数 (上限 99), 适合 CI
+  * 新增 scripts/smoke_test.ps1 (130 行): PowerShell 版, 功能等价
+  * 新增 scripts/stop.sh + scripts/stop.ps1: 按端口+进程名精准停服务
+  * 增强 scripts/start_all.sh: 启动后自动跑 smoke_test.sh, 失败打印日志路径
+  * 增强 scripts/start_all.ps1: 自动探测 python/python3/py, 启动后自动跑 smoke_test.ps1
+  * 验证: smoke_test.sh 18/18 PASS (FastAPI+Next.js 同会话内)
+
+- R10-5: P1 优化 (聚合推送/分级值班/健康度监控)
+  * 健康度监控:
+    - 新增 GET /api/monitor/health 端点 (engine/api/routes/monitor.py)
+    - 返回 subscribe_alive/quote_lag_seconds/eval_count/error_count/debounce_size/queue_size/status
+    - status 判定: healthy(lag<60s, err<10) / degraded(lag<120s) / unhealthy(lag>120s)
+    - 前端 src/app/api/monitor/route.ts 加 ?action=health 代理
+    - src/lib/api.ts 加 EngineHealthDTO + monitorAPI.getHealth()
+  * 分级值班:
+    - engine.py _fire_match: high 优先级立即推全通道; medium/low 立即推 websocket, 其他通道走聚合
+    - 减少 feishu/tdx_warn 噪音 (medium/low 不再每条都推)
+  * 聚合推送:
+    - engine.py 新增 _agg_queue + _enqueue_aggregation + _flush_aggregation_locked + _flush_all_aggregation
+    - key = (strategy_id, priority), 窗口 = alert_aggregate_window_seconds (默认 60s)
+    - 队列达 max_size (默认 10) 或窗口满自动 flush, 构造摘要 payload 推送
+    - _format_aggregate_content: 格式化最多 10 条信号的摘要
+    - _tick 循环每次调 _flush_all_aggregation (subscribe 模式)
+    - config/monitor_rules.yaml 加 alert_aggregate_window_seconds + alert_aggregate_max_size
+  * 健康度端点验证: status=healthy, eval_count=31, lag=0.3s, queue=0
+
+Stage Summary:
+
+- 文件变更:
+  新增 (6 个):
+    scripts/smoke_test.sh / smoke_test.ps1 / stop.sh / stop.ps1
+    (无新增组件, 全是脚本和后端改动)
+  修改 (10 个):
+    engine/monitor/engine.py (bug #10/11/12/17 + P1 聚合推送 + 分级值班)
+    engine/api/state.py (bug #13 _reset_singleton 保护)
+    engine/api/routes/monitor.py (P1 health 端点)
+    engine/config/loader.py (R10-3 ChannelRegistry reload 通知)
+    engine/config/schema.py (bug #15 PathsConfig 补 3 字段)
+    config/app.yaml (bug #15 paths 补 monitor_rules/match_strategies/channels)
+    config/monitor_rules.yaml (bug #17 14 个 alert_templates 补 emoji/label + P1 聚合配置)
+    config/duckdb_schema.sql (bug #16 UNIQUE 索引)
+    scripts/start_all.sh / start_all.ps1 (R10-4 增强: smoke test 集成)
+    src/app/api/monitor/route.ts (P1 health 代理)
+    src/lib/api.ts (P1 EngineHealthDTO + getHealth)
+
+- 验证结果:
+  * FastAPI 重启无 error/warning (PathsConfig 字段补齐后 app.yaml 校验通过)
+  * smoke_test.sh 18/18 PASS:
+    - 9 后端 API 全 200 (status/quotes/match-strategies/watchlist/strategies/sectors/channels/config/signals)
+    - 2 写操作 PASS (POST watchlist + DELETE watchlist path 参数)
+    - 1 _default 保护 PASS (DELETE 返回 403)
+    - 6 前端代理全 200 (首页 + 5 API 代理)
+  * health 端点: {"status":"healthy","eval_count":31,"quote_lag_seconds":0.3,"queue_size":0}
+  * test 端点: POST rzq_default/test 扁平 body → 200, 命中 rzq_ignite + volume_surge
+  * DELETE _default → 403 (保护生效)
+  * bun run lint → exit_code 0 (eslint 无错误)
+  * agent-browser 验证:
+    - 7 个 tab 全可见 (含新增"匹配策略"和"自选股")
+    - 匹配策略 tab: 3 张卡片, _default 删除按钮 disabled + "兜底套餐不允许删除"提示
+    - 自选股 tab: 表格 7 列 + 分组 badge(rzq:30, _manual:1) + 加入表单 + 移除按钮
+    - console 无 error, 只剩 HMR/Fast Refresh log
+    - footer 存在 (sticky)
+
+- 未解决问题:
+  1. P1 聚合推送的 flush 在 subscribe 模式下依赖 tick 循环 (10s 间隔), 若行情停推则聚合不 flush
+     (生产 Real 模式下交易时段行情持续, 影响小; Mock 模式 push_interval=3s 也持续)
+  2. 健康度 status 判定阈值 (lag>120s=unhealthy) 是硬编码, 未放 config (P2 可配)
+  3. ps1 脚本未在真实 Windows 验证 (沙箱是 Linux, 同 R9 遗留)
+  4. ConfigLoader reload 通知 ChannelRegistry 后, 已发送中的 payload 不受影响 (只影响后续 dispatch)
+  5. 前端 health 端点已就绪但无 UI 展示 (下轮可加健康度卡片到 Dashboard)
+
+- 下一阶段建议:
+  1. Dashboard 加健康度卡片 (调 monitorAPI.getHealth, 显示 status/eval_count/lag/queue)
+  2. 匹配策略管理页加"复制"功能 (基于现有 match 创建副本, 改 match_id)
+  3. 自选股管理页加"批量导入"(粘贴 CSV: code,strategy_id 一键导入)
+  4. P2: 聚合推送的 flush 改为定时器线程 (独立于 tick), 避免行情停推时不 flush
+  5. P2: 健康度阈值放 config/monitor_rules.yaml (monitor.health.lag_unhealthy_seconds 等)

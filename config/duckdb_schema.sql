@@ -109,6 +109,10 @@ CREATE TABLE IF NOT EXISTS monitor_subscriptions (
 
 CREATE INDEX IF NOT EXISTS idx_mon_stock      ON monitor_subscriptions(stock_code, active);
 CREATE INDEX IF NOT EXISTS idx_mon_strategy   ON monitor_subscriptions(strategy_id, active);
+-- bug #16: 原 schema 无 UNIQUE 约束, 配合 SELECT 去重 workaround
+-- 加 unique 索引 (stock_code, active=true 时唯一), 避免重复 INSERT
+-- 注: DuckDB 不支持 partial index, 这里用 (stock_code, active) 联合 unique
+CREATE UNIQUE INDEX IF NOT EXISTS uq_mon_stock_active ON monitor_subscriptions(stock_code, active);
 
 -- 7. 配置变更审计（YAML 热加载留痕）
 CREATE SEQUENCE IF NOT EXISTS seq_config_changes_id;

@@ -15,6 +15,10 @@ monitor:
   poll_interval_seconds: 10
   # 同股票同类型预警防抖（秒），避免短时间内重复推送
   alert_debounce_seconds: 30
+  # P1: 聚合推送窗口（秒），medium/low 优先级信号在此窗口内聚合为一条摘要推送
+  alert_aggregate_window_seconds: 60
+  # P1: 聚合队列最大长度，达到立即 flush（不等窗口结束）
+  alert_aggregate_max_size: 10
   # 监控时段（仅在这些时段内触发预警，避开集合竞价前/收盘后）
   trading_hours:
     morning_start: "09:25"        # 集合竞价开始
@@ -34,6 +38,8 @@ alert_templates:
   limit_up:
     condition: "pct_change > {pct_threshold}"
     alert_type: limit_up
+    emoji: 🚀
+    label: 涨停
     channels: [tdx_warn, websocket, feishu]
     priority: high
     description: 触及涨停价（含创业板/科创板 19.5%、北交所 29.5%、主板 9.8%）
@@ -44,6 +50,8 @@ alert_templates:
   drop_alert:
     condition: "pct_change < -{pct_threshold}"
     alert_type: drop_alert
+    emoji: ⚠️
+    label: 大跌
     channels: [websocket, feishu]
     priority: medium
     description: 跌幅超过 5%（炸板/破位风险）
@@ -54,6 +62,8 @@ alert_templates:
   volume_surge:
     condition: "volume_ratio > {vol_ratio_threshold}"
     alert_type: volume_surge
+    emoji: 📈
+    label: 放量
     channels: [websocket]
     priority: low
     description: 量比放大超过 3 倍
@@ -64,6 +74,8 @@ alert_templates:
   auction_surge:
     condition: "auction_pct > {pct_threshold}"
     alert_type: auction_surge
+    emoji: 🔨
+    label: 竞价异动
     channels: [websocket]
     priority: medium
     description: 开盘竞价涨幅 > 3%（次日确认关键信号）
@@ -74,6 +86,8 @@ alert_templates:
   trend_accelerate:
     condition: "pct_change > {pct_threshold}"
     alert_type: trend_accelerate
+    emoji: 🚀
+    label: 趋势加速
     channels: [tdx_warn, websocket]
     priority: high
     description: 趋势加速上涨
@@ -84,6 +98,8 @@ alert_templates:
   trend_break:
     condition: "pct_change < -{pct_threshold}"
     alert_type: trend_break
+    emoji: 💔
+    label: 趋势破位
     channels: [websocket, feishu]
     priority: high
     description: 趋势破位下跌
@@ -94,6 +110,8 @@ alert_templates:
   rebound_signal:
     condition: "pct_change > {pct_threshold}"
     alert_type: rebound_signal
+    emoji: 🔄
+    label: 反弹信号
     channels: [tdx_warn, websocket, feishu]
     priority: high
     description: 错杀反弹启动
@@ -104,6 +122,8 @@ alert_templates:
   continue_drop:
     condition: "pct_change < -{pct_threshold}"
     alert_type: continue_drop
+    emoji: 📉
+    label: 持续下跌
     channels: [websocket, feishu]
     priority: high
     description: 错杀变深跌，止损信号
@@ -114,6 +134,8 @@ alert_templates:
   big_buy_support:
     condition: "main_inflow > {inflow_threshold}"
     alert_type: big_buy_support
+    emoji: 💪
+    label: 大单承接
     channels: [websocket]
     priority: medium
     description: 大单承接（主力净流入 > 1000 万）
@@ -124,6 +146,8 @@ alert_templates:
   rzq_ignite:
     condition: "pct_change > {pct_threshold}"
     alert_type: rzq_ignite
+    emoji: ⚡
+    label: 弱转强点火
     channels: [tdx_warn, websocket, feishu]
     priority: high
     description: 弱转强点火成功
@@ -134,6 +158,8 @@ alert_templates:
   rzq_fail:
     condition: "pct_change < -{pct_threshold}"
     alert_type: rzq_fail
+    emoji: 💔
+    label: 弱转强失败
     channels: [websocket, feishu]
     priority: high
     description: 弱转强点火失败，止损
@@ -144,6 +170,8 @@ alert_templates:
   qzrfc_rebound:
     condition: "pct_change > {pct_threshold}"
     alert_type: qzrfc_rebound
+    emoji: 🔄
+    label: 强转弱反抽
     channels: [tdx_warn, websocket, feishu]
     priority: high
     description: 强转弱反抽启动
@@ -154,6 +182,8 @@ alert_templates:
   qzrfc_fail:
     condition: "pct_change < -{pct_threshold}"
     alert_type: qzrfc_fail
+    emoji: ⚠️
+    label: 反抽失败
     channels: [websocket, feishu]
     priority: high
     description: 反抽失败，止损
@@ -164,6 +194,8 @@ alert_templates:
   main_self_rescue:
     condition: "main_inflow > {inflow_threshold}"
     alert_type: main_self_rescue
+    emoji: 🆘
+    label: 主力自救
     channels: [websocket]
     priority: medium
     description: 主力自救资金入场

@@ -295,6 +295,14 @@ class ConfigLoader:
         except Exception as exc:  # noqa: BLE001
             # Step 8 前模块不存在，可忽略
             logger.debug("MatchRegistry.invalidate 失败（可忽略）: %s", exc)
+        # ChannelRegistry 重载（Task R10-3：改 channels.yaml 后 reload 即生效，
+        # 无需重启或单独调 PUT /api/channels）
+        try:
+            from engine.channels.registry import reload_channel_config
+
+            reload_channel_config()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("reload_channel_config 失败（可忽略）: %s", exc)
 
     def _watch_loop(self) -> None:
         """轮询 mtime，发现变化则触发 ``reload()`` 与监听回调。"""
