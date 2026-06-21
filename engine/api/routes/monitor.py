@@ -303,7 +303,11 @@ async def get_health(
     - debounce_size: 防抖表大小
     - queue_size: 聚合推送队列大小
     - uptime_seconds: 运行时长
-    - status: healthy / degraded / unhealthy (基于 lag + error_count 判定)
+    - status: healthy / degraded / unhealthy
+      (基于 lag + error_count 判定, 阈值来自 monitor.health.*, 缺省 60/120/10)
+
+    P2-2: 阈值改为读 config/monitor_rules.yaml 的 monitor.health 段,
+          配置缺失时回退默认值 (60/120/10) 保证向后兼容。
     """
     from engine.monitor.engine import MonitorEngine
 
@@ -314,16 +318,27 @@ async def get_health(
     health["queue_size"] = len(getattr(eng, "_agg_queue", {}))
     health["uptime_seconds"] = state.uptime_seconds()
 
+    # P2-2: 健康度阈值从 config 读（缺省 60/120/10 保证向后兼容）
+    lag_healthy = float(cfg.get("monitor.health.lag_healthy_seconds", 60))
+    lag_degraded = float(cfg.get("monitor.health.lag_degraded_seconds", 120))
+    err_healthy = int(cfg.get("monitor.health.error_healthy_threshold", 10))
+
     # 综合状态判定
     lag = health.get("quote_lag_seconds", -1)
     err_count = health.get("error_count", 0)
-    if lag < 0 or lag > 120:
+    if lag < 0 or lag > lag_degraded:
         status = "unhealthy"
-    elif err_count > 10 or lag > 60:
+    elif err_count > err_healthy or lag > lag_healthy:
         status = "degraded"
     else:
         status = "healthy"
     health["status"] = status
+    # 透出当前生效的阈值（便于前端展示 + 调参验证）
+    health["thresholds"] = {
+        "lag_healthy_seconds": lag_healthy,
+        "lag_degraded_seconds": lag_degraded,
+        "error_healthy_threshold": err_healthy,
+    }
     return health
 
 

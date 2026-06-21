@@ -23,6 +23,7 @@ import {
   WifiOff,
 } from 'lucide-react'
 import { StatCard } from './StatCard'
+import { EngineHealthCard } from './EngineHealthCard'
 import { StockPrice, PctBadge } from './StockPrice'
 import { SignalToast } from './SignalToast'
 import { StrategyCard } from './StrategyCard'
@@ -128,6 +129,9 @@ export function Dashboard({ onNavigateToBacktest }: DashboardProps) {
           spark={[0.0, 0.05, 0.0, 0.1, 0.05, 0.0, 0.15, 0.1, 0.05, 0.2, 0.1, 0.15]}
         />
       </div>
+
+      {/* 引擎健康度卡片 (R11-1) */}
+      <EngineHealthCard />
 
       {/* 中部：行情 + 信号流 */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">

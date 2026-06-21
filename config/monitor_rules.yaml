@@ -16,6 +16,7 @@ monitor:
   # 同股票同类型预警防抖（秒），避免短时间内重复推送
   alert_debounce_seconds: 30
   # P1: 聚合推送窗口（秒），medium/low 优先级信号在此窗口内聚合为一条摘要推送
+  #     也是 P2-1 独立 flush 线程的循环间隔
   alert_aggregate_window_seconds: 60
   # P1: 聚合队列最大长度，达到立即 flush（不等窗口结束）
   alert_aggregate_max_size: 10
@@ -25,6 +26,14 @@ monitor:
     morning_end: "11:30"
     afternoon_start: "13:00"
     afternoon_end: "15:00"
+  # P2-2: 健康度判定阈值（GET /api/monitor/health 用）
+  # status 判定: lag < lag_healthy_seconds 且 errors < error_healthy_threshold => healthy
+  #              lag < lag_degraded_seconds => degraded, 否则 unhealthy
+  # 配置缺失时回退默认值 (60/120/10)，保证向后兼容
+  health:
+    lag_healthy_seconds: 60        # lag < 此值 且 errors < threshold => healthy
+    lag_degraded_seconds: 120      # lag < 此值 => degraded, 否则 unhealthy
+    error_healthy_threshold: 10    # 错误数 < 此值才算 healthy
 
 # ---- 通用预警条件模板 ----
 # 策略 YAML 可通过 alert_type 引用本模板，也可在 monitor.alert_conditions 内联覆盖

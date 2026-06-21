@@ -47,6 +47,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Textarea } from '@/components/ui/textarea'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -58,6 +59,14 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import {
   Star,
   RefreshCw,
   Plus,
@@ -67,6 +76,10 @@ import {
   AlertCircle,
   Filter,
   X,
+  Upload,
+  CheckCircle2,
+  XCircle,
+  ListChecks,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
@@ -78,6 +91,54 @@ import {
 } from '@/lib/api'
 
 const MANUAL_STRATEGY = '_manual'
+
+// ============================================================================
+// 批量导入: 解析逻辑 & 类型
+// ============================================================================
+
+interface ParsedRow {
+  code: string
+  name: string
+  strategy: string
+  valid: boolean
+  reason: string
+}
+
+/**
+ * 解析批量导入输入文本。
+ *
+ * 支持两种格式:
+ *  1. CSV 行: `code, name, strategy_id` (第2/3列可空)
+ *  2. 仅代码: 每行一个或逗号 / 空格分隔
+ *
+ * 校验: A股代码必须 6 位纯数字 (前端轻校验, 后端会再做一次)
+ */
+function parseBatchInput(text: string, defaultStrategy: string): ParsedRow[] {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim())
+  if (lines.length === 0) return []
+  return lines.map((line) => {
+    const parts = line
+      .split(/[,，\s]+/)
+      .map((p) => p.trim())
+      .filter(Boolean)
+    if (parts.length === 0) {
+      return { code: '', name: '', strategy: '', valid: false, reason: '空行' }
+    }
+    const rawCode = parts[0]
+    // 去掉可能的 .SH / .SZ / .BJ 后缀
+    const code = rawCode.replace(/\.(SH|SZ|BJ)$/i, '')
+    const valid = /^\d{6}$/.test(code)
+    const name = parts[1] || ''
+    const strategy = parts[2] || defaultStrategy
+    return {
+      code,
+      name,
+      strategy,
+      valid,
+      reason: valid ? '' : '代码格式错误(需6位数字)',
+    }
+  })
+}
 
 // ============================================================================
 // 主组件
@@ -97,6 +158,12 @@ export function WatchlistManager() {
   const [filterActive, setFilterActive] = React.useState<'all' | 'active' | 'inactive'>('all')
   // 删除确认
   const [deleteTarget, setDeleteTarget] = React.useState<WatchlistItemDTO | null>(null)
+  // 批量导入
+  const [batchOpen, setBatchOpen] = React.useState(false)
+  const [batchText, setBatchText] = React.useState('')
+  const [batchDefaultStrategy, setBatchDefaultStrategy] =
+    React.useState<string>(MANUAL_STRATEGY)
+  const [batchImporting, setBatchImporting] = React.useState(false)
 
   // ------------------------------------------------------------------
   // 加载
@@ -223,6 +290,78 @@ export function WatchlistManager() {
   }, [items, filterStrategy, filterActive])
 
   // ------------------------------------------------------------------
+  // 批量导入: 解析预览 + 分组提交
+  // ------------------------------------------------------------------
+  const parsedRows = React.useMemo(
+    () => parseBatchInput(batchText, batchDefaultStrategy),
+    [batchText, batchDefaultStrategy],
+  )
+  const batchStats = React.useMemo(() => {
+    const total = parsedRows.length
+    const valid = parsedRows.filter((r) => r.valid).length
+    return { total, valid, invalid: total - valid }
+  }, [parsedRows])
+
+  const handleBatchImport = async () => {
+    const validRows = parsedRows.filter((r) => r.valid)
+    if (validRows.length === 0) {
+      toast.error('没有可导入的有效行')
+      return
+    }
+    // 按 strategy_id 分组 (后端 add 只接受单个 strategy_id)
+    const grouped: Record<string, string[]> = {}
+    for (const r of validRows) {
+      const sid = r.strategy || batchDefaultStrategy
+      ;(grouped[sid] = grouped[sid] || []).push(r.code)
+    }
+    setBatchImporting(true)
+    const tid = toast.loading(
+      `正在导入 ${validRows.length} 只股票 (分 ${Object.keys(grouped).length} 组)...`,
+    )
+    let totalAdded = 0
+    let totalSkipped = 0
+    const errors: string[] = []
+    try {
+      for (const [sid, codes] of Object.entries(grouped)) {
+        try {
+          const r = await watchlistAPI.add({
+            codes,
+            strategy_id: sid,
+            subscriber: 'web_watchlist',
+          })
+          totalAdded += r.added || 0
+          totalSkipped += r.skipped || 0
+        } catch (e) {
+          errors.push(`${sid}: ${(e as Error).message}`)
+        }
+      }
+      if (errors.length === 0) {
+        toast.success('批量导入完成', {
+          id: tid,
+          description: `新增 ${totalAdded} 只, 跳过 ${totalSkipped} 只`,
+        })
+      } else if (totalAdded > 0) {
+        toast.warning('批量导入部分完成', {
+          id: tid,
+          description: `新增 ${totalAdded} / 跳过 ${totalSkipped}; 失败 ${errors.length} 组: ${errors[0]}`,
+        })
+      } else {
+        toast.error('批量导入失败', {
+          id: tid,
+          description: errors.join('; '),
+        })
+      }
+      if (totalAdded > 0) {
+        setBatchOpen(false)
+        setBatchText('')
+        await load()
+      }
+    } finally {
+      setBatchImporting(false)
+    }
+  }
+
+  // ------------------------------------------------------------------
   // 渲染
   // ------------------------------------------------------------------
   return (
@@ -287,9 +426,20 @@ export function WatchlistManager() {
       {/* 加入表单 */}
       <Card className="p-4 bg-quant-card border-quant">
         <div className="flex flex-col gap-2">
-          <div className="flex items-center gap-2">
-            <Plus className="size-4 text-amber-400" />
-            <span className="text-sm font-semibold">加入监控池</span>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Plus className="size-4 text-amber-400" />
+              <span className="text-sm font-semibold">加入监控池</span>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 border-quant hover:bg-amber-500/10 hover:text-amber-400 hover:border-amber-500/30"
+              onClick={() => setBatchOpen(true)}
+            >
+              <Upload className="size-3.5 mr-1" />
+              批量导入
+            </Button>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto_auto] gap-2">
             <div className="space-y-1">
@@ -512,6 +662,221 @@ export function WatchlistManager() {
           )}
         </CardContent>
       </Card>
+
+      {/* 批量导入 Dialog */}
+      <Dialog
+        open={batchOpen}
+        onOpenChange={(v) => {
+          if (batchImporting) return
+          setBatchOpen(v)
+          if (!v) setBatchText('')
+        }}
+      >
+        <DialogContent className="max-w-3xl max-h-[90vh] flex flex-col gap-4 bg-quant-card border-quant">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Upload className="size-5 text-amber-400" />
+              批量导入自选股
+            </DialogTitle>
+            <DialogDescription className="text-xs">
+              每行一只, 逗号分隔。第 1 列股票代码(必填, 6 位数字),
+              第 2 列名称(可空, 仅显示用), 第 3 列 strategy_id(可空, 默认用下方下拉值)。
+              也支持只粘贴代码(每行一个或逗号 / 空格分隔)。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3">
+            <div className="space-y-1.5">
+              <Label className="text-[10px] text-muted-foreground">
+                粘贴 CSV / 代码列表
+              </Label>
+              <Textarea
+                value={batchText}
+                onChange={(e) => setBatchText(e.target.value)}
+                placeholder={`600519, 贵州茅台, rzq_ignite\n000858, 五粮液, rzq_ignite\n002594, 比亚迪, _manual\n\n# 也支持只粘贴代码:\n600519 000858 002594`}
+                className="min-h-[150px] font-mono text-xs resize-y bg-transparent"
+                spellCheck={false}
+              />
+            </div>
+            <div className="space-y-1.5 md:w-44">
+              <Label className="text-[10px] text-muted-foreground">
+                默认策略 strategy_id
+              </Label>
+              <Select
+                value={batchDefaultStrategy}
+                onValueChange={setBatchDefaultStrategy}
+              >
+                <SelectTrigger className="h-8 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={MANUAL_STRATEGY} className="text-xs">
+                    _manual · 临时盯盘
+                  </SelectItem>
+                  {strategies
+                    .filter((s) => s.strategy_id !== MANUAL_STRATEGY)
+                    .map((s) => (
+                      <SelectItem
+                        key={s.strategy_id}
+                        value={s.strategy_id}
+                        className="text-xs"
+                      >
+                        {s.strategy_id} · {s.strategy_name}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+              <p className="text-[10px] text-muted-foreground leading-relaxed pt-1">
+                CSV 行未填 strategy_id 时使用此默认值。
+              </p>
+            </div>
+          </div>
+
+          {/* 预览表 */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <Label className="text-[10px] text-muted-foreground flex items-center gap-1">
+                <ListChecks className="size-3" />
+                解析预览
+              </Label>
+              <div className="flex items-center gap-1.5">
+                <Badge
+                  variant="outline"
+                  className="text-[10px] border-quant font-mono"
+                >
+                  共 {batchStats.total}
+                </Badge>
+                <Badge
+                  variant="outline"
+                  className="text-[10px] border-[var(--quant-up)]/30 bg-[var(--quant-up)]/10 text-[var(--quant-up)] font-mono"
+                >
+                  <CheckCircle2 className="size-2.5 mr-1" />
+                  有效 {batchStats.valid}
+                </Badge>
+                {batchStats.invalid > 0 && (
+                  <Badge
+                    variant="outline"
+                    className="text-[10px] border-red-500/30 bg-red-500/10 text-red-500 font-mono"
+                  >
+                    <XCircle className="size-2.5 mr-1" />
+                    无效 {batchStats.invalid}
+                  </Badge>
+                )}
+              </div>
+            </div>
+            <div className="rounded-md border border-quant overflow-hidden">
+              <ScrollArea className="max-h-60">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="border-quant hover:bg-transparent">
+                      <TableHead className="text-[10px] h-7 w-12 text-center">#</TableHead>
+                      <TableHead className="text-[10px] h-7">股票代码</TableHead>
+                      <TableHead className="text-[10px] h-7">名称</TableHead>
+                      <TableHead className="text-[10px] h-7">策略</TableHead>
+                      <TableHead className="text-[10px] h-7">状态 / 原因</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {parsedRows.length === 0 ? (
+                      <TableRow className="border-quant">
+                        <TableCell
+                          colSpan={5}
+                          className="text-xs text-muted-foreground text-center py-6"
+                        >
+                          粘贴或输入内容后会在此预览解析结果
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      parsedRows.map((r, i) => (
+                        <TableRow
+                          key={`${i}-${r.code}`}
+                          className={cn(
+                            'border-quant',
+                            !r.valid && 'bg-red-500/10',
+                          )}
+                        >
+                          <TableCell className="text-[10px] text-muted-foreground text-center py-1 tabular-nums">
+                            {i + 1}
+                          </TableCell>
+                          <TableCell
+                            className={cn(
+                              'text-xs font-mono py-1',
+                              r.valid ? 'text-foreground' : 'text-red-500',
+                            )}
+                          >
+                            {r.code || '—'}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground py-1">
+                            {r.name || '—'}
+                          </TableCell>
+                          <TableCell className="py-1">
+                            <Badge
+                              variant="outline"
+                              className={cn(
+                                'text-[10px] font-mono border-quant',
+                                r.strategy === MANUAL_STRATEGY
+                                  ? 'text-muted-foreground'
+                                  : 'text-quant-primary',
+                              )}
+                            >
+                              {r.strategy || '—'}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="text-[10px] py-1">
+                            {r.valid ? (
+                              <span className="inline-flex items-center text-[var(--quant-up)]">
+                                <CheckCircle2 className="size-3 mr-1" />
+                                有效
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center text-red-500">
+                                <XCircle className="size-3 mr-1" />
+                                {r.reason}
+                              </span>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              </ScrollArea>
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2 sm:gap-2">
+            <Button
+              variant="outline"
+              className="border-quant"
+              onClick={() => setBatchText('')}
+              disabled={batchImporting || batchText.length === 0}
+            >
+              清空
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                if (!batchImporting) setBatchOpen(false)
+              }}
+              disabled={batchImporting}
+            >
+              取消
+            </Button>
+            <Button
+              className="bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25"
+              onClick={handleBatchImport}
+              disabled={batchImporting || batchStats.valid === 0}
+            >
+              {batchImporting ? (
+                <Loader2 className="size-3.5 animate-spin mr-1" />
+              ) : (
+                <Upload className="size-3.5 mr-1" />
+              )}
+              导入 {batchStats.valid > 0 ? `(${batchStats.valid})` : ''}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* 删除确认 */}
       <AlertDialog

@@ -291,6 +291,12 @@ export interface EngineHealthDTO {
   queue_size: number
   uptime_seconds: number
   status: 'healthy' | 'degraded' | 'unhealthy' | 'unknown'
+  /** R11-1: 后端透出的当前生效阈值 (P2-2 后端可热加载, 缺省时前端用 60/120/10 兜底) */
+  thresholds?: {
+    lag_healthy_seconds: number
+    lag_degraded_seconds: number
+    error_healthy_threshold: number
+  }
 }
 
 export const monitorAPI = {

@@ -73,6 +73,10 @@ class MonitorEngine:
         self._stop_event = threading.Event()
         self._lock = threading.RLock()
 
+        # P2-1: 聚合推送独立 flush 线程（不依赖 tick 循环，
+        # 避免行情停推/非交易时段聚合队列不 flush 的问题）
+        self._agg_thread: threading.Thread | None = None
+
         # 防抖：{(stock_code, alert_type): last_ts}
         self._debounce: dict[tuple[str, str], float] = {}
 
@@ -120,6 +124,17 @@ class MonitorEngine:
         self._thread.start()
         logger.info("MonitorEngine 已启动")
 
+        # P2-1: 起独立的聚合 flush 线程，避免 tick 循环依赖
+        # （行情停推/非交易时段 tick 不调 _flush_all_aggregation）
+        if not (self._agg_thread and self._agg_thread.is_alive()):
+            self._agg_thread = threading.Thread(
+                target=self._aggregator_loop,
+                name="agg-flush",
+                daemon=True,
+            )
+            self._agg_thread.start()
+            logger.info("MonitorEngine 聚合 flush 线程已启动")
+
     def stop(self) -> None:
         """停止 daemon 线程（lifespan 关闭时调）。"""
         self._stop_event.set()
@@ -136,6 +151,10 @@ class MonitorEngine:
         if self._thread:
             self._thread.join(timeout=5)
             self._thread = None
+        # P2-1: 等 agg-flush 线程退出
+        if self._agg_thread:
+            self._agg_thread.join(timeout=5)
+            self._agg_thread = None
         self._subscribed = False
         logger.info("MonitorEngine 已停止")
 
@@ -893,12 +912,53 @@ class MonitorEngine:
             self._last_error = str(exc)
             logger.warning("聚合推送异常: %s", exc)
 
-    def _flush_all_aggregation(self) -> None:
-        """刷新所有聚合队列（tick 循环定期调）。"""
+    def _flush_all_aggregation(self, force: bool = False) -> None:
+        """刷新所有聚合队列。
+
+        Args:
+            force: True 时即使窗口未满也 flush（独立 flush 线程使用，
+                确保行情停推 / 非交易时段也能 flush 漏推信号）；
+                False 时仅 flush 窗口已超 ``alert_aggregate_window_seconds`` 的队列
+                （tick 循环调用，让出主导权给独立 flush 线程）。
+        """
+        cfg = ConfigLoader()
+        window = float(cfg.get("monitor.alert_aggregate_window_seconds", 60))
+        now = time.time()
         with self._lock:
             for key in list(self._agg_queue.keys()):
-                if self._agg_queue[key]:
-                    self._flush_aggregation_locked(key, self._agg_queue[key][0].get("channels", []))
+                items = self._agg_queue.get(key) or []
+                if not items:
+                    continue
+                last_flush = self._agg_last_flush.get(key, 0.0)
+                if force or (now - last_flush) >= window:
+                    self._flush_aggregation_locked(
+                        key, items[0].get("channels", [])
+                    )
+
+    # ------------------------------------------------------------------
+    # P2-1: 聚合推送独立 flush 线程
+    # ------------------------------------------------------------------
+
+    def _aggregator_loop(self) -> None:
+        """独立线程：定时 flush 聚合队列，不依赖 tick 循环。
+
+        - 间隔取 ``monitor.alert_aggregate_window_seconds``（默认 60s，下限 5s）
+        - 每次 flush 调 ``_flush_all_aggregation(force=True)``，
+          force=True 即使窗口未满也 flush（避免漏推）
+        - 异常 catch + warning，不让线程挂掉
+        - 退出信号：``self._stop_event`` 被 set
+        """
+        cfg = ConfigLoader()
+        interval = max(5, float(cfg.get("monitor.alert_aggregate_window_seconds", 60)))
+        logger.info(
+            "agg-flush 线程启动 (interval=%.1fs, force=True)", interval
+        )
+        while not self._stop_event.wait(interval):
+            try:
+                self._flush_all_aggregation(force=True)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("aggregator flush 失败: %s", exc)
+        logger.info("agg-flush 线程退出")
 
     @staticmethod
     def _format_aggregate_content(items: list[dict[str, Any]]) -> str:

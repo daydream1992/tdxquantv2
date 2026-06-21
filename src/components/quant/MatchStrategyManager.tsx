@@ -6,18 +6,21 @@
  * 功能：
  *  1. 卡片列表：展示 match_strategies (name / match_id / strategy_id badge / enabled Switch
  *     / alerts 数量 / debounce_override)
- *  2. 卡片操作：编辑(改参) / 测试(test) / 删除(带确认, _default 禁用)
+ *  2. 卡片操作：编辑(改参) / 测试(test) / 复制(copy, _default 也允许) / 删除(带确认, _default 禁用)
  *  3. 顶部：新建匹配策略 / 重新加载 YAML (reload)
  *  4. 编辑/新建用 Dialog：name / strategy_id / enabled / match_id / debounce_override
  *     / alerts (key-value 表单 + alert_type/channels/priority) / scope (markets 多选 / 排除项)
  *  5. 测试面板：输入 code + pct_change + volume_ratio + main_inflow + auction_pct
  *     → POST /test → 命中 alert 列表 (alert_type + priority + 命中条件)
- *  6. 所有操作有 loading 状态 + sonner toast 反馈
- *  7. _default 删除返回 403 → toast 提示 "不允许删除兜底套餐 _default"
+ *  6. 复制 Dialog：基于现有 match 创建副本, 自动生成 newId (源ID_copy, 已存在则 _2/_3)
+ *     + 默认 name="{原名} 副本" + 副本默认 enabled=false + 可选是否复制 alerts
+ *  7. 所有操作有 loading 状态 + sonner toast 反馈
+ *  8. _default 删除返回 403 → toast 提示 "不允许删除兜底套餐 _default"
+ *     _default 复制允许 (它是只读不可删, 但可复制成新策略)
  *
  * 后端 API 走代理：
  *   GET    /api/monitor/match-strategies           列表
- *   POST   /api/monitor/match-strategies           新建
+ *   POST   /api/monitor/match-strategies           新建 (复制也走这里)
  *   PUT    /api/monitor/match-strategies/[id]      改参
  *   DELETE /api/monitor/match-strategies/[id]      删除
  *   POST   /api/monitor/match-strategies?action=reload      重载
@@ -63,6 +66,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Checkbox } from '@/components/ui/checkbox'
 import {
   Crosshair,
   Plus,
@@ -74,15 +78,18 @@ import {
   Shield,
   Clock,
   AlertCircle,
+  Copy,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import {
   matchStrategyAPI,
   strategyAPI,
+  APIError,
   type MatchStrategyDTO,
   type MatchAlertDTO,
   type MatchScopeDTO,
+  type MatchCreateRequest,
   type MatchTestHitDTO,
   type MatchPriority,
   type StrategyDTO,
@@ -131,6 +138,24 @@ const priorityVariant: Record<
 
 function isDefault(matchId: string): boolean {
   return matchId === '_default'
+}
+
+/** match_id 校验：非空 + 只允许字母/数字/下划线 */
+const MATCH_ID_PATTERN = /^[A-Za-z0-9_]+$/
+function isValidMatchId(id: string): boolean {
+  return MATCH_ID_PATTERN.test(id.trim())
+}
+
+/**
+ * 基于已存在的 ID 集合生成一个唯一的副本 ID。
+ * 默认 `${sourceId}_copy`；若已占用则尝试 `_2` / `_3` / ...
+ */
+function makeUniqueCopyId(sourceId: string, existingIds: Set<string>): string {
+  const base = `${sourceId}_copy`
+  if (!existingIds.has(base)) return base
+  let n = 2
+  while (existingIds.has(`${sourceId}_copy_${n}`)) n += 1
+  return `${sourceId}_copy_${n}`
 }
 
 function scopeSummary(scope: MatchScopeDTO): string {
@@ -223,6 +248,24 @@ export function MatchStrategyManager() {
   const [testForm, setTestForm] = React.useState<TestFormState>({ ...EMPTY_TEST_FORM })
   const [testLoading, setTestLoading] = React.useState(false)
   const [testHits, setTestHits] = React.useState<MatchTestHitDTO[] | null>(null)
+  // 复制 Dialog
+  const [copyDialog, setCopyDialog] = React.useState<{
+    open: boolean
+    source: MatchStrategyDTO | null
+    newId: string
+    newName: string
+    enableCopy: boolean
+    copyAlerts: boolean
+    loading: boolean
+  }>({
+    open: false,
+    source: null,
+    newId: '',
+    newName: '',
+    enableCopy: false,
+    copyAlerts: true,
+    loading: false,
+  })
 
   // ------------------------------------------------------------------
   // 加载
@@ -451,6 +494,106 @@ export function MatchStrategyManager() {
   }
 
   // ------------------------------------------------------------------
+  // 复制 Dialog
+  // ------------------------------------------------------------------
+  const openCopy = (s: MatchStrategyDTO) => {
+    const existingIds = new Set(items.map((x) => x.match_id))
+    const newId = makeUniqueCopyId(s.match_id, existingIds)
+    const newName = `${s.name || s.match_id} 副本`
+    setCopyDialog({
+      open: true,
+      source: s,
+      newId,
+      newName,
+      enableCopy: false,
+      copyAlerts: true,
+      loading: false,
+    })
+  }
+
+  const closeCopy = () => {
+    setCopyDialog((p) => ({ ...p, open: false }))
+  }
+
+  const handleCopyCreate = async () => {
+    const { source, newId, newName, copyAlerts, enableCopy } = copyDialog
+    if (!source) return
+    const trimmedId = newId.trim()
+    const trimmedName = newName.trim()
+    if (!trimmedId) {
+      toast.error('match_id 不能为空')
+      return
+    }
+    if (!isValidMatchId(trimmedId)) {
+      toast.error('match_id 只能含字母、数字、下划线')
+      return
+    }
+    if (isDefault(trimmedId)) {
+      toast.error('match_id 不能为 _default（系统保留）')
+      return
+    }
+    if (!trimmedName) {
+      toast.error('显示名不能为空')
+      return
+    }
+
+    // 客户端预检：本地已存在则直接提示，避免无效请求
+    if (items.some((x) => x.match_id === trimmedId)) {
+      toast.error('ID 已存在，请换一个', { description: `match_id: ${trimmedId}` })
+      return
+    }
+
+    // 副本默认不启用 (避免重复预警)；enableCopy 勾选则启用；其余字段从源策略原样复制
+    const payload: MatchCreateRequest = {
+      match_id: trimmedId,
+      name: trimmedName,
+      strategy_id: source.strategy_id,
+      enabled: enableCopy,
+      scope: source.scope,
+      alerts: copyAlerts
+        ? (source.alerts || []).map((a) => ({
+            alert_type: a.alert_type,
+            params: { ...(a.params || {}) },
+            channels: [...(a.channels || [])],
+            priority: a.priority,
+          }))
+        : [],
+      debounce_override: source.debounce_override,
+      trading_hours_override: source.trading_hours_override,
+    }
+
+    setCopyDialog((p) => ({ ...p, loading: true }))
+    const tid = toast.loading('正在创建副本...')
+    try {
+      await matchStrategyAPI.create(payload)
+      toast.success('副本已创建', {
+        id: tid,
+        description: `${trimmedId} · 基于 ${source.match_id}`,
+      })
+      closeCopy()
+      await load()
+    } catch (e) {
+      const err = e as APIError
+      const msg = err.message || ''
+      // 后端 409 重复 / 400 校验失败 → 友好提示
+      if (
+        err.status === 409 ||
+        msg.includes('已存在') ||
+        msg.includes('already exists') ||
+        msg.includes('duplicate')
+      ) {
+        toast.error('ID 已存在，请换一个', { id: tid, description: msg })
+      } else if (err.status === 403 || msg.includes('_default')) {
+        toast.error('不允许的操作', { id: tid, description: msg })
+      } else {
+        toast.error('创建副本失败', { id: tid, description: msg })
+      }
+    } finally {
+      setCopyDialog((p) => ({ ...p, loading: false }))
+    }
+  }
+
+  // ------------------------------------------------------------------
   // 渲染
   // ------------------------------------------------------------------
   return (
@@ -530,6 +673,7 @@ export function MatchStrategyManager() {
               onToggle={(next) => handleToggleEnabled(s, next)}
               onEdit={() => openEdit(s)}
               onTest={() => openTest(s)}
+              onCopy={() => openCopy(s)}
               onDelete={() => setDeleteTarget(s)}
             />
           ))}
@@ -791,6 +935,62 @@ export function MatchStrategyManager() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* 复制 Dialog */}
+      <Dialog
+        open={copyDialog.open}
+        onOpenChange={(v) => {
+          if (!v && !copyDialog.loading) closeCopy()
+        }}
+      >
+        <DialogContent className="sm:max-w-md max-h-[90vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Copy className="size-5 text-amber-400" />
+              复制匹配策略
+            </DialogTitle>
+            <DialogDescription>
+              {copyDialog.source
+                ? `基于「${copyDialog.source.name || copyDialog.source.match_id}」创建副本，可修改 ID 和名称。`
+                : '基于现有策略创建副本。'}
+            </DialogDescription>
+          </DialogHeader>
+
+          <CopyForm
+            value={copyDialog}
+            onChange={(patch) => setCopyDialog((p) => ({ ...p, ...patch }))}
+            existingIds={items.map((x) => x.match_id)}
+          />
+
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              onClick={closeCopy}
+              disabled={copyDialog.loading}
+            >
+              取消
+            </Button>
+            <Button
+              className="bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25"
+              onClick={handleCopyCreate}
+              disabled={
+                copyDialog.loading ||
+                !copyDialog.newId.trim() ||
+                !isValidMatchId(copyDialog.newId) ||
+                !copyDialog.newName.trim() ||
+                isDefault(copyDialog.newId.trim())
+              }
+            >
+              {copyDialog.loading ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Copy className="size-4" />
+              )}
+              创建副本
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
@@ -806,6 +1006,7 @@ interface MatchCardProps {
   onToggle: (next: boolean) => void
   onEdit: () => void
   onTest: () => void
+  onCopy: () => void
   onDelete: () => void
 }
 
@@ -816,6 +1017,7 @@ function MatchCard({
   onToggle,
   onEdit,
   onTest,
+  onCopy,
   onDelete,
 }: MatchCardProps) {
   const def = isDefault(data.match_id)
@@ -956,6 +1158,16 @@ function MatchCard({
         <Button
           size="sm"
           variant="ghost"
+          className="h-7 px-2 text-xs hover:bg-amber-500/10 hover:text-amber-400"
+          onClick={onCopy}
+          title={`基于「${data.name || data.match_id}」创建副本`}
+          aria-label="复制策略"
+        >
+          <Copy className="size-3" />
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
           className={cn(
             'h-7 px-2 text-xs',
             def
@@ -970,6 +1182,145 @@ function MatchCard({
         </Button>
       </div>
     </Card>
+  )
+}
+
+// ============================================================================
+// 复制表单
+// ============================================================================
+
+interface CopyFormProps {
+  value: {
+    source: MatchStrategyDTO | null
+    newId: string
+    newName: string
+    enableCopy: boolean
+    copyAlerts: boolean
+    loading: boolean
+  }
+  onChange: (patch: Partial<CopyFormProps['value']>) => void
+  existingIds: string[]
+}
+
+function CopyForm({ value, onChange, existingIds }: CopyFormProps) {
+  const trimmedId = value.newId.trim()
+  const idTaken =
+    trimmedId.length > 0 &&
+    existingIds.includes(trimmedId) &&
+    trimmedId !== value.source?.match_id
+  const idInvalid = trimmedId.length > 0 && !isValidMatchId(trimmedId)
+  const idIsDefault = trimmedId === '_default'
+
+  return (
+    <div className="space-y-3">
+      {/* 源策略信息 */}
+      {value.source && (
+        <div className="text-xs rounded-md border border-quant bg-quant-card/30 p-2 space-y-0.5">
+          <div className="flex items-center gap-1.5">
+            <span className="text-muted-foreground">源策略:</span>
+            <span className="font-mono text-foreground/80">
+              {value.source.match_id}
+            </span>
+            <span className="text-muted-foreground">·</span>
+            <span className="text-foreground/80">{value.source.name}</span>
+          </div>
+          <div className="text-[10px] text-muted-foreground flex items-center gap-2 flex-wrap">
+            <span>strategy_id: <span className="font-mono">{value.source.strategy_id || '(全局兜底)'}</span></span>
+            <span>·</span>
+            <span>alerts: {value.source.alerts?.length ?? 0}</span>
+            <span>·</span>
+            <span>scope: {scopeSummary(value.source.scope)}</span>
+          </div>
+        </div>
+      )}
+
+      {/* 新 match_id */}
+      <div className="space-y-1">
+        <Label className="text-xs">新 match_id *</Label>
+        <Input
+          className="h-8 font-mono text-xs"
+          value={value.newId}
+          onChange={(e) => onChange({ newId: e.target.value })}
+          placeholder="如 my_match_v2"
+          autoFocus
+        />
+        <p className="text-[10px] text-muted-foreground">
+          全局唯一；只能含字母、数字、下划线
+        </p>
+        {idInvalid && (
+          <p className="text-[10px] text-red-500 flex items-center gap-1">
+            <AlertCircle className="size-3" />
+            match_id 只能含字母、数字、下划线
+          </p>
+        )}
+        {idIsDefault && (
+          <p className="text-[10px] text-red-500 flex items-center gap-1">
+            <AlertCircle className="size-3" />
+            _default 是系统保留 ID，不可使用
+          </p>
+        )}
+        {idTaken && !idIsDefault && (
+          <p className="text-[10px] text-red-500 flex items-center gap-1">
+            <AlertCircle className="size-3" />
+            该 ID 已存在，请换一个
+          </p>
+        )}
+      </div>
+
+      {/* 新名称 */}
+      <div className="space-y-1">
+        <Label className="text-xs">显示名 *</Label>
+        <Input
+          className="h-8 text-xs"
+          value={value.newName}
+          onChange={(e) => onChange({ newName: e.target.value })}
+          placeholder="如 弱转强默认监控 副本"
+        />
+      </div>
+
+      <Separator />
+
+      {/* 选项 */}
+      <div className="space-y-2">
+        <label
+          className="flex items-start gap-2 cursor-pointer select-none"
+          htmlFor="copy-enable"
+        >
+          <Checkbox
+            id="copy-enable"
+            checked={value.enableCopy}
+            onCheckedChange={(v) => onChange({ enableCopy: v === true })}
+            className="mt-0.5"
+          />
+          <div className="space-y-0.5">
+            <div className="text-xs font-medium">启用副本（默认关闭）</div>
+            <div className="text-[10px] text-muted-foreground">
+              副本默认不启用，避免与源策略产生重复预警。可创建后手动开启。
+            </div>
+          </div>
+        </label>
+
+        <label
+          className="flex items-start gap-2 cursor-pointer select-none"
+          htmlFor="copy-alerts"
+        >
+          <Checkbox
+            id="copy-alerts"
+            checked={value.copyAlerts}
+            onCheckedChange={(v) => onChange({ copyAlerts: v === true })}
+            className="mt-0.5"
+          />
+          <div className="space-y-0.5">
+            <div className="text-xs font-medium">
+              复制 alerts 配置（默认勾选）
+            </div>
+            <div className="text-[10px] text-muted-foreground">
+              取消勾选则创建一个无 alert 的空壳策略，之后可在编辑页单独配置。
+            </div>
+          </div>
+        </label>
+      </div>
+    </div>
   )
 }
 

@@ -1,0 +1,1733 @@
+     1→     1→'use client'
+     2→     2→
+     3→     3→/**
+     4→     4→ * 匹配策略管理 (MatchStrategyManager)
+     5→     5→ *
+     6→     6→ * 功能：
+     7→     7→ *  1. 卡片列表：展示 match_strategies (name / match_id / strategy_id badge / enabled Switch
+     8→     8→ *     / alerts 数量 / debounce_override)
+     9→     9→ *  2. 卡片操作：编辑(改参) / 测试(test) / 复制(copy, _default 也允许) / 删除(带确认, _default 禁用)
+    10→    10→ *  3. 顶部：新建匹配策略 / 重新加载 YAML (reload)
+    11→    11→ *  4. 编辑/新建用 Dialog：name / strategy_id / enabled / match_id / debounce_override
+    12→    12→ *     / alerts (key-value 表单 + alert_type/channels/priority) / scope (markets 多选 / 排除项)
+    13→    13→ *  5. 测试面板：输入 code + pct_change + volume_ratio + main_inflow + auction_pct
+    14→    14→ *     → POST /test → 命中 alert 列表 (alert_type + priority + 命中条件)
+    15→    15→ *  6. 复制 Dialog：基于现有 match 创建副本, 自动生成 newId (源ID_copy, 已存在则 _2/_3)
+    16→    16→ *     + 默认 name="{原名} 副本" + 副本默认 enabled=false + 可选是否复制 alerts
+    17→    17→ *  7. 所有操作有 loading 状态 + sonner toast 反馈
+    18→    18→ *  8. _default 删除返回 403 → toast 提示 "不允许删除兜底套餐 _default"
+    19→    19→ *     _default 复制允许 (它是只读不可删, 但可复制成新策略)
+    20→    20→ *
+    21→    21→ * 后端 API 走代理：
+    22→    22→ *   GET    /api/monitor/match-strategies           列表
+    23→    23→ *   POST   /api/monitor/match-strategies           新建 (复制也走这里)
+    24→    24→ *   PUT    /api/monitor/match-strategies/[id]      改参
+    25→    25→ *   DELETE /api/monitor/match-strategies/[id]      删除
+    26→    26→ *   POST   /api/monitor/match-strategies?action=reload      重载
+    27→    27→ *   POST   /api/monitor/match-strategies/[id]/test          测试
+    28→    28→ */
+    29→    29→
+    30→    30→import * as React from 'react'
+    31→    31→import {
+    32→    32→  Card,
+    33→    33→  CardContent,
+    34→    34→  CardHeader,
+    35→    35→  CardTitle,
+    36→    36→} from '@/components/ui/card'
+    37→    37→import { Button } from '@/components/ui/button'
+    38→    38→import { Input } from '@/components/ui/input'
+    39→    39→import { Label } from '@/components/ui/label'
+    40→    40→import { Switch } from '@/components/ui/switch'
+    41→    41→import { Badge } from '@/components/ui/badge'
+    42→    42→import { Separator } from '@/components/ui/separator'
+    43→    43→import {
+    44→    44→  Dialog,
+    45→    45→  DialogContent,
+    46→    46→  DialogDescription,
+    47→    47→  DialogFooter,
+    48→    48→  DialogHeader,
+    49→    49→  DialogTitle,
+    50→    50→} from '@/components/ui/dialog'
+    51→    51→import {
+    52→    52→  AlertDialog,
+    53→    53→  AlertDialogAction,
+    54→    54→  AlertDialogCancel,
+    55→    55→  AlertDialogContent,
+    56→    56→  AlertDialogDescription,
+    57→    57→  AlertDialogFooter,
+    58→    58→  AlertDialogHeader,
+    59→    59→  AlertDialogTitle,
+    60→    60→} from '@/components/ui/alert-dialog'
+    61→    61→import {
+    62→    62→  Select,
+    63→    63→  SelectContent,
+    64→    64→  SelectItem,
+    65→    65→  SelectTrigger,
+    66→    66→  SelectValue,
+    67→    67→} from '@/components/ui/select'
+    68→    68→import { ScrollArea } from '@/components/ui/scroll-area'
+    69→    69→import { Checkbox } from '@/components/ui/checkbox'
+    70→    70→import {
+    71→    71→  Crosshair,
+    72→    72→  Plus,
+    73→    73→  RefreshCw,
+    74→    74→  Pencil,
+    75→    75→  Trash2,
+    76→    76→  FlaskConical,
+    77→    77→  Loader2,
+    78→    78→  Shield,
+    79→    79→  Clock,
+    80→    80→  AlertCircle,
+    81→    81→  Copy,
+    82→    82→} from 'lucide-react'
+    83→    83→import { toast } from 'sonner'
+    84→    84→import { cn } from '@/lib/utils'
+    85→    85→import {
+    86→    86→  matchStrategyAPI,
+    87→    87→  strategyAPI,
+    88→    88→  APIError,
+    89→    89→  type MatchStrategyDTO,
+    90→    90→  type MatchAlertDTO,
+    91→    91→  type MatchScopeDTO,
+    92→    92→  type MatchCreateRequest,
+    93→    93→  type MatchTestHitDTO,
+    94→    94→  type MatchPriority,
+    95→    95→  type StrategyDTO,
+    96→    96→} from '@/lib/api'
+    97→    97→
+    98→    98→// ============================================================================
+    99→    99→// 常量
+   100→   100→// ============================================================================
+   101→   101→
+   102→   102→const ALL_MARKETS = ['SH', 'SZ', 'BJ'] as const
+   103→   103→const ALL_CHANNELS = ['tdx_warn', 'websocket', 'feishu', 'csv_log'] as const
+   104→   104→const PRIORITIES: MatchPriority[] = ['high', 'medium', 'low']
+   105→   105→const PRIORITY_LABEL: Record<MatchPriority, string> = {
+   106→   106→  high: '高',
+   107→   107→  medium: '中',
+   108→   108→  low: '低',
+   109→   109→}
+   110→   110→
+   111→   111→const EMPTY_SCOPE: MatchScopeDTO = {
+   112→   112→  markets: ['SH', 'SZ', 'BJ'],
+   113→   113→  exclude_st: true,
+   114→   114→  exclude_suspended: true,
+   115→   115→  exclude_codes: [],
+   116→   116→  include_only: [],
+   117→   117→}
+   118→   118→
+   119→   119→const EMPTY_ALERT: MatchAlertDTO = {
+   120→   120→  alert_type: '',
+   121→   121→  params: {},
+   122→   122→  channels: ['websocket'],
+   123→   123→  priority: 'medium',
+   124→   124→}
+   125→   125→
+   126→   126→const priorityVariant: Record<
+   127→   127→  MatchPriority,
+   128→   128→  'destructive' | 'default' | 'secondary'
+   129→   129→> = {
+   130→   130→  high: 'destructive',
+   131→   131→  medium: 'default',
+   132→   132→  low: 'secondary',
+   133→   133→}
+   134→   134→
+   135→   135→// ============================================================================
+   136→   136→// 工具
+   137→   137→// ============================================================================
+   138→   138→
+   139→   139→function isDefault(matchId: string): boolean {
+   140→   140→  return matchId === '_default'
+   141→   141→}
+   142→   142→
+   143→   143→/** match_id 校验：非空 + 只允许字母/数字/下划线 */
+   144→   144→const MATCH_ID_PATTERN = /^[A-Za-z0-9_]+$/
+   145→   145→function isValidMatchId(id: string): boolean {
+   146→   146→  return MATCH_ID_PATTERN.test(id.trim())
+   147→   147→}
+   148→   148→
+   149→   149→/**
+   150→   150→ * 基于已存在的 ID 集合生成一个唯一的副本 ID。
+   151→   151→ * 默认 `${sourceId}_copy`；若已占用则尝试 `_2` / `_3` / ...
+   152→   152→ */
+   153→   153→function makeUniqueCopyId(sourceId: string, existingIds: Set<string>): string {
+   154→   154→  const base = `${sourceId}_copy`
+   155→   155→  if (!existingIds.has(base)) return base
+   156→   156→  let n = 2
+   157→   157→  while (existingIds.has(`${sourceId}_copy_${n}`)) n += 1
+   158→   158→  return `${sourceId}_copy_${n}`
+   159→   159→}
+   160→   160→
+   161→   161→function scopeSummary(scope: MatchScopeDTO): string {
+   162→   162→  if (!scope) return '无限制'
+   163→   163→  const parts: string[] = []
+   164→   164→  if (scope.markets?.length) parts.push(scope.markets.join('/'))
+   165→   165→  if (scope.exclude_st) parts.push('排ST')
+   166→   166→  if (scope.exclude_suspended) parts.push('排停牌')
+   167→   167→  if (scope.exclude_codes?.length) parts.push(`排除 ${scope.exclude_codes.length} 码`)
+   168→   168→  if (scope.include_only?.length) parts.push(`仅 ${scope.include_only.length} 码`)
+   169→   169→  return parts.length ? parts.join(' · ') : '无限制'
+   170→   170→}
+   171→   171→
+   172→   172→// ============================================================================
+   173→   173→// 测试表单值
+   174→   174→// ============================================================================
+   175→   175→
+   176→   176→interface TestFormState {
+   177→   177→  code: string
+   178→   178→  pct_change: string
+   179→   179→  volume_ratio: string
+   180→   180→  main_inflow: string
+   181→   181→  auction_pct: string
+   182→   182→}
+   183→   183→
+   184→   184→const EMPTY_TEST_FORM: TestFormState = {
+   185→   185→  code: '',
+   186→   186→  pct_change: '',
+   187→   187→  volume_ratio: '',
+   188→   188→  main_inflow: '',
+   189→   189→  auction_pct: '',
+   190→   190→}
+   191→   191→
+   192→   192→// ============================================================================
+   193→   193→// 编辑表单值
+   194→   194→// ============================================================================
+   195→   195→
+   196→   196→interface EditFormState {
+   197→   197→  match_id: string
+   198→   198→  name: string
+   199→   199→  enabled: boolean
+   200→   200→  strategy_id: string
+   201→   201→  debounce_override: string // string for input; ""=null
+   202→   202→  scope: MatchScopeDTO
+   203→   203→  alerts: MatchAlertDTO[]
+   204→   204→}
+   205→   205→
+   206→   206→function strategyToForm(s: MatchStrategyDTO): EditFormState {
+   207→   207→  return {
+   208→   208→    match_id: s.match_id,
+   209→   209→    name: s.name || '',
+   210→   210→    enabled: s.enabled,
+   211→   211→    strategy_id: s.strategy_id || '',
+   212→   212→    debounce_override:
+   213→   213→      s.debounce_override === null || s.debounce_override === undefined
+   214→   214→        ? ''
+   215→   215→        : String(s.debounce_override),
+   216→   216→    scope: s.scope || { ...EMPTY_SCOPE },
+   217→   217→    alerts: (s.alerts || []).map((a) => ({
+   218→   218→      alert_type: a.alert_type || '',
+   219→   219→      params: { ...(a.params || {}) },
+   220→   220→      channels: [...(a.channels || [])],
+   221→   221→      priority: a.priority || 'medium',
+   222→   222→    })),
+   223→   223→  }
+   224→   224→}
+   225→   225→
+   226→   226→// ============================================================================
+   227→   227→// 主组件
+   228→   228→// ============================================================================
+   229→   229→
+   230→   230→export function MatchStrategyManager() {
+   231→   231→  const [items, setItems] = React.useState<MatchStrategyDTO[]>([])
+   232→   232→  const [strategies, setStrategies] = React.useState<StrategyDTO[]>([])
+   233→   233→  const [loading, setLoading] = React.useState(true)
+   234→   234→  const [reloading, setReloading] = React.useState(false)
+   235→   235→  const [togglingId, setTogglingId] = React.useState<string | null>(null)
+   236→   236→  // 编辑/新建 Dialog
+   237→   237→  const [editOpen, setEditOpen] = React.useState(false)
+   238→   238→  const [editMode, setEditMode] = React.useState<'create' | 'update'>('create')
+   239→   239→  const [editForm, setEditForm] = React.useState<EditFormState>(
+   240→   240→    strategyToForm(emptyDtoForCreate())
+   241→   241→  )
+   242→   242→  const [editSaving, setEditSaving] = React.useState(false)
+   243→   243→  // 删除确认
+   244→   244→  const [deleteTarget, setDeleteTarget] = React.useState<MatchStrategyDTO | null>(null)
+   245→   245→  const [deleteSaving, setDeleteSaving] = React.useState(false)
+   246→   246→  // 测试 Dialog
+   247→   247→  const [testTarget, setTestTarget] = React.useState<MatchStrategyDTO | null>(null)
+   248→   248→  const [testForm, setTestForm] = React.useState<TestFormState>({ ...EMPTY_TEST_FORM })
+   249→   249→  const [testLoading, setTestLoading] = React.useState(false)
+   250→   250→  const [testHits, setTestHits] = React.useState<MatchTestHitDTO[] | null>(null)
+   251→   251→  // 复制 Dialog
+   252→   252→  const [copyDialog, setCopyDialog] = React.useState<{
+   253→   253→    open: boolean
+   254→   254→    source: MatchStrategyDTO | null
+   255→   255→    newId: string
+   256→   256→    newName: string
+   257→   257→    enableCopy: boolean
+   258→   258→    copyAlerts: boolean
+   259→   259→    loading: boolean
+   260→   260→  }>({
+   261→   261→    open: false,
+   262→   262→    source: null,
+   263→   263→    newId: '',
+   264→   264→    newName: '',
+   265→   265→    enableCopy: false,
+   266→   266→    copyAlerts: true,
+   267→   267→    loading: false,
+   268→   268→  })
+   269→   269→
+   270→   270→  // ------------------------------------------------------------------
+   271→   271→  // 加载
+   272→   272→  // ------------------------------------------------------------------
+   273→   273→  const load = React.useCallback(async () => {
+   274→   274→    setLoading(true)
+   275→   275→    try {
+   276→   276→      const data = await matchStrategyAPI.list()
+   277→   277→      setItems(data.items || [])
+   278→   278→    } catch (e) {
+   279→   279→      toast.error('加载匹配策略失败', { description: (e as Error).message })
+   280→   280→    } finally {
+   281→   281→      setLoading(false)
+   282→   282→    }
+   283→   283→  }, [])
+   284→   284→
+   285→   285→  const loadStrategies = React.useCallback(async () => {
+   286→   286→    try {
+   287→   287→      const data = await strategyAPI.list()
+   288→   288→      setStrategies(data || [])
+   289→   289→    } catch {
+   290→   290→      /* 非关键失败，静默 */
+   291→   291→    }
+   292→   292→  }, [])
+   293→   293→
+   294→   294→  React.useEffect(() => {
+   295→   295→    load()
+   296→   296→    loadStrategies()
+   297→   297→  }, [load, loadStrategies])
+   298→   298→
+   299→   299→  // ------------------------------------------------------------------
+   300→   300→  // 顶部：reload
+   301→   301→  // ------------------------------------------------------------------
+   302→   302→  const handleReload = async () => {
+   303→   303→    setReloading(true)
+   304→   304→    const tid = toast.loading('正在重载 match_strategies YAML...')
+   305→   305→    try {
+   306→   306→      const r = await matchStrategyAPI.reload()
+   307→   307→      toast.success('YAML 已重载', {
+   308→   308→        id: tid,
+   309→   309→        description: `当前 ${r.count} 项：${r.message}`,
+   310→   310→      })
+   311→   311→      await load()
+   312→   312→    } catch (e) {
+   313→   313→      toast.error('重载失败', { id: tid, description: (e as Error).message })
+   314→   314→    } finally {
+   315→   315→      setReloading(false)
+   316→   316→    }
+   317→   317→  }
+   318→   318→
+   319→   319→  // ------------------------------------------------------------------
+   320→   320→  // 启用/禁用 switch (单卡片立即生效，调 PUT)
+   321→   321→  // ------------------------------------------------------------------
+   322→   322→  const handleToggleEnabled = async (s: MatchStrategyDTO, next: boolean) => {
+   323→   323→    setTogglingId(s.match_id)
+   324→   324→    try {
+   325→   325→      await matchStrategyAPI.update(s.match_id, { enabled: next })
+   326→   326→      setItems((prev) =>
+   327→   327→        prev.map((x) =>
+   328→   328→          x.match_id === s.match_id ? { ...x, enabled: next } : x
+   329→   329→        )
+   330→   330→      )
+   331→   331→      toast.success(
+   332→   332→        `${s.name || s.match_id} 已${next ? '启用' : '禁用'}`,
+   333→   333→        { description: `match_id: ${s.match_id}` }
+   334→   334→      )
+   335→   335→    } catch (e) {
+   336→   336→      toast.error('切换状态失败', { description: (e as Error).message })
+   337→   337→    } finally {
+   338→   338→      setTogglingId(null)
+   339→   339→    }
+   340→   340→  }
+   341→   341→
+   342→   342→  // ------------------------------------------------------------------
+   343→   343→  // 新建 Dialog
+   344→   344→  // ------------------------------------------------------------------
+   345→   345→  const openCreate = () => {
+   346→   346→    setEditMode('create')
+   347→   347→    setEditForm(strategyToForm(emptyDtoForCreate()))
+   348→   348→    setEditOpen(true)
+   349→   349→  }
+   350→   350→
+   351→   351→  // ------------------------------------------------------------------
+   352→   352→  // 编辑 Dialog
+   353→   353→  // ------------------------------------------------------------------
+   354→   354→  const openEdit = (s: MatchStrategyDTO) => {
+   355→   355→    setEditMode('update')
+   356→   356→    setEditForm(strategyToForm(s))
+   357→   357→    setEditOpen(true)
+   358→   358→  }
+   359→   359→
+   360→   360→  const handleSave = async () => {
+   361→   361→    if (!editForm.match_id.trim()) {
+   362→   362→      toast.error('match_id 不能为空')
+   363→   363→      return
+   364→   364→    }
+   365→   365→    if (!editForm.name.trim()) {
+   366→   366→      toast.error('名称不能为空')
+   367→   367→      return
+   368→   368→    }
+   369→   369→    if (editMode === 'create' && isDefault(editForm.match_id)) {
+   370→   370→      toast.error('match_id 不能为 _default（系统保留）')
+   371→   371→      return
+   372→   372→    }
+   373→   373→    // debounce 数字校验
+   374→   374→    let debounceOverride: number | null = null
+   375→   375→    if (editForm.debounce_override.trim() !== '') {
+   376→   376→      const n = Number(editForm.debounce_override)
+   377→   377→      if (!Number.isFinite(n) || n < 0) {
+   378→   378→        toast.error('debounce 必须是非负数字（或留空用全局）')
+   379→   379→        return
+   380→   380→      }
+   381→   381→      debounceOverride = Math.floor(n)
+   382→   382→    }
+   383→   383→
+   384→   384→    setEditSaving(true)
+   385→   385→    const tid = toast.loading(editMode === 'create' ? '正在创建...' : '正在保存...')
+   386→   386→    try {
+   387→   387→      if (editMode === 'create') {
+   388→   388→        await matchStrategyAPI.create({
+   389→   389→          match_id: editForm.match_id.trim(),
+   390→   390→          name: editForm.name.trim(),
+   391→   391→          enabled: editForm.enabled,
+   392→   392→          strategy_id: editForm.strategy_id,
+   393→   393→          scope: editForm.scope,
+   394→   394→          alerts: editForm.alerts,
+   395→   395→          debounce_override: debounceOverride,
+   396→   396→          trading_hours_override: null,
+   397→   397→        })
+   398→   398→        toast.success('已创建匹配策略', {
+   399→   399→          id: tid,
+   400→   400→          description: `${editForm.match_id} · ${editForm.alerts.length} 个 alert`,
+   401→   401→        })
+   402→   402→      } else {
+   403→   403→        await matchStrategyAPI.update(editForm.match_id, {
+   404→   404→          name: editForm.name.trim(),
+   405→   405→          enabled: editForm.enabled,
+   406→   406→          strategy_id: editForm.strategy_id,
+   407→   407→          scope: editForm.scope,
+   408→   408→          alerts: editForm.alerts,
+   409→   409→          debounce_override: debounceOverride,
+   410→   410→        })
+   411→   411→        toast.success('已保存修改', {
+   412→   412→          id: tid,
+   413→   413→          description: `match_id: ${editForm.match_id}`,
+   414→   414→        })
+   415→   415→      }
+   416→   416→      setEditOpen(false)
+   417→   417→      await load()
+   418→   418→    } catch (e) {
+   419→   419→      toast.error('保存失败', { id: tid, description: (e as Error).message })
+   420→   420→    } finally {
+   421→   421→      setEditSaving(false)
+   422→   422→    }
+   423→   423→  }
+   424→   424→
+   425→   425→  // ------------------------------------------------------------------
+   426→   426→  // 删除确认
+   427→   427→  // ------------------------------------------------------------------
+   428→   428→  const handleDelete = async () => {
+   429→   429→    if (!deleteTarget) return
+   430→   430→    setDeleteSaving(true)
+   431→   431→    const tid = toast.loading(`正在删除 ${deleteTarget.match_id}...`)
+   432→   432→    try {
+   433→   433→      await matchStrategyAPI.remove(deleteTarget.match_id)
+   434→   434→      toast.success('已删除', {
+   435→   435→        id: tid,
+   436→   436→        description: deleteTarget.match_id,
+   437→   437→      })
+   438→   438→      setDeleteTarget(null)
+   439→   439→      await load()
+   440→   440→    } catch (e) {
+   441→   441→      const msg = (e as Error).message || ''
+   442→   442→      // 后端 403 (兜底) → 友好提示
+   443→   443→      if (msg.includes('_default') || msg.includes('兜底')) {
+   444→   444→        toast.error('不允许删除兜底套餐 _default', {
+   445→   445→          id: tid,
+   446→   446→          description: '兜底套餐系统保留，不可删除',
+   447→   447→        })
+   448→   448→      } else {
+   449→   449→        toast.error('删除失败', { id: tid, description: msg })
+   450→   450→      }
+   451→   451→    } finally {
+   452→   452→      setDeleteSaving(false)
+   453→   453→    }
+   454→   454→  }
+   455→   455→
+   456→   456→  // ------------------------------------------------------------------
+   457→   457→  // 测试
+   458→   458→  // ------------------------------------------------------------------
+   459→   459→  const openTest = (s: MatchStrategyDTO) => {
+   460→   460→    setTestTarget(s)
+   461→   461→    setTestForm({ ...EMPTY_TEST_FORM, code: '600519.SH' })
+   462→   462→    setTestHits(null)
+   463→   463→  }
+   464→   464→
+   465→   465→  const handleTest = async () => {
+   466→   466→    if (!testTarget) return
+   467→   467→    if (!testForm.code.trim()) {
+   468→   468→      toast.error('请输入股票代码')
+   469→   469→      return
+   470→   470→    }
+   471→   471→    const params: Record<string, unknown> = { code: testForm.code.trim() }
+   472→   472→    if (testForm.pct_change.trim()) params.pct_change = Number(testForm.pct_change)
+   473→   473→    if (testForm.volume_ratio.trim()) params.volume_ratio = Number(testForm.volume_ratio)
+   474→   474→    if (testForm.main_inflow.trim()) params.main_inflow = Number(testForm.main_inflow)
+   475→   475→    if (testForm.auction_pct.trim()) params.auction_pct = Number(testForm.auction_pct)
+   476→   476→
+   477→   477→    setTestLoading(true)
+   478→   478→    setTestHits(null)
+   479→   479→    try {
+   480→   480→      const r = await matchStrategyAPI.test(
+   481→   481→        testTarget.match_id,
+   482→   482→        params as Parameters<typeof matchStrategyAPI.test>[1]
+   483→   483→      )
+   484→   484→      setTestHits(r.hits || [])
+   485→   485→      const hits = (r.hits || []).filter((h) => h.hit).length
+   486→   486→      toast.success('测试完成', {
+   487→   487→        description: `${testTarget.match_id} · 命中 ${hits}/${r.hits?.length ?? 0} 条 alert`,
+   488→   488→      })
+   489→   489→    } catch (e) {
+   490→   490→      toast.error('测试失败', { description: (e as Error).message })
+   491→   491→    } finally {
+   492→   492→      setTestLoading(false)
+   493→   493→    }
+   494→   494→  }
+   495→   495→
+   496→   496→  // ------------------------------------------------------------------
+   497→   497→  // 复制 Dialog
+   498→   498→  // ------------------------------------------------------------------
+   499→   499→  const openCopy = (s: MatchStrategyDTO) => {
+   500→   500→    const existingIds = new Set(items.map((x) => x.match_id))
+   501→   501→    const newId = makeUniqueCopyId(s.match_id, existingIds)
+   502→   502→    const newName = `${s.name || s.match_id} 副本`
+   503→   503→    setCopyDialog({
+   504→   504→      open: true,
+   505→   505→      source: s,
+   506→   506→      newId,
+   507→   507→      newName,
+   508→   508→      enableCopy: false,
+   509→   509→      copyAlerts: true,
+   510→   510→      loading: false,
+   511→   511→    })
+   512→   512→  }
+   513→   513→
+   514→   514→  const closeCopy = () => {
+   515→   515→    setCopyDialog((p) => ({ ...p, open: false }))
+   516→   516→  }
+   517→   517→
+   518→   518→  const handleCopyCreate = async () => {
+   519→   519→    const { source, newId, newName, copyAlerts } = copyDialog
+   520→   520→    if (!source) return
+   521→   521→    const trimmedId = newId.trim()
+   522→   522→    const trimmedName = newName.trim()
+   523→   523→    if (!trimmedId) {
+   524→   524→      toast.error('match_id 不能为空')
+   525→   525→      return
+   526→   526→    }
+   527→   527→    if (!isValidMatchId(trimmedId)) {
+   528→   528→      toast.error('match_id 只能含字母、数字、下划线')
+   529→   529→      return
+   530→   530→    }
+   531→   531→    if (isDefault(trimmedId)) {
+   532→   532→      toast.error('match_id 不能为 _default（系统保留）')
+   533→   533→      return
+   534→   534→    }
+   535→   535→    if (!trimmedName) {
+   536→   536→      toast.error('显示名不能为空')
+   537→   537→      return
+   538→   538→    }
+   539→   539→
+   540→   540→    // 客户端预检：本地已存在则直接提示，避免无效请求
+   541→   541→    if (items.some((x) => x.match_id === trimmedId)) {
+   542→   542→      toast.error('ID 已存在，请换一个', { description: `match_id: ${trimmedId}` })
+   543→   543→      return
+   544→   544→    }
+   545→   545→
+   546→   546→    // 副本默认不启用 (避免重复预警)；其余字段从源策略原样复制
+   547→   547→    const payload: MatchCreateRequest = {
+   548→   548→      match_id: trimmedId,
+   549→   549→      name: trimmedName,
+   550→   550→      strategy_id: source.strategy_id,
+   551→   551→      enabled: false,
+   552→   552→      scope: source.scope,
+   553→   553→      alerts: copyAlerts
+   554→   554→        ? (source.alerts || []).map((a) => ({
+   555→   555→            alert_type: a.alert_type,
+   556→   556→            params: { ...(a.params || {}) },
+   557→   557→            channels: [...(a.channels || [])],
+   558→   558→            priority: a.priority,
+   559→   559→          }))
+   560→   560→        : [],
+   561→   561→      debounce_override: source.debounce_override,
+   562→   562→      trading_hours_override: source.trading_hours_override,
+   563→   563→    }
+   564→   564→
+   565→   565→    setCopyDialog((p) => ({ ...p, loading: true }))
+   566→   566→    const tid = toast.loading('正在创建副本...')
+   567→   567→    try {
+   568→   568→      await matchStrategyAPI.create(payload)
+   569→   569→      toast.success('副本已创建', {
+   570→   570→        id: tid,
+   571→   571→        description: `${trimmedId} · 基于 ${source.match_id}`,
+   572→   572→      })
+   573→   573→      closeCopy()
+   574→   574→      await load()
+   575→   575→    } catch (e) {
+   576→   576→      const err = e as APIError
+   577→   577→      const msg = err.message || ''
+   578→   578→      // 后端 409 重复 / 400 校验失败 → 友好提示
+   579→   579→      if (
+   580→   580→        err.status === 409 ||
+   581→   581→        msg.includes('已存在') ||
+   582→   582→        msg.includes('already exists') ||
+   583→   583→        msg.includes('duplicate')
+   584→   584→      ) {
+   585→   585→        toast.error('ID 已存在，请换一个', { id: tid, description: msg })
+   586→   586→      } else if (err.status === 403 || msg.includes('_default')) {
+   587→   587→        toast.error('不允许的操作', { id: tid, description: msg })
+   588→   588→      } else {
+   589→   589→        toast.error('创建副本失败', { id: tid, description: msg })
+   590→   590→      }
+   591→   591→    } finally {
+   592→   592→      setCopyDialog((p) => ({ ...p, loading: false }))
+   593→   593→    }
+   594→   594→  }
+   595→   595→
+   596→   596→  // ------------------------------------------------------------------
+   597→   597→  // 渲染
+   598→   598→  // ------------------------------------------------------------------
+   599→   599→  return (
+   600→   600→    <div className="space-y-4">
+   601→   601→      {/* 顶部工具栏 */}
+   602→   602→      <Card className="p-3 gap-0 bg-quant-card border-quant">
+   603→   603→        <div className="flex flex-wrap items-center justify-between gap-2">
+   604→   604→          <div className="flex items-center gap-2 text-sm">
+   605→   605→            <Crosshair className="size-4 text-quant-primary" />
+   606→   606→            <span className="font-semibold">匹配策略管理</span>
+   607→   607→            <Badge variant="outline" className="border-quant font-mono">
+   608→   608→              {items.length} 项
+   609→   609→            </Badge>
+   610→   610→            <span className="text-xs text-muted-foreground hidden sm:inline">
+   611→   611→              match_strategies.yaml · 三层模型 L2 装配单
+   612→   612→            </span>
+   613→   613→          </div>
+   614→   614→          <div className="flex items-center gap-1.5">
+   615→   615→            <Button
+   616→   616→              size="sm"
+   617→   617→              variant="outline"
+   618→   618→              className="h-8 border-quant"
+   619→   619→              onClick={handleReload}
+   620→   620→              disabled={reloading}
+   621→   621→            >
+   622→   622→              <RefreshCw className={cn('size-3.5', reloading && 'animate-spin')} />
+   623→   623→              <span className="hidden sm:inline">重载 YAML</span>
+   624→   624→            </Button>
+   625→   625→            <Button
+   626→   626→              size="sm"
+   627→   627→              className="h-8 bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25"
+   628→   628→              onClick={openCreate}
+   629→   629→            >
+   630→   630→              <Plus className="size-3.5" />
+   631→   631→              <span className="hidden sm:inline">新建匹配策略</span>
+   632→   632→            </Button>
+   633→   633→            <Button
+   634→   634→              size="sm"
+   635→   635→              variant="ghost"
+   636→   636→              className="h-8"
+   637→   637→              onClick={load}
+   638→   638→              disabled={loading}
+   639→   639→            >
+   640→   640→              <RefreshCw className={cn('size-3.5', loading && 'animate-spin')} />
+   641→   641→              <span className="hidden sm:inline">刷新</span>
+   642→   642→            </Button>
+   643→   643→          </div>
+   644→   644→        </div>
+   645→   645→      </Card>
+   646→   646→
+   647→   647→      {/* 卡片列表 */}
+   648→   648→      {loading ? (
+   649→   649→        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+   650→   650→          {Array.from({ length: 3 }).map((_, i) => (
+   651→   651→            <Card key={i} className="p-4 bg-quant-card border-quant">
+   652→   652→              <div className="h-4 w-1/2 bg-muted/30 rounded mb-2" />
+   653→   653→              <div className="h-3 w-2/3 bg-muted/20 rounded mb-3" />
+   654→   654→              <div className="h-16 w-full bg-muted/10 rounded" />
+   655→   655→            </Card>
+   656→   656→          ))}
+   657→   657→        </div>
+   658→   658→      ) : items.length === 0 ? (
+   659→   659→        <Card className="bg-quant-card border-quant">
+   660→   660→          <div className="flex flex-col items-center justify-center py-10 text-center text-sm text-muted-foreground">
+   661→   661→            <Crosshair className="size-6 mb-2 opacity-40" />
+   662→   662→            暂无匹配策略，点击右上角"新建"创建
+   663→   663→          </div>
+   664→   664→        </Card>
+   665→   665→      ) : (
+   666→   666→        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+   667→   667→          {items.map((s) => (
+   668→   668→            <MatchCard
+   669→   669→              key={s.match_id}
+   670→   670→              data={s}
+   671→   671→              strategies={strategies}
+   672→   672→              toggling={togglingId === s.match_id}
+   673→   673→              onToggle={(next) => handleToggleEnabled(s, next)}
+   674→   674→              onEdit={() => openEdit(s)}
+   675→   675→              onTest={() => openTest(s)}
+   676→   676→              onCopy={() => openCopy(s)}
+   677→   677→              onDelete={() => setDeleteTarget(s)}
+   678→   678→            />
+   679→   679→          ))}
+   680→   680→        </div>
+   681→   681→      )}
+   682→   682→
+   683→   683→      {/* 编辑/新建 Dialog */}
+   684→   684→      <Dialog open={editOpen} onOpenChange={(v) => !v && setEditOpen(false)}>
+   685→   685→        <DialogContent className="sm:max-w-3xl max-h-[90vh] flex flex-col">
+   686→   686→          <DialogHeader>
+   687→   687→            <DialogTitle className="flex items-center gap-2">
+   688→   688→              <Crosshair className="size-5 text-quant-primary" />
+   689→   689→              {editMode === 'create' ? '新建匹配策略' : `编辑 ${editForm.match_id}`}
+   690→   690→            </DialogTitle>
+   691→   691→            <DialogDescription>
+   692→   692→              match_id 全局唯一；strategy_id 决定走哪个选股策略；alerts 引用
+   693→   693→              monitor_rules.yaml 的 alert_templates。
+   694→   694→            </DialogDescription>
+   695→   695→          </DialogHeader>
+   696→   696→
+   697→   697→          <ScrollArea className="flex-1 max-h-[60vh] pr-3">
+   698→   698→            <EditForm
+   699→   699→              value={editForm}
+   700→   700→              onChange={setEditForm}
+   701→   701→              strategies={strategies}
+   702→   702→              mode={editMode}
+   703→   703→            />
+   704→   704→          </ScrollArea>
+   705→   705→
+   706→   706→          <DialogFooter className="gap-2">
+   707→   707→            <Button
+   708→   708→              variant="outline"
+   709→   709→              onClick={() => setEditOpen(false)}
+   710→   710→              disabled={editSaving}
+   711→   711→            >
+   712→   712→              取消
+   713→   713→            </Button>
+   714→   714→            <Button
+   715→   715→              className="bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25"
+   716→   716→              onClick={handleSave}
+   717→   717→              disabled={editSaving}
+   718→   718→            >
+   719→   719→              {editSaving ? (
+   720→   720→                <Loader2 className="size-4 animate-spin" />
+   721→   721→              ) : (
+   722→   722→                <Plus className="size-4" />
+   723→   723→              )}
+   724→   724→              {editMode === 'create' ? '创建' : '保存'}
+   725→   725→            </Button>
+   726→   726→          </DialogFooter>
+   727→   727→        </DialogContent>
+   728→   728→      </Dialog>
+   729→   729→
+   730→   730→      {/* 删除确认 */}
+   731→   731→      <AlertDialog
+   732→   732→        open={!!deleteTarget}
+   733→   733→        onOpenChange={(v) => !v && !deleteSaving && setDeleteTarget(null)}
+   734→   734→      >
+   735→   735→        <AlertDialogContent>
+   736→   736→          <AlertDialogHeader>
+   737→   737→            <AlertDialogTitle className="flex items-center gap-2">
+   738→   738→              <AlertCircle className="size-5 text-red-500" />
+   739→   739→              确认删除匹配策略
+   740→   740→            </AlertDialogTitle>
+   741→   741→            <AlertDialogDescription>
+   742→   742→              即将删除 <span className="font-mono font-semibold">{deleteTarget?.match_id}</span>
+   743→   743→              （{deleteTarget?.name}）。
+   744→   744→              {deleteTarget && isDefault(deleteTarget.match_id) && (
+   745→   745→                <span className="block mt-2 text-red-500 font-medium">
+   746→   746→                  ⚠ _default 为兜底套餐，后端会返回 403 拒绝删除。
+   747→   747→                </span>
+   748→   748→              )}
+   749→   749→              <span className="block mt-1">该操作不可恢复，删除后相关股票将不再产生预警。</span>
+   750→   750→            </AlertDialogDescription>
+   751→   751→          </AlertDialogHeader>
+   752→   752→          <AlertDialogFooter>
+   753→   753→            <AlertDialogCancel disabled={deleteSaving}>取消</AlertDialogCancel>
+   754→   754→            <AlertDialogAction
+   755→   755→              className="bg-red-500/15 text-red-500 border border-red-500/30 hover:bg-red-500/25"
+   756→   756→              onClick={handleDelete}
+   757→   757→              disabled={deleteSaving}
+   758→   758→            >
+   759→   759→              {deleteSaving ? (
+   760→   760→                <Loader2 className="size-4 animate-spin mr-1" />
+   761→   761→              ) : (
+   762→   762→                <Trash2 className="size-4 mr-1" />
+   763→   763→              )}
+   764→   764→              确认删除
+   765→   765→            </AlertDialogAction>
+   766→   766→          </AlertDialogFooter>
+   767→   767→        </AlertDialogContent>
+   768→   768→      </AlertDialog>
+   769→   769→
+   770→   770→      {/* 测试 Dialog */}
+   771→   771→      <Dialog
+   772→   772→        open={!!testTarget}
+   773→   773→        onOpenChange={(v) => !v && !testLoading && setTestTarget(null)}
+   774→   774→      >
+   775→   775→        <DialogContent className="sm:max-w-2xl max-h-[90vh] flex flex-col">
+   776→   776→          <DialogHeader>
+   777→   777→            <DialogTitle className="flex items-center gap-2">
+   778→   778→              <FlaskConical className="size-5 text-amber-400" />
+   779→   779→              调参预览 · {testTarget?.match_id}
+   780→   780→            </DialogTitle>
+   781→   781→            <DialogDescription>
+   782→   782→              输入单股快照试跑 match，返回命中的 alert 列表（不实际推送）。
+   783→   783→            </DialogDescription>
+   784→   784→          </DialogHeader>
+   785→   785→
+   786→   786→          <div className="space-y-3">
+   787→   787→            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+   788→   788→              <div className="space-y-1">
+   789→   789→                <Label className="text-xs">股票代码 *</Label>
+   790→   790→                <Input
+   791→   791→                  className="h-8 font-mono text-xs"
+   792→   792→                  placeholder="600519.SH"
+   793→   793→                  value={testForm.code}
+   794→   794→                  onChange={(e) =>
+   795→   795→                    setTestForm((p) => ({ ...p, code: e.target.value }))
+   796→   796→                  }
+   797→   797→                />
+   798→   798→              </div>
+   799→   799→              <div className="space-y-1">
+   800→   800→                <Label className="text-xs">涨跌幅 (0.04=4%)</Label>
+   801→   801→                <Input
+   802→   802→                  className="h-8 font-mono text-xs"
+   803→   803→                  type="number"
+   804→   804→                  step="0.001"
+   805→   805→                  placeholder="0.04"
+   806→   806→                  value={testForm.pct_change}
+   807→   807→                  onChange={(e) =>
+   808→   808→                    setTestForm((p) => ({ ...p, pct_change: e.target.value }))
+   809→   809→                  }
+   810→   810→                />
+   811→   811→              </div>
+   812→   812→              <div className="space-y-1">
+   813→   813→                <Label className="text-xs">量比 (vol_ratio)</Label>
+   814→   814→                <Input
+   815→   815→                  className="h-8 font-mono text-xs"
+   816→   816→                  type="number"
+   817→   817→                  step="0.1"
+   818→   818→                  placeholder="1.5"
+   819→   819→                  value={testForm.volume_ratio}
+   820→   820→                  onChange={(e) =>
+   821→   821→                    setTestForm((p) => ({ ...p, volume_ratio: e.target.value }))
+   822→   822→                  }
+   823→   823→                />
+   824→   824→              </div>
+   825→   825→              <div className="space-y-1">
+   826→   826→                <Label className="text-xs">主力净流入 (万)</Label>
+   827→   827→                <Input
+   828→   828→                  className="h-8 font-mono text-xs"
+   829→   829→                  type="number"
+   830→   830→                  step="100"
+   831→   831→                  placeholder="5000"
+   832→   832→                  value={testForm.main_inflow}
+   833→   833→                  onChange={(e) =>
+   834→   834→                    setTestForm((p) => ({ ...p, main_inflow: e.target.value }))
+   835→   835→                  }
+   836→   836→                />
+   837→   837→              </div>
+   838→   838→              <div className="space-y-1">
+   839→   839→                <Label className="text-xs">集合竞价涨幅</Label>
+   840→   840→                <Input
+   841→   841→                  className="h-8 font-mono text-xs"
+   842→   842→                  type="number"
+   843→   843→                  step="0.001"
+   844→   844→                  placeholder="0.02"
+   845→   845→                  value={testForm.auction_pct}
+   846→   846→                  onChange={(e) =>
+   847→   847→                    setTestForm((p) => ({ ...p, auction_pct: e.target.value }))
+   848→   848→                  }
+   849→   849→                />
+   850→   850→              </div>
+   851→   851→              <div className="flex items-end">
+   852→   852→                <Button
+   853→   853→                  className="h-8 w-full bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25"
+   854→   854→                  onClick={handleTest}
+   855→   855→                  disabled={testLoading}
+   856→   856→                >
+   857→   857→                  {testLoading ? (
+   858→   858→                    <Loader2 className="size-3.5 animate-spin mr-1" />
+   859→   859→                  ) : (
+   860→   860→                    <FlaskConical className="size-3.5 mr-1" />
+   861→   861→                  )}
+   862→   862→                  测试
+   863→   863→                </Button>
+   864→   864→              </div>
+   865→   865→            </div>
+   866→   866→          </div>
+   867→   867→
+   868→   868→          <Separator />
+   869→   869→
+   870→   870→          {/* 测试结果 */}
+   871→   871→          <div className="flex-1 overflow-hidden">
+   872→   872→            {testHits === null ? (
+   873→   873→              <div className="text-xs text-muted-foreground text-center py-8">
+   874→   874→                点击"测试"查看命中结果
+   875→   875→              </div>
+   876→   876→            ) : testHits.length === 0 ? (
+   877→   877→              <div className="text-xs text-muted-foreground text-center py-8">
+   878→   878→                该 match 无 alert 配置
+   879→   879→              </div>
+   880→   880→            ) : (
+   881→   881→              <ScrollArea className="max-h-72">
+   882→   882→                <div className="space-y-1.5 pr-2">
+   883→   883→                  {testHits.map((h, i) => (
+   884→   884→                    <div
+   885→   885→                      key={`${h.alert_type}-${i}`}
+   886→   886→                      className={cn(
+   887→   887→                        'rounded-md border p-2 text-xs flex items-start gap-2',
+   888→   888→                        h.hit
+   889→   889→                          ? 'border-[var(--quant-up)]/30 bg-[var(--quant-up)]/5'
+   890→   890→                          : 'border-quant bg-quant-card/30'
+   891→   891→                      )}
+   892→   892→                    >
+   893→   893→                      <div className="flex flex-col gap-1 items-start shrink-0">
+   894→   894→                        <Badge
+   895→   895→                          variant={
+   896→   896→                            h.hit ? priorityVariant[h.priority || 'medium'] : 'outline'
+   897→   897→                          }
+   898→   898→                          className="text-[10px]"
+   899→   899→                        >
+   900→   900→                          {h.hit ? '命中' : '未中'}
+   901→   901→                        </Badge>
+   902→   902→                        {h.priority && (
+   903→   903→                          <Badge
+   904→   904→                            variant="outline"
+   905→   905→                            className="text-[10px] border-quant"
+   906→   906→                          >
+   907→   907→                            {PRIORITY_LABEL[h.priority]}
+   908→   908→                          </Badge>
+   909→   909→                        )}
+   910→   910→                      </div>
+   911→   911→                      <div className="min-w-0 flex-1">
+   912→   912→                        <div className="flex items-center gap-2 flex-wrap">
+   913→   913→                          <span className="font-mono font-medium text-foreground">
+   914→   914→                            {h.alert_type}
+   915→   915→                          </span>
+   916→   916→                          {h.channels && h.channels.length > 0 && (
+   917→   917→                            <span className="text-[10px] text-muted-foreground">
+   918→   918→                              → {h.channels.join(', ')}
+   919→   919→                            </span>
+   920→   920→                          )}
+   921→   921→                        </div>
+   922→   922→                        <div className="mt-0.5 font-mono text-[10px] text-muted-foreground break-all">
+   923→   923→                          {h.error ? (
+   924→   924→                            <span className="text-red-500">err: {h.error}</span>
+   925→   925→                          ) : (
+   926→   926→                            h.condition
+   927→   927→                          )}
+   928→   928→                        </div>
+   929→   929→                      </div>
+   930→   930→                    </div>
+   931→   931→                  ))}
+   932→   932→                </div>
+   933→   933→              </ScrollArea>
+   934→   934→            )}
+   935→   935→          </div>
+   936→   936→        </DialogContent>
+   937→   937→      </Dialog>
+   938→   938→
+   939→   939→      {/* 复制 Dialog */}
+   940→   940→      <Dialog
+   941→   941→        open={copyDialog.open}
+   942→   942→        onOpenChange={(v) => {
+   943→   943→          if (!v && !copyDialog.loading) closeCopy()
+   944→   944→        }}
+   945→   945→      >
+   946→   946→        <DialogContent className="sm:max-w-md max-h-[90vh] flex flex-col">
+   947→   947→          <DialogHeader>
+   948→   948→            <DialogTitle className="flex items-center gap-2">
+   949→   949→              <Copy className="size-5 text-amber-400" />
+   950→   950→              复制匹配策略
+   951→   951→            </DialogTitle>
+   952→   952→            <DialogDescription>
+   953→   953→              {copyDialog.source
+   954→   954→                ? `基于「${copyDialog.source.name || copyDialog.source.match_id}」创建副本，可修改 ID 和名称。`
+   955→   955→                : '基于现有策略创建副本。'}
+   956→   956→            </DialogDescription>
+   957→   957→          </DialogHeader>
+   958→   958→
+   959→   959→          <CopyForm
+   960→   960→            value={copyDialog}
+   961→   961→            onChange={(patch) => setCopyDialog((p) => ({ ...p, ...patch }))}
+   962→   962→            existingIds={items.map((x) => x.match_id)}
+   963→   963→          />
+   964→   964→
+   965→   965→          <DialogFooter className="gap-2">
+   966→   966→            <Button
+   967→   967→              variant="outline"
+   968→   968→              onClick={closeCopy}
+   969→   969→              disabled={copyDialog.loading}
+   970→   970→            >
+   971→   971→              取消
+   972→   972→            </Button>
+   973→   973→            <Button
+   974→   974→              className="bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25"
+   975→   975→              onClick={handleCopyCreate}
+   976→   976→              disabled={
+   977→   977→                copyDialog.loading ||
+   978→   978→                !copyDialog.newId.trim() ||
+   979→   979→                !isValidMatchId(copyDialog.newId) ||
+   980→   980→                !copyDialog.newName.trim() ||
+   981→   981→                isDefault(copyDialog.newId.trim())
+   982→   982→              }
+   983→   983→            >
+   984→   984→              {copyDialog.loading ? (
+   985→   985→                <Loader2 className="size-4 animate-spin" />
+   986→   986→              ) : (
+   987→   987→                <Copy className="size-4" />
+   988→   988→              )}
+   989→   989→              创建副本
+   990→   990→            </Button>
+   991→   991→          </DialogFooter>
+   992→   992→        </DialogContent>
+   993→   993→      </Dialog>
+   994→   994→    </div>
+   995→   995→  )
+   996→   996→}
+   997→   997→
+   998→   998→// ============================================================================
+   999→   999→// 单张卡片
+  1000→  1000→// ============================================================================
+  1001→  1001→
+  1002→  1002→interface MatchCardProps {
+  1003→  1003→  data: MatchStrategyDTO
+  1004→  1004→  strategies: StrategyDTO[]
+  1005→  1005→  toggling: boolean
+  1006→  1006→  onToggle: (next: boolean) => void
+  1007→  1007→  onEdit: () => void
+  1008→  1008→  onTest: () => void
+  1009→  1009→  onCopy: () => void
+  1010→  1010→  onDelete: () => void
+  1011→  1011→}
+  1012→  1012→
+  1013→  1013→function MatchCard({
+  1014→  1014→  data,
+  1015→  1015→  strategies,
+  1016→  1016→  toggling,
+  1017→  1017→  onToggle,
+  1018→  1018→  onEdit,
+  1019→  1019→  onTest,
+  1020→  1020→  onCopy,
+  1021→  1021→  onDelete,
+  1022→  1022→}: MatchCardProps) {
+  1023→  1023→  const def = isDefault(data.match_id)
+  1024→  1024→  const linkedStrategy = strategies.find((s) => s.strategy_id === data.strategy_id)
+  1025→  1025→  const hitCount = (data.alerts || []).filter(Boolean).length
+  1026→  1026→  const highCount = (data.alerts || []).filter((a) => a.priority === 'high').length
+  1027→  1027→
+  1028→  1028→  return (
+  1029→  1029→    <Card className="p-4 gap-2 bg-quant-card border-quant hover:border-[var(--quant-primary)]/40 transition-colors flex flex-col">
+  1030→  1030→      {/* 头部 */}
+  1031→  1031→      <div className="flex items-start justify-between gap-2">
+  1032→  1032→        <div className="min-w-0">
+  1033→  1033→          <div className="flex items-center gap-1.5">
+  1034→  1034→            <span className="font-semibold text-sm truncate">{data.name || data.match_id}</span>
+  1035→  1035→            {def && (
+  1036→  1036→              <Badge
+  1037→  1037→                variant="outline"
+  1038→  1038→                className="text-[10px] border-amber-500/30 bg-amber-500/10 text-amber-400 gap-0.5"
+  1039→  1039→              >
+  1040→  1040→                <Shield className="size-2.5" />
+  1041→  1041→                兜底
+  1042→  1042→              </Badge>
+  1043→  1043→            )}
+  1044→  1044→          </div>
+  1045→  1045→          <div className="text-[10px] font-mono text-muted-foreground truncate">
+  1046→  1046→            {data.match_id}
+  1047→  1047→          </div>
+  1048→  1048→        </div>
+  1049→  1049→        <Switch
+  1050→  1050→          checked={data.enabled}
+  1051→  1051→          onCheckedChange={onToggle}
+  1052→  1052→          disabled={toggling}
+  1053→  1053→          aria-label="启用/禁用"
+  1054→  1054→        />
+  1055→  1055→      </div>
+  1056→  1056→
+  1057→  1057→      {/* 关联策略 + alerts */}
+  1058→  1058→      <div className="flex items-center gap-2 flex-wrap text-xs">
+  1059→  1059→        <Badge
+  1060→  1060→          variant="outline"
+  1061→  1061→          className={
+  1062→  1062→            data.strategy_id
+  1063→  1063→              ? 'border-quant text-quant-primary font-mono'
+  1064→  1064→              : 'border-quant text-muted-foreground'
+  1065→  1065→          }
+  1066→  1066→        >
+  1067→  1067→          {data.strategy_id ? `策略: ${data.strategy_id}` : '全局兜底'}
+  1068→  1068→        </Badge>
+  1069→  1069→        <Badge variant="secondary" className="text-[10px]">
+  1070→  1070→          {hitCount} alerts
+  1071→  1071→        </Badge>
+  1072→  1072→        {highCount > 0 && (
+  1073→  1073→          <Badge variant="destructive" className="text-[10px]">
+  1074→  1074→            {highCount} high
+  1075→  1075→          </Badge>
+  1076→  1076→        )}
+  1077→  1077→      </div>
+  1078→  1078→
+  1079→  1079→      {/* scope 摘要 */}
+  1080→  1080→      <div className="text-[11px] text-muted-foreground leading-relaxed bg-muted/20 rounded p-1.5">
+  1081→  1081→        {scopeSummary(data.scope)}
+  1082→  1082→      </div>
+  1083→  1083→
+  1084→  1084→      {/* debounce */}
+  1085→  1085→      <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+  1086→  1086→        <span className="flex items-center gap-1">
+  1087→  1087→          <Clock className="size-3" />
+  1088→  1088→          debounce:
+  1089→  1089→          <span className="font-mono text-foreground/80">
+  1090→  1090→            {data.debounce_override === null || data.debounce_override === undefined
+  1091→  1091→              ? '全局默认'
+  1092→  1092→              : `${data.debounce_override}s`}
+  1093→  1093→          </span>
+  1094→  1094→        </span>
+  1095→  1095→        {linkedStrategy && (
+  1096→  1096→          <span className="truncate max-w-[10rem]">
+  1097→  1097→            → {linkedStrategy.strategy_name}
+  1098→  1098→          </span>
+  1099→  1099→        )}
+  1100→  1100→      </div>
+  1101→  1101→
+  1102→  1102→      {/* alerts 列表预览（最多 3 条）*/}
+  1103→  1103→      {data.alerts && data.alerts.length > 0 && (
+  1104→  1104→        <div className="space-y-0.5">
+  1105→  1105→          {data.alerts.slice(0, 3).map((a, i) => (
+  1106→  1106→            <div
+  1107→  1107→              key={`${a.alert_type}-${i}`}
+  1108→  1108→              className="flex items-center gap-1.5 text-[10px] font-mono"
+  1109→  1109→            >
+  1110→  1110→              <span
+  1111→  1111→                className={cn(
+  1112→  1112→                  'inline-block size-1.5 rounded-full',
+  1113→  1113→                  a.priority === 'high'
+  1114→  1114→                    ? 'bg-red-500'
+  1115→  1115→                    : a.priority === 'medium'
+  1116→  1116→                    ? 'bg-amber-400'
+  1117→  1117→                    : 'bg-muted-foreground'
+  1118→  1118→                )}
+  1119→  1119→              />
+  1120→  1120→              <span className="text-foreground/80">{a.alert_type}</span>
+  1121→  1121→              {a.channels.length > 0 && (
+  1122→  1122→                <span className="text-muted-foreground truncate">
+  1123→  1123→                  → {a.channels.join(',')}
+  1124→  1124→                </span>
+  1125→  1125→              )}
+  1126→  1126→            </div>
+  1127→  1127→          ))}
+  1128→  1128→          {data.alerts.length > 3 && (
+  1129→  1129→            <div className="text-[10px] text-muted-foreground">
+  1130→  1130→              ...还有 {data.alerts.length - 3} 条
+  1131→  1131→            </div>
+  1132→  1132→          )}
+  1133→  1133→        </div>
+  1134→  1134→      )}
+  1135→  1135→
+  1136→  1136→      <Separator className="my-1" />
+  1137→  1137→
+  1138→  1138→      {/* 操作 */}
+  1139→  1139→      <div className="flex items-center gap-1 mt-auto">
+  1140→  1140→        <Button
+  1141→  1141→          size="sm"
+  1142→  1142→          variant="ghost"
+  1143→  1143→          className="h-7 flex-1 text-xs"
+  1144→  1144→          onClick={onEdit}
+  1145→  1145→        >
+  1146→  1146→          <Pencil className="size-3" />
+  1147→  1147→          编辑
+  1148→  1148→        </Button>
+  1149→  1149→        <Button
+  1150→  1150→          size="sm"
+  1151→  1151→          variant="ghost"
+  1152→  1152→          className="h-7 flex-1 text-xs hover:bg-amber-500/10 hover:text-amber-400"
+  1153→  1153→          onClick={onTest}
+  1154→  1154→        >
+  1155→  1155→          <FlaskConical className="size-3" />
+  1156→  1156→          测试
+  1157→  1157→        </Button>
+  1158→  1158→        <Button
+  1159→  1159→          size="sm"
+  1160→  1160→          variant="ghost"
+  1161→  1161→          className="h-7 px-2 text-xs hover:bg-amber-500/10 hover:text-amber-400"
+  1162→  1162→          onClick={onCopy}
+  1163→  1163→          title={`基于「${data.name || data.match_id}」创建副本`}
+  1164→  1164→          aria-label="复制策略"
+  1165→  1165→        >
+  1166→  1166→          <Copy className="size-3" />
+  1167→  1167→        </Button>
+  1168→  1168→        <Button
+  1169→  1169→          size="sm"
+  1170→  1170→          variant="ghost"
+  1171→  1171→          className={cn(
+  1172→  1172→            'h-7 px-2 text-xs',
+  1173→  1173→            def
+  1174→  1174→              ? 'opacity-40 cursor-not-allowed hover:bg-transparent hover:text-muted-foreground'
+  1175→  1175→              : 'hover:bg-red-500/10 hover:text-red-500'
+  1176→  1176→          )}
+  1177→  1177→          onClick={onDelete}
+  1178→  1178→          disabled={def}
+  1179→  1179→          title={def ? '兜底套餐不允许删除' : '删除'}
+  1180→  1180→        >
+  1181→  1181→          <Trash2 className="size-3" />
+  1182→  1182→        </Button>
+  1183→  1183→      </div>
+  1184→  1184→    </Card>
+  1185→  1185→  )
+  1186→  1186→}
+  1187→  1187→
+  1188→  1188→// ============================================================================
+  1189→  1189→// 复制表单
+  1190→  1190→// ============================================================================
+  1191→  1191→
+  1192→  1192→interface CopyFormProps {
+  1193→  1193→  value: {
+  1194→  1194→    source: MatchStrategyDTO | null
+  1195→  1195→    newId: string
+  1196→  1196→    newName: string
+  1197→  1197→    enableCopy: boolean
+  1198→  1198→    copyAlerts: boolean
+  1199→  1199→    loading: boolean
+  1200→  1200→  }
+  1201→  1201→  onChange: (patch: Partial<CopyFormProps['value']>) => void
+  1202→  1202→  existingIds: string[]
+  1203→  1203→}
+  1204→  1204→
+  1205→  1205→function CopyForm({ value, onChange, existingIds }: CopyFormProps) {
+  1206→  1206→  const trimmedId = value.newId.trim()
+  1207→  1207→  const idTaken =
+  1208→  1208→    trimmedId.length > 0 &&
+  1209→  1209→    existingIds.includes(trimmedId) &&
+  1210→  1210→    trimmedId !== value.source?.match_id
+  1211→  1211→  const idInvalid = trimmedId.length > 0 && !isValidMatchId(trimmedId)
+  1212→  1212→  const idIsDefault = trimmedId === '_default'
+  1213→  1213→
+  1214→  1214→  return (
+  1215→  1215→    <div className="space-y-3">
+  1216→  1216→      {/* 源策略信息 */}
+  1217→  1217→      {value.source && (
+  1218→  1218→        <div className="text-xs rounded-md border border-quant bg-quant-card/30 p-2 space-y-0.5">
+  1219→  1219→          <div className="flex items-center gap-1.5">
+  1220→  1220→            <span className="text-muted-foreground">源策略:</span>
+  1221→  1221→            <span className="font-mono text-foreground/80">
+  1222→  1222→              {value.source.match_id}
+  1223→  1223→            </span>
+  1224→  1224→            <span className="text-muted-foreground">·</span>
+  1225→  1225→            <span className="text-foreground/80">{value.source.name}</span>
+  1226→  1226→          </div>
+  1227→  1227→          <div className="text-[10px] text-muted-foreground flex items-center gap-2 flex-wrap">
+  1228→  1228→            <span>strategy_id: <span className="font-mono">{value.source.strategy_id || '(全局兜底)'}</span></span>
+  1229→  1229→            <span>·</span>
+  1230→  1230→            <span>alerts: {value.source.alerts?.length ?? 0}</span>
+  1231→  1231→            <span>·</span>
+  1232→  1232→            <span>scope: {scopeSummary(value.source.scope)}</span>
+  1233→  1233→          </div>
+  1234→  1234→        </div>
+  1235→  1235→      )}
+  1236→  1236→
+  1237→  1237→      {/* 新 match_id */}
+  1238→  1238→      <div className="space-y-1">
+  1239→  1239→        <Label className="text-xs">新 match_id *</Label>
+  1240→  1240→        <Input
+  1241→  1241→          className="h-8 font-mono text-xs"
+  1242→  1242→          value={value.newId}
+  1243→  1243→          onChange={(e) => onChange({ newId: e.target.value })}
+  1244→  1244→          placeholder="如 my_match_v2"
+  1245→  1245→          autoFocus
+  1246→  1246→        />
+  1247→  1247→        <p className="text-[10px] text-muted-foreground">
+  1248→  1248→          全局唯一；只能含字母、数字、下划线
+  1249→  1249→        </p>
+  1250→  1250→        {idInvalid && (
+  1251→  1251→          <p className="text-[10px] text-red-500 flex items-center gap-1">
+  1252→  1252→            <AlertCircle className="size-3" />
+  1253→  1253→            match_id 只能含字母、数字、下划线
+  1254→  1254→          </p>
+  1255→  1255→        )}
+  1256→  1256→        {idIsDefault && (
+  1257→  1257→          <p className="text-[10px] text-red-500 flex items-center gap-1">
+  1258→  1258→            <AlertCircle className="size-3" />
+  1259→  1259→            _default 是系统保留 ID，不可使用
+  1260→  1260→          </p>
+  1261→  1261→        )}
+  1262→  1262→        {idTaken && !idIsDefault && (
+  1263→  1263→          <p className="text-[10px] text-red-500 flex items-center gap-1">
+  1264→  1264→            <AlertCircle className="size-3" />
+  1265→  1265→            该 ID 已存在，请换一个
+  1266→  1266→          </p>
+  1267→  1267→        )}
+  1268→  1268→      </div>
+  1269→  1269→
+  1270→  1270→      {/* 新名称 */}
+  1271→  1271→      <div className="space-y-1">
+  1272→  1272→        <Label className="text-xs">显示名 *</Label>
+  1273→  1273→        <Input
+  1274→  1274→          className="h-8 text-xs"
+  1275→  1275→          value={value.newName}
+  1276→  1276→          onChange={(e) => onChange({ newName: e.target.value })}
+  1277→  1277→          placeholder="如 弱转强默认监控 副本"
+  1278→  1278→        />
+  1279→  1279→      </div>
+  1280→  1280→
+  1281→  1281→      <Separator />
+  1282→  1282→
+  1283→  1283→      {/* 选项 */}
+  1284→  1284→      <div className="space-y-2">
+  1285→  1285→        <label
+  1286→  1286→          className="flex items-start gap-2 cursor-pointer select-none"
+  1287→  1287→          htmlFor="copy-enable"
+  1288→  1288→        >
+  1289→  1289→          <Checkbox
+  1290→  1290→            id="copy-enable"
+  1291→  1291→            checked={value.enableCopy}
+  1292→  1292→            onCheckedChange={(v) => onChange({ enableCopy: v === true })}
+  1293→  1293→            className="mt-0.5"
+  1294→  1294→          />
+  1295→  1295→          <div className="space-y-0.5">
+  1296→  1296→            <div className="text-xs font-medium">启用副本（默认关闭）</div>
+  1297→  1297→            <div className="text-[10px] text-muted-foreground">
+  1298→  1298→              副本默认不启用，避免与源策略产生重复预警。可创建后手动开启。
+  1299→  1299→            </div>
+  1300→  1300→          </div>
+  1301→  1301→        </label>
+  1302→  1302→
+  1303→  1303→        <label
+  1304→  1304→          className="flex items-start gap-2 cursor-pointer select-none"
+  1305→  1305→          htmlFor="copy-alerts"
+  1306→  1306→        >
+  1307→  1307→          <Checkbox
+  1308→  1308→            id="copy-alerts"
+  1309→  1309→            checked={value.copyAlerts}
+  1310→  1310→            onCheckedChange={(v) => onChange({ copyAlerts: v === true })}
+  1311→  1311→            className="mt-0.5"
+  1312→  1312→          />
+  1313→  1313→          <div className="space-y-0.5">
+  1314→  1314→            <div className="text-xs font-medium">
+  1315→  1315→              复制 alerts 配置（默认勾选）
+  1316→  1316→            </div>
+  1317→  1317→            <div className="text-[10px] text-muted-foreground">
+  1318→  1318→              取消勾选则创建一个无 alert 的空壳策略，之后可在编辑页单独配置。
+  1319→  1319→            </div>
+  1320→  1320→          </div>
+  1321→  1321→        </label>
+  1322→  1322→      </div>
+  1323→  1323→    </div>
+  1324→  1324→  )
+  1325→  1325→}
+  1326→  1326→
+  1327→  1327→// ============================================================================
+  1328→  1328→// 编辑表单
+  1329→  1329→// ============================================================================
+  1330→  1330→
+  1331→  1331→interface EditFormProps {
+  1332→  1332→  value: EditFormState
+  1333→  1333→  onChange: (next: EditFormState) => void
+  1334→  1334→  strategies: StrategyDTO[]
+  1335→  1335→  mode: 'create' | 'update'
+  1336→  1336→}
+  1337→  1337→
+  1338→  1338→function EditForm({ value, onChange, strategies, mode }: EditFormProps) {
+  1339→  1339→  const set = <K extends keyof EditFormState>(k: K, v: EditFormState[K]) =>
+  1340→  1340→    onChange({ ...value, [k]: v })
+  1341→  1341→
+  1342→  1342→  const setScope = (patch: Partial<MatchScopeDTO>) =>
+  1343→  1343→    set('scope', { ...value.scope, ...patch })
+  1344→  1344→
+  1345→  1345→  const setAlert = (idx: number, patch: Partial<MatchAlertDTO>) =>
+  1346→  1346→    set(
+  1347→  1347→      'alerts',
+  1348→  1348→      value.alerts.map((a, i) => (i === idx ? { ...a, ...patch } : a))
+  1349→  1349→    )
+  1350→  1350→
+  1351→  1351→  const addAlert = () =>
+  1352→  1352→    set('alerts', [...value.alerts, { ...EMPTY_ALERT }])
+  1353→  1353→
+  1354→  1354→  const removeAlert = (idx: number) =>
+  1355→  1355→    set('alerts', value.alerts.filter((_, i) => i !== idx))
+  1356→  1356→
+  1357→  1357→  const toggleMarket = (m: string, on: boolean) => {
+  1358→  1358→    const cur = new Set(value.scope.markets || [])
+  1359→  1359→    if (on) cur.add(m)
+  1360→  1360→    else cur.delete(m)
+  1361→  1361→    setScope({ markets: Array.from(cur) })
+  1362→  1362→  }
+  1363→  1363→
+  1364→  1364→  const toggleChannel = (alertIdx: number, ch: string, on: boolean) => {
+  1365→  1365→    const alert = value.alerts[alertIdx]
+  1366→  1366→    const cur = new Set(alert.channels || [])
+  1367→  1367→    if (on) cur.add(ch)
+  1368→  1368→    else cur.delete(ch)
+  1369→  1369→    setAlert(alertIdx, { channels: Array.from(cur) })
+  1370→  1370→  }
+  1371→  1371→
+  1372→  1372→  const setParam = (alertIdx: number, key: string, val: string) => {
+  1373→  1373→    const alert = value.alerts[alertIdx]
+  1374→  1374→    const params = { ...alert.params }
+  1375→  1375→    if (val === '') {
+  1376→  1376→      delete params[key]
+  1377→  1377→    } else {
+  1378→  1378→      const n = Number(val)
+  1379→  1379→      params[key] = Number.isFinite(n) ? n : val
+  1380→  1380→    }
+  1381→  1381→    setAlert(alertIdx, { params })
+  1382→  1382→  }
+  1383→  1383→
+  1384→  1384→  const addParamKey = (alertIdx: number) => {
+  1385→  1385→    const key = window.prompt('新参数名 (如 pct_threshold / vol_ratio_threshold)')
+  1386→  1386→    if (!key) return
+  1387→  1387→    const alert = value.alerts[alertIdx]
+  1388→  1388→    if (key in alert.params) {
+  1389→  1389→      toast.warning('参数已存在')
+  1390→  1390→      return
+  1391→  1391→    }
+  1392→  1392→    setAlert(alertIdx, { params: { ...alert.params, [key]: 0 } })
+  1393→  1393→  }
+  1394→  1394→
+  1395→  1395→  const removeParam = (alertIdx: number, key: string) => {
+  1396→  1396→    const alert = value.alerts[alertIdx]
+  1397→  1397→    const params = { ...alert.params }
+  1398→  1398→    delete params[key]
+  1399→  1399→    setAlert(alertIdx, { params })
+  1400→  1400→  }
+  1401→  1401→
+  1402→  1402→  return (
+  1403→  1403→    <div className="space-y-4 pr-1">
+  1404→  1404→      {/* 基础字段 */}
+  1405→  1405→      <div className="grid grid-cols-2 gap-3">
+  1406→  1406→        <div className="space-y-1">
+  1407→  1407→          <Label className="text-xs">match_id *</Label>
+  1408→  1408→          <Input
+  1409→  1409→            className="h-8 font-mono text-xs"
+  1410→  1410→            value={value.match_id}
+  1411→  1411→            onChange={(e) => set('match_id', e.target.value)}
+  1412→  1412→            disabled={mode === 'update'}
+  1413→  1413→            placeholder="如 rzq_default / my_custom"
+  1414→  1414→          />
+  1415→  1415→          <p className="text-[10px] text-muted-foreground">
+  1416→  1416→            全局唯一；update 模式不可改
+  1417→  1417→          </p>
+  1418→  1418→        </div>
+  1419→  1419→        <div className="space-y-1">
+  1420→  1420→          <Label className="text-xs">显示名 *</Label>
+  1421→  1421→          <Input
+  1422→  1422→            className="h-8 text-xs"
+  1423→  1423→            value={value.name}
+  1424→  1424→            onChange={(e) => set('name', e.target.value)}
+  1425→  1425→            placeholder="如 弱转强默认监控"
+  1426→  1426→          />
+  1427→  1427→        </div>
+  1428→  1428→        <div className="space-y-1">
+  1429→  1429→          <Label className="text-xs">关联策略 strategy_id</Label>
+  1430→  1430→          <Select
+  1431→  1431→            value={value.strategy_id || '__fallback__'}
+  1432→  1432→            onValueChange={(v) =>
+  1433→  1433→              set('strategy_id', v === '__fallback__' ? '' : v)
+  1434→  1434→            }
+  1435→  1435→          >
+  1436→  1436→            <SelectTrigger className="h-8 text-xs">
+  1437→  1437→              <SelectValue placeholder="选择策略" />
+  1438→  1438→            </SelectTrigger>
+  1439→  1439→            <SelectContent>
+  1440→  1440→              <SelectItem value="__fallback__" className="text-xs">
+  1441→  1441→                全局兜底 (strategy_id="")
+  1442→  1442→              </SelectItem>
+  1443→  1443→              {strategies.map((s) => (
+  1444→  1444→                <SelectItem
+  1445→  1445→                  key={s.strategy_id}
+  1446→  1446→                  value={s.strategy_id}
+  1447→  1447→                  className="text-xs"
+  1448→  1448→                >
+  1449→  1449→                  {s.strategy_id} · {s.strategy_name}
+  1450→  1450→                </SelectItem>
+  1451→  1451→              ))}
+  1452→  1452→            </SelectContent>
+  1453→  1453→          </Select>
+  1454→  1454→        </div>
+  1455→  1455→        <div className="space-y-1">
+  1456→  1456→          <Label className="text-xs">debounce_override (秒)</Label>
+  1457→  1457→          <Input
+  1458→  1458→            className="h-8 font-mono text-xs"
+  1459→  1459→            type="number"
+  1460→  1460→            min={0}
+  1461→  1461→            placeholder="留空=用全局"
+  1462→  1462→            value={value.debounce_override}
+  1463→  1463→            onChange={(e) => set('debounce_override', e.target.value)}
+  1464→  1464→          />
+  1465→  1465→        </div>
+  1466→  1466→      </div>
+  1467→  1467→
+  1468→  1468→      <div className="flex items-center gap-2">
+  1469→  1469→        <Switch
+  1470→  1470→          checked={value.enabled}
+  1471→  1471→          onCheckedChange={(v) => set('enabled', v)}
+  1472→  1472→          id="match-enabled"
+  1473→  1473→        />
+  1474→  1474→        <Label htmlFor="match-enabled" className="text-xs cursor-pointer">
+  1475→  1475→          启用此匹配策略
+  1476→  1476→        </Label>
+  1477→  1477→      </div>
+  1478→  1478→
+  1479→  1479→      <Separator />
+  1480→  1480→
+  1481→  1481→      {/* Scope */}
+  1482→  1482→      <div className="space-y-2">
+  1483→  1483→        <div className="flex items-center justify-between">
+  1484→  1484→          <Label className="text-xs font-semibold">Scope 范围筛选</Label>
+  1485→  1485→          <span className="text-[10px] text-muted-foreground">
+  1486→  1486→            限制 match 仅在哪些股票上求值
+  1487→  1487→          </span>
+  1488→  1488→        </div>
+  1489→  1489→        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+  1490→  1490→          <div className="space-y-1">
+  1491→  1491→            <Label className="text-[10px] text-muted-foreground">市场</Label>
+  1492→  1492→            <div className="flex gap-1.5 flex-wrap">
+  1493→  1493→              {ALL_MARKETS.map((m) => {
+  1494→  1494→                const on = value.scope.markets?.includes(m) ?? false
+  1495→  1495→                return (
+  1496→  1496→                  <Button
+  1497→  1497→                    key={m}
+  1498→  1498→                    type="button"
+  1499→  1499→                    size="sm"
+  1500→  1500→                    variant={on ? 'default' : 'outline'}
+  1501→  1501→                    className={cn(
+  1502→  1502→                      'h-7 px-2 text-[10px] font-mono',
+  1503→  1503→                      on
+  1504→  1504→                        ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+  1505→  1505→                        : 'border-quant'
+  1506→  1506→                    )}
+  1507→  1507→                    onClick={() => toggleMarket(m, !on)}
+  1508→  1508→                  >
+  1509→  1509→                    {m}
+  1510→  1510→                  </Button>
+  1511→  1511→                )
+  1512→  1512→              })}
+  1513→  1513→            </div>
+  1514→  1514→          </div>
+  1515→  1515→          <div className="space-y-1">
+  1516→  1516→            <Label className="text-[10px] text-muted-foreground">排除 ST</Label>
+  1517→  1517→            <Switch
+  1518→  1518→              checked={value.scope.exclude_st}
+  1519→  1519→              onCheckedChange={(v) => setScope({ exclude_st: v })}
+  1520→  1520→            />
+  1521→  1521→          </div>
+  1522→  1522→          <div className="space-y-1">
+  1523→  1523→            <Label className="text-[10px] text-muted-foreground">排除停牌</Label>
+  1524→  1524→            <Switch
+  1525→  1525→              checked={value.scope.exclude_suspended}
+  1526→  1526→              onCheckedChange={(v) => setScope({ exclude_suspended: v })}
+  1527→  1527→            />
+  1528→  1528→          </div>
+  1529→  1529→        </div>
+  1530→  1530→        <div className="space-y-1">
+  1531→  1531→          <Label className="text-[10px] text-muted-foreground">
+  1532→  1532→            排除代码 (逗号分隔)
+  1533→  1533→          </Label>
+  1534→  1534→          <Input
+  1535→  1535→            className="h-8 font-mono text-xs"
+  1536→  1536→            placeholder="如 688001.SH,300001.SZ"
+  1537→  1537→            value={(value.scope.exclude_codes || []).join(',')}
+  1538→  1538→            onChange={(e) =>
+  1539→  1539→              setScope({
+  1540→  1540→                exclude_codes: e.target.value
+  1541→  1541→                  .split(',')
+  1542→  1542→                  .map((x) => x.trim())
+  1543→  1543→                  .filter(Boolean),
+  1544→  1544→              })
+  1545→  1545→            }
+  1546→  1546→          />
+  1547→  1547→        </div>
+  1548→  1548→        <div className="space-y-1">
+  1549→  1549→          <Label className="text-[10px] text-muted-foreground">
+  1550→  1550→            仅包含代码 (逗号分隔, 留空=不限)
+  1551→  1551→          </Label>
+  1552→  1552→          <Input
+  1553→  1553→            className="h-8 font-mono text-xs"
+  1554→  1554→            placeholder="如 600519.SH,000001.SZ"
+  1555→  1555→            value={(value.scope.include_only || []).join(',')}
+  1556→  1556→            onChange={(e) =>
+  1557→  1557→              setScope({
+  1558→  1558→                include_only: e.target.value
+  1559→  1559→                  .split(',')
+  1560→  1560→                  .map((x) => x.trim())
+  1561→  1561→                  .filter(Boolean),
+  1562→  1562→              })
+  1563→  1563→            }
+  1564→  1564→          />
+  1565→  1565→        </div>
+  1566→  1566→      </div>
+  1567→  1567→
+  1568→  1568→      <Separator />
+  1569→  1569→
+  1570→  1570→      {/* Alerts */}
+  1571→  1571→      <div className="space-y-2">
+  1572→  1572→        <div className="flex items-center justify-between">
+  1573→  1573→          <Label className="text-xs font-semibold">
+  1574→  1574→            Alerts 引用 ({value.alerts.length})
+  1575→  1575→          </Label>
+  1576→  1576→          <Button
+  1577→  1577→            type="button"
+  1578→  1578→            size="sm"
+  1579→  1579→            variant="outline"
+  1580→  1580→            className="h-7 text-xs border-quant"
+  1581→  1581→            onClick={addAlert}
+  1582→  1582→          >
+  1583→  1583→            <Plus className="size-3" />
+  1584→  1584→            添加 alert
+  1585→  1585→          </Button>
+  1586→  1586→        </div>
+  1587→  1587→
+  1588→  1588→        {value.alerts.length === 0 && (
+  1589→  1589→          <div className="text-xs text-muted-foreground text-center py-3 border border-dashed border-quant rounded">
+  1590→  1590→            暂无 alert 引用，点击"添加 alert"创建
+  1591→  1591→          </div>
+  1592→  1592→        )}
+  1593→  1593→
+  1594→  1594→        <div className="space-y-2">
+  1595→  1595→          {value.alerts.map((a, i) => (
+  1596→  1596→            <div
+  1597→  1597→              key={i}
+  1598→  1598→              className="rounded-md border border-quant bg-quant-card/30 p-2 space-y-2"
+  1599→  1599→            >
+  1600→  1600→              <div className="flex items-center gap-2">
+  1601→  1601→                <Input
+  1602→  1602→                  className="h-7 text-xs font-mono flex-1"
+  1603→  1603→                  placeholder="alert_type (如 rzq_ignite)"
+  1604→  1604→                  value={a.alert_type}
+  1605→  1605→                  onChange={(e) => setAlert(i, { alert_type: e.target.value })}
+  1606→  1606→                />
+  1607→  1607→                <Select
+  1608→  1608→                  value={a.priority}
+  1609→  1609→                  onValueChange={(v) =>
+  1610→  1610→                    setAlert(i, { priority: v as MatchPriority })
+  1611→  1611→                  }
+  1612→  1612→                >
+  1613→  1613→                  <SelectTrigger className="h-7 text-xs w-24">
+  1614→  1614→                    <SelectValue />
+  1615→  1615→                  </SelectTrigger>
+  1616→  1616→                  <SelectContent>
+  1617→  1617→                    {PRIORITIES.map((p) => (
+  1618→  1618→                      <SelectItem key={p} value={p} className="text-xs">
+  1619→  1619→                        {PRIORITY_LABEL[p]} ({p})
+  1620→  1620→                      </SelectItem>
+  1621→  1621→                    ))}
+  1622→  1622→                  </SelectContent>
+  1623→  1623→                </Select>
+  1624→  1624→                <Button
+  1625→  1625→                  type="button"
+  1626→  1626→                  size="sm"
+  1627→  1627→                  variant="ghost"
+  1628→  1628→                  className="h-7 px-2 text-xs hover:bg-red-500/10 hover:text-red-500"
+  1629→  1629→                  onClick={() => removeAlert(i)}
+  1630→  1630→                >
+  1631→  1631→                  <Trash2 className="size-3" />
+  1632→  1632→                </Button>
+  1633→  1633→              </div>
+  1634→  1634→
+  1635→  1635→              {/* channels */}
+  1636→  1636→              <div className="flex items-center gap-1.5 flex-wrap">
+  1637→  1637→                <span className="text-[10px] text-muted-foreground mr-1">通道:</span>
+  1638→  1638→                {ALL_CHANNELS.map((ch) => {
+  1639→  1639→                  const on = a.channels?.includes(ch) ?? false
+  1640→  1640→                  return (
+  1641→  1641→                    <Button
+  1642→  1642→                      key={ch}
+  1643→  1643→                      type="button"
+  1644→  1644→                      size="sm"
+  1645→  1645→                      variant={on ? 'default' : 'outline'}
+  1646→  1646→                      className={cn(
+  1647→  1647→                        'h-6 px-2 text-[10px] font-mono',
+  1648→  1648→                        on
+  1649→  1649→                          ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+  1650→  1650→                          : 'border-quant'
+  1651→  1651→                      )}
+  1652→  1652→                      onClick={() => toggleChannel(i, ch, !on)}
+  1653→  1653→                    >
+  1654→  1654→                      {ch}
+  1655→  1655→                    </Button>
+  1656→  1656→                  )
+  1657→  1657→                })}
+  1658→  1658→              </div>
+  1659→  1659→
+  1660→  1660→              {/* params */}
+  1661→  1661→              <div className="space-y-1">
+  1662→  1662→                <div className="flex items-center justify-between">
+  1663→  1663→                  <span className="text-[10px] text-muted-foreground">
+  1664→  1664→                    参数覆盖 (params):
+  1665→  1665→                  </span>
+  1666→  1666→                  <Button
+  1667→  1667→                    type="button"
+  1668→  1668→                    size="sm"
+  1669→  1669→                    variant="ghost"
+  1670→  1670→                    className="h-5 px-1.5 text-[10px]"
+  1671→  1671→                    onClick={() => addParamKey(i)}
+  1672→  1672→                  >
+  1673→  1673→                    <Plus className="size-2.5" />
+  1674→  1674→                    加参数
+  1675→  1675→                  </Button>
+  1676→  1676→                </div>
+  1677→  1677→                {Object.keys(a.params || {}).length === 0 ? (
+  1678→  1678→                  <div className="text-[10px] text-muted-foreground italic">
+  1679→  1679→                    无参数（用模板默认值）
+  1680→  1680→                  </div>
+  1681→  1681→                ) : (
+  1682→  1682→                  <div className="space-y-1">
+  1683→  1683→                    {Object.entries(a.params).map(([k, v]) => (
+  1684→  1684→                      <div key={k} className="flex items-center gap-1">
+  1685→  1685→                        <span className="text-[10px] font-mono text-foreground/80 w-32 truncate">
+  1686→  1686→                          {k}
+  1687→  1687→                        </span>
+  1688→  1688→                        <Input
+  1689→  1689→                          className="h-6 text-xs font-mono flex-1"
+  1690→  1690→                          type="number"
+  1691→  1691→                          step="any"
+  1692→  1692→                          value={String(v)}
+  1693→  1693→                          onChange={(e) => setParam(i, k, e.target.value)}
+  1694→  1694→                        />
+  1695→  1695→                        <Button
+  1696→  1696→                          type="button"
+  1697→  1697→                          size="sm"
+  1698→  1698→                          variant="ghost"
+  1699→  1699→                          className="h-6 px-1.5 hover:bg-red-500/10 hover:text-red-500"
+  1700→  1700→                          onClick={() => removeParam(i, k)}
+  1701→  1701→                        >
+  1702→  1702→                          ×
+  1703→  1703→                        </Button>
+  1704→  1704→                      </div>
+  1705→  1705→                    ))}
+  1706→  1706→                  </div>
+  1707→  1707→                )}
+  1708→  1708→              </div>
+  1709→  1709→            </div>
+  1710→  1710→          ))}
+  1711→  1711→        </div>
+  1712→  1712→      </div>
+  1713→  1713→    </div>
+  1714→  1714→  )
+  1715→  1715→}
+  1716→  1716→
+  1717→  1717→// ============================================================================
+  1718→  1718→// 内部：创建空 DTO
+  1719→  1719→// ============================================================================
+  1720→  1720→
+  1721→  1721→function emptyDtoForCreate(): MatchStrategyDTO {
+  1722→  1722→  return {
+  1723→  1723→    match_id: '',
+  1724→  1724→    name: '',
+  1725→  1725→    enabled: true,
+  1726→  1726→    strategy_id: '',
+  1727→  1727→    scope: { ...EMPTY_SCOPE },
+  1728→  1728→    alerts: [{ ...EMPTY_ALERT }],
+  1729→  1729→    debounce_override: null,
+  1730→  1730→    trading_hours_override: null,
+  1731→  1731→  }
+  1732→  1732→}
+  1733→  1733→
