@@ -12694,3 +12694,107 @@ Stage Summary:
   3. 竞价监控加"竞价涨幅>3%自动加入自选股"开关
   4. flow-ranking 后端能力接入(R13-盘点 #5 遗留)
   5. 更新 3 个维护文档到 R13 状态(新增 auction 端点 + 8 tab + 配置摘要等)
+
+---
+Task ID: R14-1
+Agent: full-stack-developer
+Task: 个股板块归属查询（方案 A）- 后端 GET /api/stocks/{code}/sectors + Next 代理 + WatchlistManager HoverCard
+
+Work Log:
+- 读 worklog 末 5 段确认 R13 已完成 (8 tab: 实时大屏/策略管理/选股结果/信号中心/板块管理/匹配策略/自选股/竞价监控)
+- 读 stock_block_relation.csv 头部样本确认字段语义: stock_code,block_code,block_name,block_type,gp_num,查询时间
+  * block_type 中文取值: 地区/指数/概念/系统定义/自定义/行业/风格
+  * 600519.SH 有 43 条记录 (concept=2, industry=1, region=1, style+index=39)
+- 读 mock_adapter.get_relation() (line 424-440): 返回 [{BlockCode, BlockName, BlockType, GPNume}] (首字母大写驼峰)
+- 读现有 routes/search.py + sectors.py 学习代码风格 (docstring + type hints + logger + Field(default_factory))
+- 读 engine/api/deps.py: get_adapter 已存在, 直接 Depends 注入
+- 读 engine/utils/stock_code.py normalize(): 非法抛 ValueError, 合法返回 "600519.SH" 形式
+- 读 src/app/api/monitor/watchlist/by-sector/[sector_code]/route.ts 作为代理模板
+- 读 src/lib/api-proxy.ts: forwardFastAPI + relayJSON (FastAPI detail → error 字段透传)
+- 读 src/components/ui/hover-card.tsx: HoverCard/HoverCardTrigger/HoverCardContent 三件套已存在
+- 读 src/components/quant/WatchlistManager.tsx 顶部 imports + 主组件结构
+
+第一步 创建 engine/api/routes/stocks.py (~250 行):
+- StockSectorItem / StockSectorsResponse Pydantic schemas
+- _TYPE_MAP 中文→英文映射 (concept/industry/region/index/style/system/custom)
+- 模块级 LRU: OrderedDict + threading.Lock, TTL=60s, 容量 1000
+  * _cache_get: 命中 move_to_end + model_copy(update={"from_cache": True})
+  * _cache_put: 写入 + 容量超限 FIFO 弹出
+- 路由 GET /{code}/sectors:
+  * normalize 非法 → 422
+  * 缓存命中直接返回
+  * adapter.get_relation 异常 → 502
+  * 空结果 → 200 全空
+- _build_response 分组归一化: 未知 BlockType lowercase 后塞 other
+
+第二步 注册路由到 engine/api/main.py:
+- import 加 stocks as stocks_routes
+- app.include_router(stocks_routes.router, prefix="/api/stocks") (加在 search_routes 后)
+
+第三步 创建 src/app/api/stocks/[code]/sectors/route.ts (24 行):
+- GET handler, params: Promise<{code}>
+- forwardFastAPI(`/api/stocks/${code}/sectors`) + relayJSON
+- 失败 err('FastAPI 不可达', 502)
+
+第四步 src/lib/api.ts (+26 行):
+- StockSectorItemDTO + StockSectorsDTO 接口 (放 SectorStockDTO 后)
+- stockAPI.getSectors(code) 方法 (放 sectorAPI 后)
+
+第五步 src/components/quant/WatchlistManager.tsx (+125 行):
+- import HoverCard 三件套
+- import stockAPI + StockSectorsDTO + StockSectorItemDTO 类型
+- 新增 SectorGroup 子组件 (单组板块 Badge 列表, 空显示 "无")
+- 新增 StockSectorHover 子组件:
+  * useRef<Record<string, StockSectorsDTO>> 缓存
+  * onOpenChange(open=true) 缓存命中直接用, 否则 stockAPI.getSectors
+  * HoverCardTrigger asChild span (cursor-help + underline decoration-dotted)
+  * HoverCardContent side=right align=start w-80 text-xs p-3
+  * 加载中: Loader2 spin + "加载板块归属..."
+  * 失败: AlertCircle + 错误信息
+  * 成功: 标题 + 概念/行业/地区 SectorGroup + 底部 "共 N 个板块" + (from_cache ? "缓存命中" : null)
+- TableCell 替换: {it.stock_code} → <StockSectorHover stockCode={it.stock_code} />
+
+验证步骤:
+- 重启 FastAPI (kill PID 7257, setsid nohup, log-level info), health 200
+- bun run lint: exit 0
+- 后端 curl 600519.SH/sectors: 200, total=43 (concept=2, industry=1, region=1, other=39), from_cache=false
+- 后端 curl INVALID: 422 {"detail":"非法代码: INVALID"}
+- 后端 curl 600519.SH 第二次: from_cache=true (后端 LRU 命中, fetched_at 不变)
+- 后端 curl 000001.SH (上证综指, CSV 无记录): 200, total=0 全空
+- 后端 curl 600000.SH: 200, total=25
+- Next 代理 curl 600519.SH: 200, 数据完全一致, from_cache=true (因后端已缓存)
+- Next 代理 curl INVALID: 422 {"detail":"非法代码: INVALID","error":"非法代码: INVALID"} (relayJSON detail→error)
+- agent-browser:
+  * 8 tab 全可见
+  * 切到第7个 tab "自选股", 表格 31 行
+  * document.querySelectorAll('[data-slot=hover-card-trigger]').length === 31
+  * hover 第一行 (000001.SZ): data-state="open", innerText "000001.SZ · 板块归属 / 概念: 跨境支付CIPS / 行业: 全国性银行 / 地区: 深圳板块 / 共 33 个板块"
+  * 截图 r14-1-sector-hover.png (80KB)
+  * console.error 监听: 0 errors
+  * FastAPI log: "GET /api/stocks/000001.SZ/sectors HTTP/1.1" 200 OK
+
+Stage Summary:
+- 文件变更:
+  新增: engine/api/routes/stocks.py (~250行, GET /{code}/sectors + LRU 缓存 + Pydantic schemas)
+       src/app/api/stocks/[code]/sectors/route.ts (24行, Next.js 代理)
+  修改: engine/api/main.py (+2行, 注册 stocks_routes)
+       src/lib/api.ts (+26行, StockSectorItemDTO/StockSectorsDTO + stockAPI.getSectors)
+       src/components/quant/WatchlistManager.tsx (+125行, HoverCard imports + StockSectorHover + SectorGroup + TableCell 替换)
+- 验证:
+  * bun run lint: exit 0
+  * FastAPI 600519.SH: 200, 43 板块 (concept=2/industry=1/region=1/other=39), from_cache 二次请求 true
+  * FastAPI INVALID: 422 非法代码
+  * FastAPI 000001.SH: 200 空结果
+  * Next 代理: 200 数据一致, 422 透传 detail→error
+  * agent-browser: 8 tab 全可见 + hover card 弹出显示 000001.SZ 33 板块 + 0 console error
+- 设计要点:
+  1. HoverCard (Radix) 比 Popover 更适合 - hover 即触发不打断用户操作流
+  2. 双层缓存: 后端 OrderedDict+Lock LRU (TTL=60s, 容量 1000) + 前端 useRef 防同 session 重复请求
+  3. model_copy(update={"from_cache": True}) 返回缓存副本, 不污染原对象
+  4. 未识别 BlockType lowercase 后塞 other 分组, 保证向前兼容未来新增类型
+  5. type_raw 字段保留中文原始值, 便于调试和未来前端展示
+  6. 简化决策: 不调 get_stock_list('18') 翻译行业名 - Mock/Real 模式 BlockName 已是中文名, 减少适配器调用
+- 未解决问题:
+  1. "缓存命中" badge 仅在后端 LRU 命中时显示 (如页面刷新 60s 内再次 hover), 因 useRef 命中后不调后端 from_cache 始终 false; 严格遵循"from_cache 由后端控制"语义
+  2. 000001.SH (上证综指) 返回空 - CSV 数据特性非 bug
+  3. Real 模式字段名 (BlockCode/BlockName/BlockType/GPNume) 需真实环境验证, Mock 已对齐

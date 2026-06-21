@@ -70,6 +70,26 @@ export interface SectorStockDTO {
   score: number
 }
 
+/** R14-1: 个股所属板块 DTO */
+export interface StockSectorItemDTO {
+  code: string
+  name: string
+  type: 'concept' | 'industry' | 'region' | 'index' | 'style' | 'system' | 'custom' | string
+  type_raw: string
+  gp_num: string
+}
+
+export interface StockSectorsDTO {
+  stock_code: string
+  concept: StockSectorItemDTO[]
+  industry: StockSectorItemDTO[]
+  region: StockSectorItemDTO[]
+  other: StockSectorItemDTO[]
+  total: number
+  from_cache: boolean
+  fetched_at: string
+}
+
 export interface MonitorStatusDTO {
   engine_status: 'running' | 'stopped' | 'error'
   adapter_mode: 'mock' | 'real'
@@ -310,6 +330,12 @@ export const sectorAPI = {
     }
     return await res.blob()
   },
+}
+
+export const stockAPI = {
+  /** R14-1: 个股所属板块（概念/行业/地区分组） */
+  getSectors: (code: string) =>
+    fetchAPI<StockSectorsDTO>(`/api/stocks/${encodeURIComponent(code)}/sectors`),
 }
 
 /** P1: 引擎健康度 DTO */

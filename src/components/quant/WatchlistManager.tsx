@@ -49,6 +49,11 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Textarea } from '@/components/ui/textarea'
 import {
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from '@/components/ui/hover-card'
+import {
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -88,9 +93,12 @@ import {
   watchlistAPI,
   strategyAPI,
   sectorAPI,
+  stockAPI,
   type WatchlistItemDTO,
   type StrategyDTO,
   type SectorDTO,
+  type StockSectorsDTO,
+  type StockSectorItemDTO,
 } from '@/lib/api'
 
 const MANUAL_STRATEGY = '_manual'
@@ -141,6 +149,126 @@ function parseBatchInput(text: string, defaultStrategy: string): ParsedRow[] {
       reason: valid ? '' : '代码格式错误(需6位数字)',
     }
   })
+}
+
+// ============================================================================
+// R14-1: 个股所属板块 HoverCard
+// ============================================================================
+
+/**
+ * 板块分组渲染（概念/行业/地区子组件）。
+ * items 为空时显示 "无"。
+ */
+function SectorGroup({
+  label,
+  items,
+}: {
+  label: string
+  items: StockSectorItemDTO[]
+}) {
+  return (
+    <div>
+      <div className="text-[10px] text-muted-foreground mb-1">{label}</div>
+      {items.length === 0 ? (
+        <span className="text-[10px] text-muted-foreground">无</span>
+      ) : (
+        <div className="flex flex-wrap gap-1">
+          {items.map((it) => (
+            <Badge
+              key={`${it.code || 'na'}-${it.name}`}
+              variant="outline"
+              className="text-[10px] border-amber-500/40 text-amber-500 bg-amber-500/5"
+            >
+              {it.name || it.code}
+            </Badge>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * 监控池表格中 stock_code 单元格内的悬停板块查看器。
+ * - useRef 缓存已加载过的 code, 避免同一只股反复 hover 重复请求
+ * - onOpenChange(open=true) 时: 缓存命中直接用, 否则调 stockAPI.getSectors
+ */
+function StockSectorHover({ stockCode }: { stockCode: string }) {
+  const [data, setData] = React.useState<StockSectorsDTO | null>(null)
+  const [loading, setLoading] = React.useState(false)
+  const [error, setError] = React.useState('')
+  const cacheRef = React.useRef<Record<string, StockSectorsDTO>>({})
+
+  const handleOpenChange = React.useCallback(
+    (open: boolean) => {
+      if (!open) return
+      // 缓存命中
+      const cached = cacheRef.current[stockCode]
+      if (cached) {
+        setData(cached)
+        setLoading(false)
+        setError('')
+        return
+      }
+      // 拉新
+      setLoading(true)
+      setError('')
+      setData(null)
+      stockAPI
+        .getSectors(stockCode)
+        .then((d) => {
+          cacheRef.current[stockCode] = d
+          setData(d)
+        })
+        .catch((e: unknown) => {
+          setError(e instanceof Error ? e.message : '加载板块归属失败')
+        })
+        .finally(() => setLoading(false))
+    },
+    [stockCode]
+  )
+
+  return (
+    <HoverCard openDelay={250} closeDelay={150} onOpenChange={handleOpenChange}>
+      <HoverCardTrigger asChild>
+        <span className="cursor-help underline decoration-dotted underline-offset-2">
+          {stockCode}
+        </span>
+      </HoverCardTrigger>
+      <HoverCardContent
+        side="right"
+        align="start"
+        className="w-80 text-xs p-3"
+      >
+        {loading ? (
+          <div className="flex items-center gap-2 text-muted-foreground">
+            <Loader2 className="size-3 animate-spin" />
+            <span>加载板块归属...</span>
+          </div>
+        ) : error ? (
+          <div className="flex items-center gap-2 text-red-500">
+            <AlertCircle className="size-3 shrink-0" />
+            <span className="break-all">{error}</span>
+          </div>
+        ) : data ? (
+          <div className="space-y-2">
+            <div className="font-medium text-foreground">
+              {data.stock_code} · 板块归属
+            </div>
+            <SectorGroup label="概念" items={data.concept} />
+            <SectorGroup label="行业" items={data.industry} />
+            <SectorGroup label="地区" items={data.region} />
+            <div className="pt-1.5 mt-1.5 border-t border-quant text-[10px] text-muted-foreground flex items-center justify-between">
+              <span>共 {data.total} 个板块</span>
+              {data.from_cache ? (
+                <span className="text-emerald-500/70">缓存命中</span>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+      </HoverCardContent>
+    </HoverCard>
+  )
 }
 
 // ============================================================================
@@ -677,7 +805,7 @@ export function WatchlistManager() {
                       className="border-quant"
                     >
                       <TableCell className="text-xs font-mono py-1.5">
-                        {it.stock_code}
+                        <StockSectorHover stockCode={it.stock_code} />
                       </TableCell>
                       <TableCell className="py-1.5">
                         <Badge
