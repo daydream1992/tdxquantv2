@@ -11710,3 +11710,404 @@ Stage Summary:
 - 验证: 8 个提示词全确认 / 502 行 / 通用约束段完整
 - 未解决问题: 无(纯文档产出)
 - 下一阶段建议: 每轮重大架构变更后更新本文档对应提示词
+
+---
+Task ID: R13-调研-L2竞价
+Agent: Explore
+Task: 调查 L2 竞价数据接口能力 + 项目实现情况
+
+Work Log:
+- 读 worklog.md 行 11562-11712 共 150 行,了解 R11 末项目状态: 监控引擎已实施 / 7 Tab / match_strategies.yaml 已装配 / EngineHealthCard 等
+- 读 docs/tdx-quant 通达信说明书目录树(a行情/b财务/c分类/d客户端/e ETF/f公式/g场景/通用),CLAUDE.md 是 DB 重构项目规范(与本调研无关)
+- 第一步 grep 竞价/auction/L2 等关键词扫 docs/tdx-quant 全目录,命中 5 文件:
+  * a行情类信息/获取股票更多信息.md (get_more_info) — 核心命中
+  * b财务类数据/获取股票交易数据.md (get_gpjy_value) — 历史命中
+  * tongdaxin_query.py (字段索引)
+  * g场景化例子/通达信TQ策略介绍和应用示例.md (pre_open_count 变量,无关)
+  * g场景化例子/FAQ常见问题与解决方案.md (L2_AMO 公式函数)
+- 读 获取股票更多信息.md 全文 258 行,确认 get_more_info 接口签名/参数/返回字段,记录与竞价相关字段:
+  OpenZTBuy=竞价涨停买入金额(万元) / OpenAmo=开盘金额(万元) / OpenAmoPre1=昨开盘金额 /
+  OpenVolPre1=昨开盘量 / OpenFDE=开盘封单额(数据样本中存在,未文档化) / VOpenZAF=抢筹涨幅(%) /
+  L2TicNum=L2 逐笔成交数 / L2OrderNum=L2 逐笔委托数
+- 读 获取快照数据.md (get_market_snapshot) 全文 90 行,确认快照接口仅含 Open 开盘价,无显式竞价字段
+- 读 批量获取价量.md (get_pricevol) 全文 52 行,确认仅返回 LastClose/Now/Volume,无竞价字段
+- 读 订阅行情涨幅突破实时预警.md 全文 237 行,确认 subscribe_hq 推送的是 tick 行情,无单独"竞价订阅"接口;涉及 API 表含
+  initialize/get_stock_list_in_sector/subscribe_hq/unsubscribe_hq/get_full_tick/send_warn
+- 读 获取股票交易数据.md (get_gpjy_value) 全文 92 行,记录历史竞价相关字段:
+  GP25=盘前盘后成交量(开盘成交量+盘后固定成交量) / GP36=竞价涨停买: 买入金额(万元,仅 20241101 后)
+- 读 FAQ 常见问题与解决方案.md 全文 178 行,确认 L2_AMO(级别,买卖) 是通达信公式函数,
+  可通过 formula_process_mul_zb 调用做 L2 资金分级计算(非竞价接口,但属 L2 能力)
+- 读 tongdaxin_query.py 全文 372 行,确认项目内对 TDX API 字段已建索引,
+  ALL_APIS["get_more_info"]["fields"] 含 OpenAmo/OpenZTBuy/OpenAmoPre1/OpenVolPre1/L2TicNum/L2OrderNum;
+  ALL_APIS["get_gpjy_value"]["fields"] 含 GP25:盘前盘后成交量
+- 第二步 grep 项目代码 engine/ 下竞价关键词,命中 3 文件:
+  * engine/data_adapter/mock_adapter.py: OpenAmo 用于 get_pricevol 的 Amount 兜底(行 231/239/265/267)
+  * engine/monitor/rules.py: 定义 auction_pct 字段映射 VOpenZAF/100(行 18, 205-208, 214)
+  * engine/monitor/engine.py: _normalize_snap() 提取 auction_pct(行 666/704-708/721)
+  * engine/factors/limit_up.py: 注释提到 VOpenZAF/OpenZAF/FzAmo 为竞价/开盘/尾盘相关(行 10)
+- 读 engine/data_adapter/real_adapter.py 行 255-263,确认 RealAdapter.get_more_info(code, field_list) 直接调 tq.get_more_info(stock_code, field_list=[]),原样透传
+- 读 engine/data_adapter/mock_adapter.py 行 377-379,确认 MockAdapter.get_more_info 转调 get_market_snapshot (Mock 用 V8 快照 CSV)
+- 第三步 grep @router 路由 + 读 monitor.py 全文 + 读 watchlist.py 全文,统计端点清单:
+  * monitor.py: GET /status / GET /quotes / GET /flow-ranking / GET /subscriptions / GET /health (5 个)
+  * watchlist.py: GET / / POST / / DELETE /{code} / POST /by-sector/{sector_code} (4 个)
+  * match_strategy.py: GET / / POST / / PUT /{id} / DELETE /{id} / POST /reload / POST /test (6 个)
+  * 共 12 文件 50+ 端点
+- 确认 GET /api/monitor/quotes 的 QuoteSnapshot 响应字段: code/name/last/pct/change/volume/amount/ts/
+  main_inflow/big_buy_ratio/turnover_rate — 不含 auction_pct,也不含 OpenZTBuy/OpenAmo 等
+- 确认无 /api/monitor/auction 等专用竞价查询端点;watchlist 端点也无竞价数据返回
+- 第四步 grep src/ 前端竞价关键词,命中 2 文件:
+  * src/lib/api.ts: MatchTestParams.auction_pct?: number (行 642) — 仅用于 match-strategy 测试参数
+  * src/components/quant/MatchStrategyManager.tsx: 测试面板含"集合竞价涨幅"输入(行 838-850),
+    value=testForm.auction_pct,placeholder=0.02,step=0.001 — 仅作为手动测试 match_strategy 的模拟输入
+- grep 量化组件目录 src/components/quant/ 27 个 .tsx 文件,无 AuctionPanel/AuctionTable/AuctionBar 等专用竞价组件
+- 读 config/monitor_rules.yaml 行 1-200,确认 alert_templates.auction_surge 已定义:
+  condition: "auction_pct > {pct_threshold}" / alert_type: auction_surge / emoji: 🔨 / label: 竞价异动 /
+  priority: medium / default_params.pct_threshold: 0.03 / description: 开盘竞价涨幅 > 3%(次日确认关键信号)
+- 读 config/match_strategies.yaml 全文 91 行,确认 rzq_default/qzrfc_default/_default 三个 match_strategies,
+  其中 rzq_default 仅引用 rzq_ignite/rzq_fail/volume_surge 三个 alert_type,
+  **未引用 auction_surge** — 即竞价异动模板已就位但未被任何策略使用
+- 读 config/export.yaml 头 70 行,确认导出层已映射: VOpenZAF=竞价涨幅% / OpenZAF=开盘涨幅% / OpenAmo=竞价金额
+- 读 config/cleaning_rules.yaml 行 62-68,确认清洗层已含 VOpenZAF/OpenZAF/FzAmo/OpenAmo 字段
+- 读 engine/monitor/engine.py 行 660-720,确认 _normalize_snap 输出标准 snap 字段含 auction_pct,
+  字段来源是 raw["VOpenZAF"]/100(抢筹涨幅%) — 即 L2 竞价数据已进入监控引擎的 snap 流,只是未对外暴露
+
+Stage Summary:
+
+### 1. 通达信 API 竞价能力
+- 是否提供: **是(部分)** — 没有独立的 get_auction_data/subscribe_auction 接口,
+  但 get_more_info + get_gpjy_value + L2_AMO 公式 三条路径覆盖了集合竞价 9:15-9:25 的关键指标
+- 接口名(共 3 条):
+  1. **`tq.get_more_info(stock_code: str, field_list: List=[])`** — 实时盘前/盘中字段查询,单只调用
+  2. **`tq.get_gpjy_value(stock_list, field_list, start_time, end_time)`** — 历史多只批量,
+     需先在客户端下载股票数据包
+  3. **`tq.formula_process_mul_zb(formula_name, ...)`** + 自定义 L2_AMO(级别, 买卖) 公式 —
+     L2 资金分级(超/大/中/小 单位 买/卖)按周期获取,可定时差值排序
+- 参数:
+  - get_more_info: stock_code(单只) + field_list(可选,传 [] 返回全部)
+  - get_gpjy_value: stock_list(多只) + field_list(GP25/GP36 等,不可空) + start_time/end_time(YYYYMMDD)
+  - 公式调用: formula_name + stock_list + stock_period(1d/1m 等) + count + start_time/end_time
+- 返回字段(与"竞价强弱"强相关):
+  | 字段 | 来源接口 | 含义 | 单位 | 备注 |
+  |------|----------|------|------|------|
+  | **VOpenZAF** | get_more_info | 抢筹涨幅(集合竞价涨幅) | % | 已被项目映射为 auction_pct,核心指标 |
+  | **OpenZTBuy** | get_more_info | 竞价涨停买入金额 | 万元 | 直接反映竞价打板资金强度 |
+  | OpenAmo | get_more_info | 开盘金额(集合竞价成交金额) | 万元 | 竞价成交规模 |
+  | OpenAmoPre1 | get_more_info | 昨开盘金额 | 万元 | 用于同比/强弱对比 |
+  | OpenVolPre1 | get_more_info | 昨开盘量 | 手 | 昨竞价量 |
+  | OpenFDE | get_more_info | 开盘封单额(数据样本中存在) | 万元 | 文档未列,实样有 |
+  | L2TicNum | get_more_info | L2 逐笔成交数 | 笔 | L2 维度活跃度 |
+  | L2OrderNum | get_more_info | L2 逐笔委托数 | 笔 | L2 委托活跃度 |
+  | **GP25** | get_gpjy_value | 盘前盘后成交量(开盘成交量+盘后固定成交量) | 手 | 历史回溯 |
+  | **GP36** | get_gpjy_value | 竞价涨停买: 买入金额 | 万元 | **仅 20241101 之后数据** |
+  | L2_AMO(级别,买卖) | formula_process_mul_zb | L2 资金分级金额 | 元 | 通过自定义公式获取 |
+- 数据源: **L2 + 盘前 9:15-9:25** — get_more_info 返回的是当前最新盘口聚合(集合竞价期间返回的就是
+  竞价快照,9:30 后转为连续竞价数据);GP25/GP36 是 T+1 历史序列;L2_AMO 是 L2 委托队列派生
+- 关键限制:
+  - get_more_info 是**单只同步查询**,无批量接口;若监控 100 只股票需循环调用(项目 _batch_more_info 已实现此模式)
+  - get_more_info 字段值以**字符串返回**(如 '1069400.00'),需 float 转换
+  - GP36 仅有 20241101 之后数据,早期历史不可得
+  - 无独立的"竞价阶段订阅"接口 — subscribe_hq 推送的 tick 数据在 9:15-9:25 期间会持续变化,但
+    推送内容是常规 tick 字段(Now/LastClose/Volume 等),不直接含 OpenZTBuy/VOpenZAF,
+    需在回调中**额外调 get_more_info 取竞价字段**(项目当前未这样做)
+
+### 2. 项目当前实现
+- 后端: **部分实现(数据管道就位,API 暴露缺失)**
+  - `engine/data_adapter/real_adapter.py:255-263` — RealAdapter.get_more_info 已透传 tq.get_more_info ✅
+  - `engine/data_adapter/mock_adapter.py:377-379` — MockAdapter.get_more_info 转 V8 快照 CSV ✅
+  - `engine/monitor/engine.py:660-720` — _normalize_snap 已提取 auction_pct(来源 VOpenZAF/100) ✅
+  - `engine/monitor/rules.py:18, 205-214` — 字段映射表含 auction_pct→VOpenZAF ✅
+  - `config/monitor_rules.yaml:82-92` — alert_templates.auction_surge 已定义(auction_pct>3%) ✅
+  - `config/cleaning_rules.yaml:65-68` — 清洗规则已含 VOpenZAF/OpenZAF/FzAmo/OpenAmo ✅
+  - `config/export.yaml:28-31` — 导出层已映射 VOpenZAF=竞价涨幅%/OpenAmo=竞价金额 ✅
+  - `engine/factors/limit_up.py:10` — 注释提到 VOpenZAF/OpenZAF/FzAmo 竞价字段 ✅
+  - **缺口 1**: `GET /api/monitor/quotes` 响应 QuoteSnapshot 不含 auction_pct/OpenZTBuy/OpenAmo 等字段 ❌
+  - **缺口 2**: 无 `GET /api/monitor/auction?code=xxx` 单只竞价查询端点 ❌
+  - **缺口 3**: 无 `GET /api/monitor/auction/batch?codes=xxx,yyy` 批量竞价查询端点 ❌
+  - **缺口 4**: `rzq_default` match_strategy 用的是 rzq_ignite(pct_change>3%),未引用 auction_surge,
+    即"竞价异动"模板处于"已定义但未被任何策略使用"状态 ⚠️
+- 前端: **基本未实现(仅测试用例参数)**
+  - `src/lib/api.ts:642` — MatchTestParams.auction_pct?: number,仅用于 match-strategy 测试模拟参数 ⚠️
+  - `src/components/quant/MatchStrategyManager.tsx:838-850` — 测试面板含"集合竞价涨幅"输入框,
+    label="集合竞价涨幅" placeholder=0.02 step=0.001,但仅作为手动测试 match-strategy 时的模拟输入 ⚠️
+  - **缺口 1**: 无 AuctionPanel/AuctionTable/AuctionBar 等专用竞价展示组件 ❌
+  - **缺口 2**: 监控大屏 QuoteCard 未展示 auction_pct/OpenZTBuy/OpenAmo ❌
+  - **缺口 3**: 无"竞价强弱排行榜"页面 ❌
+- 监控池入口: **无按股票查竞价端点**
+  - `GET /api/monitor/watchlist` 仅返回 code/strategy_id/subscriber/active/batch_no,无竞价字段 ❌
+  - `GET /api/monitor/quotes?count=N` 返回订阅前 N 只的价量快照,无 auction_pct ❌
+  - `GET /api/monitor/flow-ranking` 返回 main_inflow/big_buy_ratio/turnover_rate 排行,无竞价排行 ❌
+
+### 3. 差距分析
+- **通达信有但项目没实现的部分**:
+  - 缺口 A (后端 API): 需在 `engine/api/routes/monitor.py` 新增 `GET /api/monitor/auction/{code}` 端点,
+    调用 `adapter.get_more_info(code, field_list=['VOpenZAF','OpenZTBuy','OpenAmo','OpenAmoPre1',
+    'OpenVolPre1','L2TicNum','L2OrderNum'])` 并组装"竞价强弱"评分(建议公式:
+    score = VOpenZAF*40% + (OpenZTBuy>0?20:0) + (OpenAmo/昨开盘金额同比)*30% + L2OrderNum 分位 *10%)
+    **工作量评估: 0.5 天**(1 个端点 + 评分函数 + Pydantic schema + 单只/批量两形态)
+  - 缺口 B (响应字段): 在 `MonitorQuoteSnapshot` (engine/api/schemas.py) 增加 `auction_pct`/
+    `auction_amount`(OpenAmo)/`auction_zt_buy`(OpenZTBuy) 3 个可选字段,
+    _batch_more_info 提取后注入,前端 QuoteCard 同步显示
+    **工作量评估: 0.3 天**(schema + 监控.py 注入 + 前端 1 个卡片字段)
+  - 缺口 C (前端组件): 新增 `src/components/quant/AuctionPanel.tsx`(竞价强弱面板),
+    展示监控池内每只股票的 VOpenZAF/OpenZTBuy/OpenAmo/同比变化 + 强弱评分柱状图;
+    在 7 Tab 中新增第 8 个 Tab "竞价监控"(9:15-9:25 期间实时刷新,盘中可隐藏)
+    **工作量评估: 1.5 天**(1 个新组件 + Tab 路由 + API client + 轮询 hook + agent-browser 验证)
+  - 缺口 D (策略装配): 在 match_strategies.yaml 的 `rzq_default` 中加一项
+    `- alert_type: auction_surge, params: {pct_threshold: 0.03}, channels: [tdx_warn, websocket, feishu], priority: high`,
+    让"弱转强"策略真正在集合竞价阶段(9:15-9:25)触发竞价异动信号
+    **工作量评估: 0.1 天**(改 YAML + 1 次 reload 验证)
+  - 缺口 E (L2 资金分级): 若需更精细的 L2 竞价资金分级(超/大/中/小单买卖),
+    需新增 `engine/factors/auction_l2.py`,通过 formula_process_mul_zb 调用 L2_AMO 自定义公式
+    **工作量评估: 1.0 天**(公式文件 + Factor 类 + 注册 + 测试)
+- **通达信没有的部分**:
+  - 无独立的"集合竞价逐笔委托队列"接口(只有 L2OrderNum 总数,无明细队列)
+  - 无 9:15-9:20/9:20-9:25 分段数据(取消申报阶段 vs 不可撤销阶段)的细分接口
+  - 替代方案: 用 OpenZTBuy+OpenAmo+VOpenZAF 三字段组合近似"竞价强弱",
+    可满足 90% 的竞价打板监控需求
+
+### 4. 结论与建议
+- **一句话结论**: 通达信 API **已提供**集合竞价数据(通过 get_more_info 返回的 VOpenZAF/OpenZTBuy/
+  OpenAmo 等字段),项目**数据管道已通**(adapter + monitor engine + alert_templates 均就位),
+  但**缺 API 暴露层和前端展示层**,且 `rzq_default` 策略未真正使用 `auction_surge` 模板 —
+  属于"地基已建好,只差盖楼",可实现。
+- **最小实现方案(按优先级)**:
+  1. **[P0, 0.1 天]** 改 `config/match_strategies.yaml`:在 `rzq_default.alerts` 加 `auction_surge`
+     引用,让弱转强策略在 9:15-9:25 真正基于竞价涨幅触发 — 立刻可用,因为 MonitorEngine 已经在
+     _normalize_snap 中提取了 auction_pct
+  2. **[P0, 0.5 天]** 新增 `GET /api/monitor/auction?codes=xxx,yyy&count=50` 端点,批量调
+     adapter.get_more_info 取竞价字段,返回 `[{code, name, vopen_zaf, open_zt_buy, open_amo,
+     open_amo_pre1, ratio_vs_pre1, auction_score, ts}]` — 给前端竞价大屏用
+  3. **[P1, 1.5 天]** 新增 `src/components/quant/AuctionPanel.tsx`,作为 TabLayout 第 8 个 Tab,
+     9:15-9:25 每 3 秒轮询 /api/monitor/auction,展示"竞价强弱排行"(按 auction_score 降序)+
+     每只票的 VOpenZAF/OpenZTBuy/OpenAmo 三列 + 强弱条形图;9:25 后自动切换为静态结果视图
+  4. **[P2, 0.3 天]** 在 `GET /api/monitor/quotes` 响应增加 `auction_pct` 字段(复用 _normalize_snap
+     已有值),让现有大屏 QuoteCard 也能看到竞价涨幅,无需切 Tab
+  5. **[P3, 1.0 天]** 若后续要做 L2 资金分级(超/大/中/小单),新增 `engine/factors/auction_l2.py`
+     通过 formula_process_mul_zb 调 L2_AMO 公式,接入 FactorRegistry
+- **总工作量**: P0+P1+P2 = **2.4 人天**即可交付"监控池竞价强弱监控"完整闭环;
+  P3 加 L2 资金分级另需 1.0 人天
+- **不可实现项**: 9:15-9:20/9:20-9:25 分阶段明细(取消/不可撤销)、逐笔委托队列明细 —
+  通达信 API 未暴露,只能用 OpenZTBuy+OpenAmo+VOpenZAF 三字段近似,无法精确还原竞价撮合过程
+
+---
+Task ID: R13-盘点-UI遗漏
+Agent: Explore
+Task: 后端 API 能力 vs 前端 UI 暴露 全面盘点
+
+Work Log:
+- 扫描后端 13 个路由文件(engine/api/routes/ 下 12 个 .py + main.py include_router),提取 51 个端点,按 12 个模块归类(monitor/backtest/match_strategy/theme/search/channels/watchlist/sectors/strategies/selection/signals/config)
+- 读 monitor_rules.yaml 头 80 行确认 alert_templates 实际 14 个(limit_up/drop_alert/volume_surge/auction_surge/trend_accelerate/trend_break/rebound_signal/continue_drop/big_buy_support/rzq_ignite/rzq_fail/qzrfc_rebound/qzrfc_fail/main_self_rescue)
+- 扫描前端 src/lib/api.ts 共 12 个 API 模块(strategyAPI/selectionAPI/signalAPI/sectorAPI/monitorAPI/themeAPI/configAPI/channelAPI/backtestAPI/searchAPI/matchStrategyAPI/watchlistAPI),共 46 个方法
+- 扫描前端 src/app/api/ 代理路由共 31 个 route.ts 文件,逐个比对后端端点 URL 透传
+- 扫描前端 27 个 quant 组件 + page.tsx + useRealtime.ts 的 API 调用,grep 出 50+ 处 xxxAPI.yyy() 调用点
+- 用 find 命令二次校验(因 LS 工具对含 [id] 的目录树展示不全),确认 match-strategies/[id]/test/route.ts 存在,watchlist/[code]/route.ts 不存在
+- 交叉比对发现 8 项遗漏/bug + 1 项合理冗余,按严重度分级
+
+Stage Summary:
+
+### 1. 后端端点全清单(按模块,共 51 个)
+
+| 模块 | 端点 | 功能 |
+|------|------|------|
+| monitor | GET /api/monitor/status | 引擎状态(monitored_count/today_signals/today_limit_up/today_alerts/uptime/last_hb) |
+| monitor | GET /api/monitor/quotes | 实时行情快照(订阅前 N 只股票价量 + 资金流字段 main_inflow/big_buy_ratio/turnover_rate) |
+| monitor | GET /api/monitor/flow-ranking | 资金流向排行 Top 5(按 main_inflow/big_buy_ratio/turnover_rate 排序) |
+| monitor | GET /api/monitor/subscriptions | 当前订阅列表(strategy_id/stock_code/subscriber/subscribed_at/batch_no) |
+| monitor | GET /api/monitor/health | 引擎健康度(subscribe_alive/quote_lag/eval_count/error_count/debounce_size/queue_size/status + thresholds 透出) |
+| backtest | POST /api/backtest/run | 启动回测(strategy_id/start_date/end_date/initial_capital/top_n/hold_days) |
+| backtest | GET /api/backtest/history | 历史回测列表 |
+| backtest | GET /api/backtest/leaderboard | 策略胜率排行(按 sharpe_ratio 降序,每策略取最新一次) |
+| backtest | GET /api/backtest/{run_id} | 单次回测详情(完整 daily_equity + trades) |
+| match_strategy | GET /api/monitor/match-strategies | 列出所有 match_strategies |
+| match_strategy | POST /api/monitor/match-strategies | 新增 match(写 YAML) |
+| match_strategy | PUT /api/monitor/match-strategies/{match_id} | 部分更新 match(name/enabled/scope/alerts/debounce_override) |
+| match_strategy | DELETE /api/monitor/match-strategies/{match_id} | 删除 match(_default 禁删返 403) |
+| match_strategy | POST /api/monitor/match-strategies/reload | 热加载 match_strategies.yaml |
+| match_strategy | POST /api/monitor/match-strategies/{match_id}/test | 调参预览(扁平 body,返回命中的 alert 列表) |
+| theme | GET /api/theme | 获取主题配置(mode/primary_color/up_color/down_color/background 等 9 字段) |
+| search | GET /api/search?q= | 全局搜索(策略/股票/信号三组结果,limit 每组上限) |
+| channels | GET /api/channels | 通道列表 + 状态 + 校验错误 |
+| channels | PUT /api/channels | 批量更新通道配置(持久化 channels.yaml) |
+| channels | POST /api/channels/{name}/test | 向指定通道发测试消息 |
+| channels | POST /api/channels/signals/{signal_id}/repush | 重新推送某条历史信号(从 signal_events 读回 + 重发原通道) |
+| watchlist | GET /api/monitor/watchlist | 列出当前监控池(含 strategy_id 归属) |
+| watchlist | POST /api/monitor/watchlist | 批量加入监控(codes + strategy_id + subscriber) |
+| watchlist | DELETE /api/monitor/watchlist/{code} | 移除单只监控(归档 active=false) |
+| watchlist | POST /api/monitor/watchlist/by-sector/{sector_code} | 按板块批量加入监控 |
+| sectors | GET /api/sectors | 列出所有板块(策略 YAML sector 段 + sector_snapshots 表合并) |
+| sectors | POST /api/sectors | 占位(创建/更新板块,未实现具体逻辑) |
+| sectors | GET /api/sectors/export-all | 导出全部板块成份股(CSV 多段 / Excel 多 Sheet) |
+| sectors | GET /api/sectors/{code}/stocks | 获取板块成份股(优先 sector_snapshots,兜底 adapter) |
+| sectors | POST /api/sectors/{code}/refresh | 刷新板块(执行选股 + 回写通达信自定义板块) |
+| strategies | GET /api/strategies | 列出所有策略(附 last_run_at/last_run_stocks/yaml_content) |
+| strategies | POST /api/strategies | 批量操作(enable_all/disable_all/run_all) |
+| strategies | GET /api/strategies/{id} | 单策略详情 |
+| strategies | POST /api/strategies/{id} | 启用/禁用(前端兼容入参 {enabled: bool}) |
+| strategies | POST /api/strategies/{id}/enable | 启用策略 |
+| strategies | POST /api/strategies/{id}/disable | 禁用策略 |
+| strategies | POST /api/strategies/{id}/run | 执行选股(含后置钩子: 写 selection 信号 + 自动订阅 Top 20) |
+| strategies | GET /api/strategies/{id}/runs | 历史执行记录(从 strategy_runs 表查最近 N 条) |
+| selection | GET /api/selections | 列表(strategy_id/run_id/start_date/end_date/min_score 筛选) |
+| selection | GET /api/selections/{run_id} | 单次结果详情(含 started_at/finished_at/duration_sec/status 元信息) |
+| selection | GET /api/selections/{run_id}/export | 导出 CSV / Excel |
+| signals | GET /api/signals/stats | 信号统计(按 alert_type 分组,返回 count + last_time) |
+| signals | GET /api/signals/{signal_id} | 信号详情(含 snapshot JSON) |
+| signals | GET /api/signals | 信号列表(type/strategy_id/start_date/end_date 筛选) |
+| config | GET /api/config | 当前配置摘要(app/server/paths/strategies_count/alert_templates_count/match_strategies_count/channels/config_files/last_reload_at) |
+| config | POST /api/config/reload | 热加载全部 YAML 配置 |
+| config | GET /api/config/strategies | 列出策略 YAML 文件(含原文) |
+| config | PUT /api/config/strategies/{id} | 在线更新策略 YAML |
+| config | POST /api/config/strategies | 创建/复制策略 YAML |
+| config | DELETE /api/config/strategies/{id} | 删除策略 YAML(启用中返 409) |
+
+### 2. 前端 API 方法 vs 组件调用矩阵(46 个方法)
+
+| api.ts 方法 | 后端路径 | 调用组件 | 用途 |
+|-------------|----------|----------|------|
+| strategyAPI.list | GET /api/strategies | StrategyManager / SelectionResults / SignalCenter / MatchStrategyManager / WatchlistManager / Dashboard(via useRealtime) | 策略列表 |
+| strategyAPI.get | GET /api/strategies/{id} | (无) | 单策略详情(api.ts 有方法但无组件用) |
+| strategyAPI.enable/disable | POST /api/strategies/{id} body enabled | StrategyManager | 启用/禁用 |
+| strategyAPI.run | POST /api/strategies/{id}/run | StrategyManager | 执行选股 |
+| strategyAPI.enableAll/disableAll/runAll | POST /api/strategies body action | StrategyManager / page.tsx | 批量操作 |
+| strategyAPI.runs | GET /api/strategies/{id}/runs | StrategyManager | 历史执行记录 |
+| selectionAPI.list | GET /api/selections | SelectionResults | 选股结果列表 |
+| selectionAPI.get | GET /api/selections?run_id= | (无组件直接调用,内部用 list 替代) | 按 run_id 筛选(用 list 替代 detail) |
+| selectionAPI.export | GET /api/selections/{runId}/export | SelectionResults | 导出 CSV/Excel |
+| signalAPI.list | GET /api/signals | SignalCenter / useRealtime | 信号列表(支持 type/strategy/date 筛选) |
+| signalAPI.getDetail | GET /api/signals/{id} | SignalCenter | 行点击 → 抽屉展示完整 snapshot |
+| sectorAPI.list | GET /api/sectors | SectorManager | 板块列表 |
+| sectorAPI.getStocks | GET /api/sectors/{code}/stocks | SectorManager | 板块成份股 |
+| sectorAPI.refresh | POST /api/sectors/{code}/refresh | SectorManager | 刷新板块 |
+| sectorAPI.exportAll | GET /api/sectors/export-all | SectorManager | 导出全部板块 |
+| monitorAPI.getStatus | GET /api/monitor?action=status | page.tsx / useRealtime | 引擎状态 |
+| monitorAPI.getQuotes | GET /api/monitor?action=quotes | useRealtime / SectorManager(取 200 只) | 实时行情快照 |
+| monitorAPI.getFlowRanking | GET /api/monitor/flow-ranking | (无组件调用) | 资金流向排行(api.ts 有方法但无组件用) |
+| monitorAPI.getHealth | GET /api/monitor?action=health | EngineHealthCard | 健康度(每 5s 自动刷新) |
+| themeAPI.get | GET /api/theme | lib/theme.ts | 主题配置 |
+| configAPI.reload | POST /api/config → 代理转发到 /api/config/reload | page.tsx / StrategyManager | 热加载配置 |
+| configAPI.listStrategyConfigs | GET /api/config/strategies | (无组件调用,死代码) | 列出策略 YAML(用 strategyAPI.list 替代) |
+| configAPI.updateStrategyConfig | PUT /api/config/strategies/{id} | StrategyManager | 在线编辑策略 YAML |
+| configAPI.createStrategy | POST /api/config/strategies | StrategyManager | 复制策略 |
+| configAPI.deleteStrategy | DELETE /api/config/strategies/{id} | StrategyManager | 删除策略 |
+| channelAPI.list | GET /api/channels | ChannelSettingsDialog / page.tsx(顶部红点) | 通道列表 |
+| channelAPI.update | PUT /api/channels | ChannelSettingsDialog | 批量保存通道配置 |
+| channelAPI.test | POST /api/channels/{name}/test | ChannelSettingsDialog | 测试通道 |
+| channelAPI.repush | POST /api/channels/signals/{id}/repush | SignalCenter(行末"重推"按钮) | 重推历史信号 |
+| backtestAPI.run | POST /api/backtest/run | BacktestView | 启动回测 |
+| backtestAPI.history | GET /api/backtest/history | BacktestView | 历史回测列表 |
+| backtestAPI.get | GET /api/backtest/{runId} | BacktestView | 单次回测详情 |
+| backtestAPI.leaderboard | GET /api/backtest/leaderboard | StrategyLeaderboard(Dashboard 嵌入) | 策略胜率排行 |
+| searchAPI.search | GET /api/search | GlobalSearch(Cmd+K) | 全局搜索 |
+| matchStrategyAPI.list | GET /api/monitor/match-strategies | MatchStrategyManager | 列表 |
+| matchStrategyAPI.create | POST /api/monitor/match-strategies | MatchStrategyManager | 新建/复制 |
+| matchStrategyAPI.update | PUT /api/monitor/match-strategies/{id} | MatchStrategyManager | 改参/启用禁用 |
+| matchStrategyAPI.remove | DELETE /api/monitor/match-strategies/{id} | MatchStrategyManager | 删除 |
+| matchStrategyAPI.reload | POST /api/monitor/match-strategies?action=reload | MatchStrategyManager | 重新加载 YAML |
+| matchStrategyAPI.test | POST /api/monitor/match-strategies/{id}/test | MatchStrategyManager | 调参预览 |
+| watchlistAPI.list | GET /api/monitor/watchlist | WatchlistManager | 列出监控池 |
+| watchlistAPI.add | POST /api/monitor/watchlist | WatchlistManager | 批量加入/批量导入 |
+| watchlistAPI.remove | DELETE /api/monitor/watchlist/{code} | WatchlistManager | 移除单只 ⚠ BUG: 代理不匹配 |
+
+### 3. 遗漏功能清单(后端有但前端 UI 没暴露,共 8 项 + 1 死代码)
+
+| 遗漏功能 | 后端端点 | 严重度 | 建议放在哪个 tab | 工作量估计 |
+|----------|----------|--------|------------------|------------|
+| watchlistAPI.remove 调用方式与代理不匹配(会 404) | DELETE /api/monitor/watchlist/{code} | **高 BUG** | 自选股 Tab | 0.2 人天(改 api.ts 用 query form OR 新增 [code]/route.ts) |
+| alert_templates 列表展示(14 个模板用户看不到) | 后端无端点(/api/config 仅返 count) | **高** | 匹配策略 Tab 编辑 Dialog | 1.5 人天(后端加 GET /api/monitor/alert-templates + 前端 alert_type 改 Select 下拉) |
+| GET /api/config 配置摘要页(策略数/模板数/通道/最近 reload) | GET /api/config | 中 | 新增"系统配置" Tab OR 实时大屏侧栏 | 0.8 人天(api.ts 加 configAPI.get + ConfigSummary 组件) |
+| POST /api/monitor/watchlist/by-sector/{sector_code} 按板块批量加入监控 | POST /api/monitor/watchlist/by-sector/{sector_code} | 中 | 板块管理 Tab(板块行加"加入监控"按钮) + 自选股 Tab | 0.5 人天(加 api.ts 方法 + 代理 route + SectorManager 按钮) |
+| GET /api/monitor/flow-ranking 后端 Top 5 排序能力未用 | GET /api/monitor/flow-ranking | 中 | 实时大屏 FlowRanking 卡片 | 0.3 人天(把 FlowRanking 从 props+本地排序 改为直接调 monitorAPI.getFlowRanking) |
+| GET /api/signals/stats 后端聚合统计未用 | GET /api/signals/stats | 低 | 信号中心 Tab 顶部统计栏 | 0.3 人天(用后端 stats 替代本地 useMemo 统计,可显示全表总数而非 200 条) |
+| GET /api/selections/{run_id} 详情元信息未用 | GET /api/selections/{run_id} | 低 | 选股结果 Tab 详情抽屉 | 0.4 人天(加 selectionAPI.getDetail + 展示 started_at/finished_at/duration/status) |
+| GET /api/monitor/subscriptions 订阅列表端点未用 | GET /api/monitor/subscriptions | 低 | (与 watchlistAPI.list 功能重叠,可不补) | 0 人天(明确弃用 OR 删除代理) |
+| configAPI.listStrategyConfigs 死代码 | GET /api/config/strategies | 低 | (StrategyManager 用 strategyAPI.list 替代,合理冗余) | 0 人天(可保留备用 OR 删) |
+
+### 4. 重点关注项核查结果
+
+- **监控策略 alert_templates 展示**: ⚠ 部分遗漏(高优先级)
+  - 后端 monitor_rules.yaml 有 14 个 alert_templates(limit_up/drop_alert/volume_surge/auction_surge/trend_accelerate/trend_break/rebound_signal/continue_drop/big_buy_support/rzq_ignite/rzq_fail/qzrfc_rebound/qzrfc_fail/main_self_rescue),每个含 condition/emoji/label/channels/priority/description/default_params
+  - 前端 MatchStrategyManager 编辑 alerts 时 alert_type 是**自由 Input**(MatchStrategyManager.tsx line 1601-1606: `<Input placeholder="alert_type (如 rzq_ignite)" />`),用户必须凭记忆输入
+  - 后端 /api/config 仅返回 alert_templates_count,不暴露模板详情(无 GET /api/monitor/alert-templates 端点)
+  - 影响: 用户不知道有哪些模板可用,容易拼错 alert_type 导致测试返回 "<模板不存在>"
+
+- **回测**: ✓ 完整(4 端点全覆盖)
+  - 4 个端点全部有 api.ts 方法 + 代理 route + 组件调用
+  - BacktestView 用 run/history/get,StrategyLeaderboard 用 leaderboard
+  - BacktestView.tsx 115/161/180 行,StrategyLeaderboard.tsx 54 行
+
+- **搜索**: ✓ 完整(1 端点全覆盖)
+  - GET /api/search 有 searchAPI.search 方法 + 代理 route + GlobalSearch 组件调用
+  - GlobalSearch.tsx line 162
+
+- **板块**: ✓ 完整(5 端点中 4 个被用,1 个是后端占位)
+  - GET/POST /api/sectors(list 用,POST 是占位未用,合理)
+  - GET /api/sectors/export-all ✓
+  - GET /api/sectors/{code}/stocks ✓
+  - POST /api/sectors/{code}/refresh ✓
+  - 缺: 没法"按板块加入监控"(后端 watchlist/by-sector 端点存在但前端未接)
+
+- **配置编辑**: ⚠ 部分遗漏(中优先级)
+  - 策略 YAML 编辑: ✓ 完整(GET/POST/PUT/DELETE /api/config/strategies 全有,StrategyManager 编辑/复制/删除三件套全实现)
+  - 热加载: ✓ POST /api/config/reload 在 page.tsx 顶部按钮 + StrategyManager 都有
+  - **配置摘要页缺失**: GET /api/config 代理已写好但无 api.ts 方法、无组件调用,用户看不到"已加载多少策略/启用多少/14 个 alert 模板/3 个 match 套餐/通道启用状态/最近 reload 时间/配置文件列表"
+
+- **通道**: ✓ 完整(4 端点全覆盖)
+  - 4 个端点全部有 api.ts 方法 + 代理 + 组件调用
+  - ChannelSettingsDialog 用 list/update/test,SignalCenter 用 repush
+
+- **信号筛选/导出**: ⚠ 部分遗漏(中优先级)
+  - 筛选: ✓ 完整(type/strategy_id/start_date/end_date + 前端 channel 多选)
+  - 重推: ✓ SignalCenter 行末"重推"按钮
+  - 详情抽屉: ✓ signalAPI.getDetail 含 snapshot JSON 树形展示
+  - **stats 端点未用**: GET /api/signals/stats 无 api.ts 方法、无代理、无组件调用,SignalCenter 用本地 useMemo 统计(line 156-159),只能统计已加载的 200 条,后端可统计全表
+  - **导出功能缺失**: 后端无 /api/signals/export 端点,前端亦无导出按钮(选股结果有导出但信号中心无)
+
+- **健康度 thresholds 展示**: ✓ 完整
+  - EngineHealthCard.tsx line 198-201: `const lagHealthyThreshold = health?.thresholds?.lag_healthy_seconds ?? 60`
+  - line 316-321: 渲染阈值脚注 "阈值 · lag<{lagHealthy}s 正常 / <{lagDegraded}s 降级 · err>{errHealthy} 异常"
+  - 后端 /api/monitor/health 透出 thresholds 字段(monitor.py line 337-341),前端正确消费
+
+### 5. 结论与优先级建议
+
+#### 高优先级遗漏(用户明显需要,2 项)
+1. **watchlistAPI.remove 调用方式 BUG**:
+   - api.ts (line 706-710) 调 `DELETE /api/monitor/watchlist/${code}` (path 形式)
+   - 代理 (src/app/api/monitor/watchlist/route.ts) 处理 `DELETE /api/monitor/watchlist?code=xxx` (query 形式)
+   - 缺失 `src/app/api/monitor/watchlist/[code]/route.ts` 动态路由
+   - 影响: WatchlistManager 的"确认移除"按钮会 404,移除功能完全不可用
+   - 修复方案二选一: 改 api.ts 用 query form OR 新增 [code]/route.ts(path form)
+   - 工作量: 0.2 人天
+
+2. **alert_templates 列表展示**:
+   - 14 个模板用户必须凭记忆输入 alert_type,极易拼错
+   - 修复: 后端加 GET /api/monitor/alert-templates(返回 14 个模板的 key+label+description+default_params+channels),前端 MatchStrategyManager 编辑 Dialog 把 alert_type 自由 Input 改为 Select 下拉,选中后自动填 default_params + 显示 description
+   - 工作量: 1.5 人天(后端 0.4 + 前端 1.1)
+
+#### 中优先级遗漏(锦上添花,3 项)
+3. **配置摘要页 GET /api/config**:
+   - 后端代理已写好,加 api.ts configAPI.get + 一个轻量 ConfigSummary 组件即可
+   - 建议放在实时大屏侧栏(状态卡片下方),展示 strategies_count/enabled_count/alert_templates_count/match_strategies_count/last_reload_at
+   - 工作量: 0.8 人天
+
+4. **按板块加入监控 POST /api/monitor/watchlist/by-sector/{sector_code}**:
+   - 后端有端点,前端无 api.ts 方法、无代理 route、无组件
+   - 建议 SectorManager 板块行加"加入监控"按钮 + WatchlistManager 批量导入 Dialog 加"按板块"模式
+   - 工作量: 0.5 人天
+
+5. **flow-ranking 后端 Top 5 排序能力未用**:
+   - api.ts 有 monitorAPI.getFlowRanking 但 FlowRanking.tsx 接收 quotes props 本地排序
+   - 现状功能等价(本地能算),但后端可扩到 count=200 取样 Top 5,前端只在已加载的 100 只里排
+   - 建议把 FlowRanking 改为直接调 monitorAPI.getFlowRanking(count=200, metric)
+   - 工作量: 0.3 人天
+
+#### 低优先级遗漏(可有可无,3 项 + 1 死代码)
+6. **GET /api/signals/stats**: 后端能统计全表,前端只统计已加载 200 条,差距不大,本地 useMemo 已够用
+7. **GET /api/selections/{run_id} 详情元信息**: 缺 started_at/finished_at/duration/status 展示,选股结果抽屉可加
+8. **GET /api/monitor/subscriptions**: 与 watchlistAPI.list 重叠,明确弃用即可
+9. **configAPI.listStrategyConfigs 死代码**: strategyAPI.list 已含 yaml_content,合理冗余可删可留
+
+#### 总体评估
+- 后端 API 能力整体暴露度: **~85%**(51 端点中 43 个被前端实际调用,8 个有代理但未用/未暴露)
+- 7 个 Tab 中"匹配策略"Tab 是遗漏重灾区(alert_templates 下拉缺失),其他 Tab 基本完整
+- 1 个高优先级 BUG(watchlist remove)需要立即修复
+- 1 个高优先级 UI 缺失(alert_templates 下拉)显著影响用户体验
