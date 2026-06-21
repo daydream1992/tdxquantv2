@@ -134,6 +134,11 @@ class StrategyRunner:
 
         # 记录 strategy_runs
         self._record_run(context)
+
+        # §15.7 冷启动自动注入订阅：选股完成后主动 upsert_subscription 带 strategy_id
+        # 让监控引擎启动即有股票可盯，snap.strategy_id 正确填充
+        self._inject_monitor_subscriptions(context)
+
         return context
 
     def list_strategies(self) -> list[str]:
@@ -279,6 +284,91 @@ class StrategyRunner:
                 self.logger.info("DuckDBStore 无可用写入方法，跳过 strategy_runs 记录: %s", record)
         except Exception as exc:  # noqa: BLE001
             self.logger.warning("记录 strategy_runs 失败 (可能 schema 字段不匹配): %s", exc)
+
+    def _inject_monitor_subscriptions(self, context: PipelineContext) -> None:
+        """§15.7 冷启动自动注入订阅：把选股结果主动写入监控订阅。
+
+        - 调 ``EngineState.upsert_subscription(code, strategy_id=context.strategy_id,
+          subscriber="pipeline_auto")`` 让 ``MonitorEngine`` 启动即有股票可盯
+        - 同时写 ``monitor_subscriptions`` 表持久化（跨重启订阅不丢）
+        - 异常 try-except 不阻断选股主流程
+
+        股票来源：``context.final`` DataFrame 的 ``code`` / ``stock_code`` 列。
+        """
+        if context.final is None or context.final.empty:
+            self.logger.info("选股结果为空，跳过监控订阅注入: %s", context.strategy_id)
+            return
+        try:
+            from engine.api.state import EngineState
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("导入 EngineState 失败，跳过订阅注入: %s", exc)
+            return
+
+        # 收集 stock_code（兼容 code / stock_code 两种列名）
+        codes: list[str] = []
+        for col in ("code", "stock_code"):
+            if col in context.final.columns:
+                codes = [str(v).strip() for v in context.final[col].tolist() if v]
+                break
+        if not codes:
+            self.logger.info("选股结果无 code/stock_code 列，跳过订阅注入")
+            return
+
+        state = EngineState()
+        sid = str(context.strategy_id or "")
+        injected = 0
+        for i, code in enumerate(codes):
+            if not code:
+                continue
+            batch_no = (i // 50) + 1
+            try:
+                state.upsert_subscription(
+                    code,
+                    strategy_id=sid,
+                    subscriber="pipeline_auto",
+                    batch_no=batch_no,
+                )
+                self._persist_subscription(code, sid, "pipeline_auto", batch_no)
+                injected += 1
+            except Exception as exc:  # noqa: BLE001
+                self.logger.debug("upsert_subscription %s 失败: %s", code, exc)
+        self.logger.info(
+            "监控订阅自动注入完成: strategy=%s, %d/%d 只股票",
+            sid, injected, len(codes),
+        )
+
+    def _persist_subscription(
+        self,
+        code: str,
+        strategy_id: str,
+        subscriber: str,
+        batch_no: int,
+    ) -> None:
+        """写 monitor_subscriptions 表持久化订阅（跨重启不丢）。
+
+        注：用 DELETE+INSERT 而非 UPDATE，规避 DuckDB 索引下 UPDATE 的
+        "Failed to delete all rows from index" bug。
+        """
+        if self.storage is None or not hasattr(self.storage, "table_exists"):
+            return
+        try:
+            if not self.storage.table_exists("monitor_subscriptions"):
+                return
+            # 同 stock_code 旧记录先 DELETE（active=true 与 active=false 一起清）
+            self.storage.execute(  # type: ignore[attr-defined]
+                "DELETE FROM monitor_subscriptions WHERE stock_code = ?",
+                [code],
+            )
+            self.storage.execute(  # type: ignore[attr-defined]
+                """
+                INSERT INTO monitor_subscriptions
+                    (strategy_id, stock_code, subscriber, subscribed_at, active, batch_no)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP, true, ?)
+                """,
+                [strategy_id, code, subscriber, batch_no],
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug("写 monitor_subscriptions 失败（可忽略）: %s", exc)
 
 
 # 模块级辅助函数

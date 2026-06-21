@@ -165,6 +165,10 @@ class ConfigLoader:
                 len(strategies_map),
             )
 
+        # 通知监听器（RuleSet / MatchRegistry 等缓存类）reload 完成，清各自的缓存
+        # 放在 lock 外，避免与各模块的 lock 嵌套
+        self._notify_reload()
+
     # ------------------------------------------------------------------
     # 访问
     # ------------------------------------------------------------------
@@ -270,6 +274,27 @@ class ConfigLoader:
     def add_listener(self, callback) -> None:
         """注册配置变更回调 ``callback(changed_paths: list[str])``。"""
         self._listeners.append(callback)
+
+    def _notify_reload(self) -> None:
+        """reload 完成后通知各缓存类（RuleSet / MatchRegistry 等）清缓存。
+
+        采用惰性导入 + try-except，避免循环依赖与异常传染。
+        """
+        # RuleSet 缓存清
+        try:
+            from engine.monitor.rules import RuleSet
+
+            RuleSet.invalidate()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("RuleSet.invalidate 失败（可忽略）: %s", exc)
+        # MatchRegistry 缓存清
+        try:
+            from engine.monitor.match_registry import MatchRegistry
+
+            MatchRegistry.invalidate()
+        except Exception as exc:  # noqa: BLE001
+            # Step 8 前模块不存在，可忽略
+            logger.debug("MatchRegistry.invalidate 失败（可忽略）: %s", exc)
 
     def _watch_loop(self) -> None:
         """轮询 mtime，发现变化则触发 ``reload()`` 与监听回调。"""

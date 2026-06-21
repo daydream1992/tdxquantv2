@@ -31,6 +31,7 @@ from engine.api.routes import (
     backtest as backtest_routes,
     channels as channels_routes,
     config as config_routes,
+    match_strategy as match_strategy_routes,
     monitor as monitor_routes,
     sectors as sectors_routes,
     search as search_routes,
@@ -38,6 +39,7 @@ from engine.api.routes import (
     signals as signals_routes,
     strategies as strategies_routes,
     theme as theme_routes,
+    watchlist as watchlist_routes,
 )
 
 logger = logging.getLogger(__name__)
@@ -96,6 +98,43 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("ConfigLoader watcher 启动失败: %s", exc)
 
+    # 5. ★ MonitorEngine 启动（PLAN §9，daemon 线程，异常不阻断主流程）
+    # ★ 先从 DuckDB monitor_subscriptions 表冷启动加载 active=true 订阅到 EngineState
+    #   内存，否则重启后所有 strategy_id 绑定丢失（bug R9-3 #1）
+    try:
+        from engine.storage.duckdb_store import DuckDBStore
+
+        store = DuckDBStore()
+        if store.table_exists("monitor_subscriptions"):
+            df = store.query(
+                "SELECT strategy_id, stock_code, subscriber, batch_no "
+                "FROM monitor_subscriptions WHERE active = true"
+            )
+            n = 0
+            for _, row in df.iterrows():
+                code = str(row.get("stock_code") or "").strip()
+                if not code:
+                    continue
+                state.upsert_subscription(
+                    code,
+                    strategy_id=str(row.get("strategy_id") or ""),
+                    subscriber=str(row.get("subscriber") or "engine"),
+                    batch_no=int(row.get("batch_no") or 0),
+                )
+                n += 1
+            logger.info("冷启动: 从 monitor_subscriptions 加载 %d 条 active 订阅", n)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("冷启动加载 monitor_subscriptions 失败（不阻断）: %s", exc)
+
+    monitor_engine = None
+    try:
+        from engine.monitor import MonitorEngine
+
+        monitor_engine = MonitorEngine()
+        monitor_engine.start()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("MonitorEngine 启动失败（不阻断主流程）: %s", exc)
+
     state.heartbeat()
     logger.info("TdxQuant FastAPI 已启动，监听 :%s", _get_port())
 
@@ -103,6 +142,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # 关闭
     logger.info("TdxQuant FastAPI 关闭中...")
+
+    # ★ MonitorEngine 停止
+    try:
+        if monitor_engine is not None:
+            monitor_engine.stop()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("MonitorEngine 停止失败: %s", exc)
+
     try:
         from engine.config.loader import ConfigLoader
 
@@ -209,6 +256,10 @@ def create_app() -> FastAPI:
     app.include_router(strategies_routes.router, prefix="/api/strategies")
     app.include_router(selection_routes.router, prefix="/api/selections")
     app.include_router(monitor_routes.router, prefix="/api/monitor")
+    app.include_router(
+        match_strategy_routes.router, prefix="/api/monitor/match-strategies"
+    )
+    app.include_router(watchlist_routes.router, prefix="/api/monitor/watchlist")
     app.include_router(sectors_routes.router, prefix="/api/sectors")
     app.include_router(signals_routes.router, prefix="/api/signals")
     app.include_router(config_routes.router, prefix="/api/config")

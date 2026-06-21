@@ -1,0 +1,90 @@
+match_strategies:
+- match_id: rzq_default
+  name: 弱转强默认监控
+  enabled: true
+  strategy_id: rzq
+  scope:
+    markets:
+    - SH
+    - SZ
+    - BJ
+    exclude_st: true
+    exclude_suspended: true
+    exclude_codes: []
+    include_only: []
+  alerts:
+  - alert_type: rzq_ignite
+    params:
+      pct_threshold: 0.03
+    channels:
+    - tdx_warn
+    - websocket
+    - feishu
+    priority: high
+  - alert_type: rzq_fail
+    params:
+      pct_threshold: 0.03
+    channels:
+    - websocket
+    - feishu
+    priority: high
+  - alert_type: volume_surge
+    params:
+      vol_ratio_threshold: 2
+    channels:
+    - websocket
+    priority: low
+  debounce_override: 60
+  trading_hours_override: null
+- match_id: qzrfc_default
+  name: 强转弱反抽监控
+  enabled: true
+  strategy_id: qzrfc
+  scope:
+    markets:
+    - SH
+    - SZ
+    exclude_st: true
+    exclude_suspended: true
+    exclude_codes: []
+    include_only: []
+  alerts:
+  - alert_type: qzrfc_rebound
+    params:
+      pct_threshold: 0.02
+    channels:
+    - tdx_warn
+    - websocket
+    - feishu
+    priority: high
+  - alert_type: qzrfc_fail
+    params:
+      pct_threshold: 0.05
+    channels:
+    - websocket
+    - feishu
+    priority: high
+  debounce_override: 60
+  trading_hours_override: null
+- match_id: _default
+  name: 通用兜底监控
+  enabled: true
+  strategy_id: ''
+  scope: {}
+  alerts:
+  - alert_type: limit_up
+    params:
+      pct_threshold: 0.095
+    channels:
+    - websocket
+    - feishu
+    priority: high
+  - alert_type: drop_alert
+    params:
+      pct_threshold: 0.05
+    channels:
+    - websocket
+    - feishu
+    priority: medium
+  debounce_override: null
+  trading_hours_override: null

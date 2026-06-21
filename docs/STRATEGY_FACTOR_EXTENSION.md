@@ -429,9 +429,9 @@ class MyFactor(Factor):
 #### Step 3：重启 FastAPI（因子注册不热加载）
 
 ```bash
-# 沙箱
+# Linux/macOS (venv 已在 PATH)
 pkill -f "uvicorn engine.api.main"
-/home/z/.venv/bin/python -m uvicorn engine.api.main:app --host 0.0.0.0 --port 8000 --reload &
+python -m uvicorn engine.api.main:app --host 0.0.0.0 --port 8000 --reload &
 
 # Windows
 # Ctrl+C 停止，重新 python scripts\start_engine.py --reload
@@ -660,9 +660,10 @@ channels:
 #### Step 4：重启 FastAPI
 
 ```bash
-# 通道注册不热加载，需重启
+# 通道注册不热加载，需重启 (Linux/macOS)
 pkill -f "uvicorn engine.api.main"
-/home/z/.venv/bin/python -m uvicorn engine.api.main:app --host 0.0.0.0 --port 8000 --reload &
+python -m uvicorn engine.api.main:app --host 0.0.0.0 --port 8000 --reload &
+# Windows: powershell -Command "Get-Process | Where-Object { $_.CommandLine -match 'uvicorn' } | Stop-Process -Force" 然后 python scripts\start_engine.py --reload
 ```
 
 #### Step 5：验证

@@ -32,115 +32,143 @@ monitor:
 alert_templates:
   # 涨停预警: 涨幅 > 9.5%（兼容主板/创业板/科创板/北交所，实际涨停阈值在 cleaning_rules.yaml 配置）
   limit_up:
-    condition: "pct_change > 0.095"
+    condition: "pct_change > {pct_threshold}"
     alert_type: limit_up
     channels: [tdx_warn, websocket, feishu]
     priority: high
     description: 触及涨停价（含创业板/科创板 19.5%、北交所 29.5%、主板 9.8%）
+    default_params:
+      pct_threshold: 0.095
 
   # 大跌预警: 跌幅 > 5%
   drop_alert:
-    condition: "pct_change < -0.05"
+    condition: "pct_change < -{pct_threshold}"
     alert_type: drop_alert
     channels: [websocket, feishu]
     priority: medium
     description: 跌幅超过 5%（炸板/破位风险）
+    default_params:
+      pct_threshold: 0.05
 
   # 量能放大: 量比 > 3
   volume_surge:
-    condition: "volume_ratio > 3"
+    condition: "volume_ratio > {vol_ratio_threshold}"
     alert_type: volume_surge
     channels: [websocket]
     priority: low
     description: 量比放大超过 3 倍
+    default_params:
+      vol_ratio_threshold: 3
 
   # 竞价异动: 竞价涨幅 > 3%
   auction_surge:
-    condition: "auction_pct > 0.03"
+    condition: "auction_pct > {pct_threshold}"
     alert_type: auction_surge
     channels: [websocket]
     priority: medium
     description: 开盘竞价涨幅 > 3%（次日确认关键信号）
+    default_params:
+      pct_threshold: 0.03
 
   # 趋势加速: 涨幅 > 5%
   trend_accelerate:
-    condition: "pct_change > 0.05"
+    condition: "pct_change > {pct_threshold}"
     alert_type: trend_accelerate
     channels: [tdx_warn, websocket]
     priority: high
     description: 趋势加速上涨
+    default_params:
+      pct_threshold: 0.05
 
   # 趋势破位: 跌幅 > 3%
   trend_break:
-    condition: "pct_change < -0.03"
+    condition: "pct_change < -{pct_threshold}"
     alert_type: trend_break
     channels: [websocket, feishu]
     priority: high
     description: 趋势破位下跌
+    default_params:
+      pct_threshold: 0.03
 
   # 反弹信号: 涨幅 > 3%（错杀低吸策略专用）
   rebound_signal:
-    condition: "pct_change > 0.03"
+    condition: "pct_change > {pct_threshold}"
     alert_type: rebound_signal
     channels: [tdx_warn, websocket, feishu]
     priority: high
     description: 错杀反弹启动
+    default_params:
+      pct_threshold: 0.03
 
   # 继续杀跌: 跌幅 > 5%（错杀变深跌，止损信号）
   continue_drop:
-    condition: "pct_change < -0.05"
+    condition: "pct_change < -{pct_threshold}"
     alert_type: continue_drop
     channels: [websocket, feishu]
     priority: high
     description: 错杀变深跌，止损信号
+    default_params:
+      pct_threshold: 0.05
 
   # 大单承接: 主力净流入 > 1000 万
   big_buy_support:
-    condition: "main_inflow > 1000"
+    condition: "main_inflow > {inflow_threshold}"
     alert_type: big_buy_support
     channels: [websocket]
     priority: medium
     description: 大单承接（主力净流入 > 1000 万）
+    default_params:
+      inflow_threshold: 1000
 
   # 弱转强启动: 涨幅 > 3%
   rzq_ignite:
-    condition: "pct_change > 0.03"
+    condition: "pct_change > {pct_threshold}"
     alert_type: rzq_ignite
     channels: [tdx_warn, websocket, feishu]
     priority: high
     description: 弱转强点火成功
+    default_params:
+      pct_threshold: 0.03
 
   # 弱转强失败: 跌幅 > 3%
   rzq_fail:
-    condition: "pct_change < -0.03"
+    condition: "pct_change < -{pct_threshold}"
     alert_type: rzq_fail
     channels: [websocket, feishu]
     priority: high
     description: 弱转强点火失败，止损
+    default_params:
+      pct_threshold: 0.03
 
   # 强转弱反抽: 涨幅 > 2%
   qzrfc_rebound:
-    condition: "pct_change > 0.02"
+    condition: "pct_change > {pct_threshold}"
     alert_type: qzrfc_rebound
     channels: [tdx_warn, websocket, feishu]
     priority: high
     description: 强转弱反抽启动
+    default_params:
+      pct_threshold: 0.02
 
   # 强转弱失败: 跌幅 > 5%
   qzrfc_fail:
-    condition: "pct_change < -0.05"
+    condition: "pct_change < -{pct_threshold}"
     alert_type: qzrfc_fail
     channels: [websocket, feishu]
     priority: high
     description: 反抽失败，止损
+    default_params:
+      pct_threshold: 0.05
 
   # 主力自救: 主力净流入 > 1000 万
   main_self_rescue:
-    condition: "main_inflow > 1000"
+    condition: "main_inflow > {inflow_threshold}"
     alert_type: main_self_rescue
     channels: [websocket]
     priority: medium
     description: 主力自救资金入场
+    default_params:
+      inflow_threshold: 1000
 
 # ---- 预警去重策略 ----
 dedup:

@@ -32,7 +32,9 @@ _CHANNEL_CLASSES: dict[str, type[BaseChannel]] = {
     "feishu": FeishuChannel,
 }
 
-# 默认 channels.yaml 模板
+# 默认 channels.yaml 模板（按 channel_id 索引的扁平 dict）
+# 注：实际 channels.yaml 使用 ``channels: [{channel_id, enabled, config}, ...]`` 列表格式，
+# 此处仅作为缺失通道的 fallback 默认值。
 _DEFAULT_CONFIG: dict[str, Any] = {
     "csv_log": {"enabled": True, "path": ""},
     "websocket": {"enabled": True},
@@ -55,15 +57,21 @@ def _config_path() -> Path:
 
 
 def _ensure_default_config() -> None:
-    """若 channels.yaml 不存在，写入默认模板。"""
+    """若 channels.yaml 不存在，写入默认模板（列表格式）。"""
     p = _config_path()
     if p.exists():
         return
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
+        default_doc = {
+            "channels": [
+                {"channel_id": name, "enabled": bool(cfg.get("enabled", False)), "config": cfg}
+                for name, cfg in _DEFAULT_CONFIG.items()
+            ]
+        }
         with p.open("w", encoding="utf-8") as f:
             yaml.safe_dump(
-                _DEFAULT_CONFIG,
+                default_doc,
                 f,
                 allow_unicode=True,
                 sort_keys=False,
@@ -75,20 +83,51 @@ def _ensure_default_config() -> None:
 
 
 def _load_config() -> dict[str, Any]:
-    """加载 channels.yaml，缺失字段用默认值补全。"""
+    """加载 channels.yaml。
+
+    支持两种格式：
+    1. **列表格式**（推荐，与 ``config/channels.yaml`` 一致）：
+        ``channels: [{channel_id, channel_name, enabled, config: {...}}, ...]``
+        会扁平化为 ``{channel_id: {**config, "enabled": enabled, "channel_name": ...}}``。
+    2. **扁平格式**（旧版/默认 fallback）：
+        ``{csv_log: {enabled: True, ...}, websocket: {...}}``
+    缺失的通道用 :data:`_DEFAULT_CONFIG` 补全。
+    """
     _ensure_default_config()
     p = _config_path()
-    cfg: dict[str, Any] = {}
+    raw: dict[str, Any] = {}
     try:
         with p.open("r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
+            raw = yaml.safe_load(f) or {}
     except (OSError, yaml.YAMLError) as exc:
         logger.warning("加载 channels.yaml 失败，使用默认: %s", exc)
-        cfg = {}
-    # 合并默认值
+        raw = {}
+
     merged: dict[str, Any] = {}
+    # 1) 列表格式：channels: [{channel_id, channel_name, enabled, config}, ...]
+    channels_list = raw.get("channels")
+    if isinstance(channels_list, list):
+        for item in channels_list:
+            if not isinstance(item, dict):
+                continue
+            cid = str(item.get("channel_id") or "").strip()
+            if not cid:
+                continue
+            sub_cfg = dict(item.get("config") or {})
+            sub_cfg["enabled"] = bool(item.get("enabled", False))
+            if item.get("channel_name"):
+                sub_cfg["channel_name"] = str(item.get("channel_name"))
+            merged[cid] = sub_cfg
+    elif isinstance(raw, dict):
+        # 2) 扁平格式（旧版）：{csv_log: {...}, websocket: {...}}
+        for name, default in _DEFAULT_CONFIG.items():
+            if name in raw and isinstance(raw[name], dict):
+                merged[name] = {**default, **(raw[name] or {})}
+
+    # 缺失的通道用默认值补
     for name, default in _DEFAULT_CONFIG.items():
-        merged[name] = {**default, **(cfg.get(name) or {})}
+        if name not in merged:
+            merged[name] = dict(default)
     return merged
 
 
@@ -177,7 +216,12 @@ class ChannelRegistry:
             return self._channels.get(name)
 
     def update_config(self, new_cfg: dict[str, Any]) -> list[str]:
-        """持久化新配置并热重载。返回各通道校验错误列表。"""
+        """持久化新配置并热重载。返回各通道校验错误列表。
+
+        入参 ``new_cfg`` 是扁平 dict：``{channel_id: {enabled, ...config_fields}}``。
+        写入 YAML 时转为列表格式 ``channels: [{channel_id, enabled, config: {...}}]``，
+        保留 ``channel_priority`` / ``profiles`` 等顶层字段。
+        """
         # 校验
         errors: list[str] = []
         for name, cfg in new_cfg.items():
@@ -194,13 +238,49 @@ class ChannelRegistry:
         if errors:
             return errors
 
-        # 写文件
+        # 读旧 YAML 保留 channel_priority / profiles 等顶层字段，并合并 channel_name
         p = _config_path()
+        old_doc: dict[str, Any] = {}
+        old_channels_by_id: dict[str, dict[str, Any]] = {}
+        try:
+            if p.exists():
+                with p.open("r", encoding="utf-8") as f:
+                    old_doc = yaml.safe_load(f) or {}
+                if isinstance(old_doc, dict):
+                    for item in (old_doc.get("channels") or []):
+                        if isinstance(item, dict) and item.get("channel_id"):
+                            old_channels_by_id[str(item["channel_id"])] = item
+        except (OSError, yaml.YAMLError) as exc:  # noqa: BLE001
+            logger.warning("读旧 channels.yaml 失败，将不保留 channel_name: %s", exc)
+
+        # 构造新 channels 列表
+        new_channels_list: list[dict[str, Any]] = []
+        for name, cfg in new_cfg.items():
+            cfg = dict(cfg or {})
+            enabled = bool(cfg.pop("enabled", False))
+            channel_name = ""
+            old_item = old_channels_by_id.get(name)
+            if old_item and old_item.get("channel_name"):
+                channel_name = str(old_item["channel_name"])
+            elif cfg.get("channel_name"):
+                channel_name = str(cfg.pop("channel_name", ""))
+            item: dict[str, Any] = {
+                "channel_id": name,
+                "enabled": enabled,
+                "config": cfg,
+            }
+            if channel_name:
+                item["channel_name"] = channel_name
+            new_channels_list.append(item)
+
+        new_doc = dict(old_doc) if isinstance(old_doc, dict) else {}
+        new_doc["channels"] = new_channels_list
+
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
             with p.open("w", encoding="utf-8") as f:
                 yaml.safe_dump(
-                    new_cfg,
+                    new_doc,
                     f,
                     allow_unicode=True,
                     sort_keys=False,

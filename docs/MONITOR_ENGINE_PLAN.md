@@ -710,9 +710,10 @@ tail -5 logs/signals.csv
 ### 12.3 集成验证（Step 4 后）
 
 ```bash
-# 重启 FastAPI
+# 重启 FastAPI (Linux/macOS, venv 已在 PATH)
 pkill -f "uvicorn engine.api.main"
-/home/z/.venv/bin/python -m uvicorn engine.api.main:app --host 0.0.0.0 --port 8000 --reload &
+python -m uvicorn engine.api.main:app --host 0.0.0.0 --port 8000 --reload &
+# Windows: powershell -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'uvicorn' } | Stop-Process -Force" 然后 python scripts\start_engine.py --reload
 
 # 等 30s，检查日志有 "MonitorEngine 已启动"
 tail -20 data/logs/engine.log | grep MonitorEngine

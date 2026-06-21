@@ -57,7 +57,7 @@ def main() -> None:
         from engine.utils.logger import setup_logging
     except ImportError as exc:
         print(f"[ERROR] 导入引擎模块失败: {exc}", file=sys.stderr)
-        print("请确认在项目根目录运行：cd /home/z/my-project", file=sys.stderr)
+        print("请确认在项目根目录运行：cd <项目根目录> (Linux: /home/z/my-project, Windows: D:\\tdxquant)", file=sys.stderr)
         sys.exit(1)
 
     setup_logging(level="INFO")

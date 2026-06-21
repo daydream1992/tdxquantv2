@@ -673,6 +673,7 @@ def _auto_subscribe_top_picks(state: Any, ctx: Any, top_n: int = 20) -> None:
             pass
 
     # 同步到 DuckDB monitor_subscriptions 表（持久化）
+    # 去重：表无 UNIQUE 约束，需先 SELECT COUNT 检查 active=true 是否已存在
     storage = None
     try:
         storage = get_storage()
@@ -680,17 +681,36 @@ def _auto_subscribe_top_picks(state: Any, ctx: Any, top_n: int = 20) -> None:
         return
     if storage is None or not hasattr(storage, "execute"):
         return
-    sql = (
+    if not storage.table_exists("monitor_subscriptions"):
+        return
+
+    sql_insert = (
         "INSERT INTO monitor_subscriptions "
         "(stock_code, strategy_id, subscriber, subscribed_at, active, batch_no) "
         "VALUES (?, ?, ?, ?, ?, ?)"
     )
     now = datetime.now()
-    rows = [
-        (code, ctx.strategy_id, "auto_top_pick", now, True, i // 50 + 1)
-        for i, code in enumerate(codes)
-    ]
+    rows_to_insert: list[tuple] = []
+    for i, code in enumerate(codes):
+        try:
+            df = storage.query(
+                "SELECT COUNT(*) AS cnt FROM monitor_subscriptions "
+                "WHERE stock_code = ? AND active = true",
+                [code],
+            )
+            cnt = int(df.iloc[0, 0]) if not df.empty else 0
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("查询 monitor_subscriptions 去重失败 %s: %s", code, exc)
+            cnt = 0
+        if cnt > 0:
+            # 已存在 active 订阅，跳过 INSERT（避免表无限增长，bug R9-3 #4）
+            continue
+        rows_to_insert.append(
+            (code, ctx.strategy_id, "auto_top_pick", now, True, i // 50 + 1)
+        )
+    if not rows_to_insert:
+        return
     try:
-        storage.executemany(sql, rows)
+        storage.executemany(sql_insert, rows_to_insert)
     except Exception as exc:  # noqa: BLE001
         logger.warning("写 monitor_subscriptions 失败 (非致命): %s", exc)

@@ -404,8 +404,8 @@ def _on_new_day(self):
 ### Step 2 后：规则求值单元验证
 
 ```bash
-cd /home/z/my-project
-/home/z/.venv/bin/python -c "
+cd <project-root>   # Linux: /home/z/my-project, Windows: D:\tdxquant
+python -c "
 from engine.monitor.rules import RuleSet
 hits = RuleSet.evaluate({'code':'600519.SH','pct_change':0.1,'volume_ratio':1,'main_inflow':0,'auction_pct':0})
 print('涨停命中:', [r.alert_type for r in hits])  # 应含 limit_up
@@ -417,7 +417,7 @@ print('大跌命中:', [r.alert_type for r in hits])  # 应含 drop_alert
 ### Step 3 后：引擎验证
 
 ```bash
-/home/z/.venv/bin/python -c "
+python -c "
 from engine.monitor import MonitorEngine
 import time
 mon = MonitorEngine()
@@ -426,7 +426,7 @@ time.sleep(10)  # 等 Mock push_interval 3s 推 2-3 次
 mon.stop()
 "
 # 检查 signal_events 是否有写入
-/home/z/.venv/bin/python -c "
+python -c "
 from engine.storage.duckdb_store import DuckDBStore
 s = DuckDBStore()
 print(s.query('SELECT event_id, stock_code, alert_type, triggered_at FROM signal_events ORDER BY triggered_at DESC LIMIT 5'))
@@ -497,7 +497,7 @@ Mock 模式下改系统时间到次日 00:00:01（或直接调 `mon._on_new_day(
 
 ```bash
 # Mock push_interval=3s，同股票同类型 30s 内只推一次
-/home/z/.venv/bin/python -c "
+python -c "
 from engine.storage.duckdb_store import DuckDBStore
 s = DuckDBStore()
 print(s.query('''

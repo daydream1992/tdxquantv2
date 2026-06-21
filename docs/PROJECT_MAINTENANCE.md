@@ -184,7 +184,7 @@ FastAPI :8000                                          │
 |------|------|------|
 | 网关 | Caddy 2 | `:81` 端口，`XTransformPort` 路由 |
 | 包管理（前端） | bun | `bun run dev` / `bun run lint` |
-| 包管理（后端） | pip + venv | `/home/z/.venv/bin/python3` |
+| 包管理（后端） | pip + venv | `python` (PATH 已含 venv) / `pip` |
 | 数据库迁移 | Prisma | 仅 `db/custom.db`（脚手架），业务数据用 DuckDB |
 | 进程守护 | scripts/daemon.sh | 5s 检查 + 自动重启 |
 
@@ -209,10 +209,7 @@ simpleeval>=1.0
 
 **安装**：
 ```bash
-# 沙箱环境（已预装 venv）
-/home/z/.venv/bin/pip install -r requirements.txt
-
-# 生产环境（Windows）
+# Linux/macOS (venv 已在 PATH) 或 Windows
 pip install -r requirements.txt
 # 额外安装 tqcenter（通达信终端自带，不通过 pip）
 ```
@@ -390,25 +387,26 @@ bun install   # 或 npm install / pnpm install
 **前置条件**：Python 3.13 + bun 已安装，V8 样本数据在 `docs/v8-data/`。
 
 ```bash
-# 1. 安装后端依赖
-/home/z/.venv/bin/pip install -r requirements.txt
+# 1. 安装后端依赖 (Linux/macOS/Windows 通用, venv 已在 PATH)
+pip install -r requirements.txt
 
 # 2. 安装前端依赖
 bun install
 
 # 3. 初始化 DuckDB（首次）
-/home/z/.venv/bin/python scripts/init_db.py
+python scripts/init_db.py
 
 # 4. 确认适配器模式为 mock
 # config/app.yaml → app.adapter_mode: mock
 
 # 5. 一键启动全栈
-bash scripts/start_all.sh
+bash scripts/start_all.sh          # Linux/macOS
+# 或 powershell -ExecutionPolicy Bypass -File scripts\start_all.ps1   # Windows
 #   → FastAPI :8000 (后台)
 #   → Next.js :3000 (后台, 日志 → dev.log)
 
 # 或分别启动：
-/home/z/.venv/bin/python -m uvicorn engine.api.main:app --host 0.0.0.0 --port 8000 --reload &
+python -m uvicorn engine.api.main:app --host 0.0.0.0 --port 8000 --reload &
 bun run dev &
 
 # 6. 验证
@@ -734,8 +732,9 @@ bun run lint   # ESLint 检查（前端 + Next.js API Routes）
 
 ```bash
 # === 启动 ===
-bash scripts/start_all.sh                    # 一键启动全栈
-/home/z/.venv/bin/python -m uvicorn engine.api.main:app --host 0.0.0.0 --port 8000 --reload
+bash scripts/start_all.sh                    # Linux/macOS 一键启动全栈
+# powershell -ExecutionPolicy Bypass -File scripts\start_all.ps1   # Windows
+python -m uvicorn engine.api.main:app --host 0.0.0.0 --port 8000 --reload
 bun run dev                                  # Next.js :3000
 
 # === 停止 ===

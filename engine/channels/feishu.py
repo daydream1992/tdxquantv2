@@ -122,6 +122,13 @@ class FeishuChannel(BaseChannel):
         return b64encode(hmac_code).decode("utf-8")
 
     def send(self, payload: ChannelPayload) -> ChannelResult:
+        # enabled=False 时直接早返，避免 urlopen("") 抛 URLError 刷屏
+        if not self.enabled:
+            return ChannelResult(
+                channel=self.name,
+                ok=False,
+                message="disabled, skipped",
+            )
         errors = self.validate_config()
         if errors:
             return ChannelResult(

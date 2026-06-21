@@ -1,0 +1,45 @@
+# ====================================================================
+# 路径配置表 - 各环境的实际路径
+# 用 scripts/replace-paths.sh (Linux) 或 scripts/replace-paths.ps1 (Windows)
+# 一键应用到项目文件 (scripts/ docs/ engine/ config/)
+# ====================================================================
+
+# 占位符 -> 实际路径 的映射 (支持多环境)
+placeholders:
+  # Python 解释器路径
+  #   Linux   : python (PATH 已含 venv) 或 /home/z/.venv/bin/python3
+  #   Windows : python (PATH 已含 venv) 或 .venv\Scripts\python.exe
+  "{{VENV_PYTHON}}":
+    linux: "python"
+    windows: "python"
+
+  # 项目根目录 (脚本运行时的 CWD 视角)
+  "{{PROJECT_ROOT}}":
+    linux: "."
+    windows: "."
+
+  # 日志目录
+  "{{LOG_DIR}}":
+    linux: "data/logs"
+    windows: "data\\logs"
+
+  # 临时目录 (Linux 的 /tmp 替代)
+  #   Linux   : /tmp
+  #   Windows : $env:TEMP (PowerShell 自动展开)
+  "{{TMP_DIR}}":
+    linux: "/tmp"
+    windows: "$env:TEMP"
+
+  # 空设备 (Linux 的 /dev/null 替代)
+  #   Linux   : /dev/null
+  #   Windows : NUL
+  "{{NULL_DEV}}":
+    linux: "/dev/null"
+    windows: "NUL"
+
+# --------------------------------------------------------------------
+# 当前激活环境
+#   切换时改这一行为 windows 或 linux
+#   也可用 --env 参数临时覆盖: bash scripts/replace-paths.sh --env windows
+# --------------------------------------------------------------------
+active_env: linux

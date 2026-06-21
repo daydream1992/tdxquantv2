@@ -1,1 +1,3 @@
 signal_id,time,type,strategy_id,strategy_name,stock_code,stock_name,severity,priority,title,content
+d90ff76a-f3e9-4ef5-b7c9-a810a3e719c0,2026-06-21T05:24:56,selection,rzq,弱转强,,,info,medium,策略「弱转强」选出 30 只标的,策略「弱转强」选出 30 只标的，Top3：深科技(000021.SZ)、沙河股份(000014.SZ)、深振业Ａ(000006.SZ)
+0ed8b6af-5c5b-421e-a86a-9b75a38c5deb,2026-06-21T05:24:56,selection,rzq,弱转强,,,info,medium,策略「弱转强」选出 30 只标的,策略「弱转强」选出 30 只标的，Top3：深科技(000021.SZ)、沙河股份(000014.SZ)、深振业Ａ(000006.SZ)

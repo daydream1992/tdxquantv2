@@ -1,8 +1,9 @@
 """``/api/config`` 路由 - 配置热加载与策略 YAML 在线编辑。
 
-- ``POST   /api/config/reload``           - 触发 ``ConfigLoader.reload()``
-- ``GET    /api/config/strategies``       - 列出策略 YAML 文件（含原文）
-- ``POST   /api/config/strategies``       - 创建/复制策略 YAML 文件
+- ``GET    /api/config``               - 当前配置摘要（不含敏感字段）
+- ``POST   /api/config/reload``        - 触发 ``ConfigLoader.reload()``
+- ``GET    /api/config/strategies``    - 列出策略 YAML 文件（含原文）
+- ``POST   /api/config/strategies``    - 创建/复制策略 YAML 文件
 - ``PUT    /api/config/strategies/{id}``  - 在线更新策略 YAML
 - ``DELETE /api/config/strategies/{id}``  - 删除策略 YAML 文件
 """
@@ -49,6 +50,126 @@ class StrategyCreateRequest(BaseModel):
     )
     yaml_content: str = Field(..., description="完整 YAML 内容")
     overwrite: bool = Field(False, description="是否覆盖已存在的文件")
+
+
+class ConfigSummaryResponse(BaseModel):
+    """``GET /api/config`` 配置摘要响应（不含敏感字段）。"""
+
+    app: dict[str, Any] = Field(default_factory=dict)
+    server: dict[str, Any] = Field(default_factory=dict)
+    paths: dict[str, Any] = Field(default_factory=dict)
+    strategies_count: int = 0
+    strategies_enabled_count: int = 0
+    alert_templates_count: int = 0
+    match_strategies_count: int = 0
+    channels: list[dict[str, Any]] = Field(default_factory=list)
+    config_files: list[str] = Field(default_factory=list)
+    last_reload_at: str = ""
+
+
+@router.get(
+    "",
+    response_model=ConfigSummaryResponse,
+    summary="当前配置摘要（脱敏）",
+)
+async def get_config_summary(
+    cfg: Any = Depends(get_config),
+) -> ConfigSummaryResponse:
+    """返回当前配置摘要（不返回完整 yaml，避免泄露敏感字段）。
+
+    包含：
+    - ``app``: ``app.yaml`` 的 app 段（adapter_mode / log_level 等）
+    - ``server``: server 段（host / port）
+    - ``paths``: paths 段（duckdb / csv_output 等相对路径）
+    - ``strategies_count`` / ``strategies_enabled_count``: 策略总数 / 启用数
+    - ``alert_templates_count``: ``monitor_rules.yaml`` 中 alert_templates 数量
+    - ``match_strategies_count``: ``match_strategies.yaml`` 中 match 数量
+    - ``channels``: 各通道的 name + enabled 状态（不含 webhook_url/secret 等）
+    - ``config_files``: ConfigLoader 当前加载的 yaml 文件列表
+    - ``last_reload_at``: 最近一次 reload 的时间（取最新文件 mtime）
+    """
+    # ---- app / server / paths ----
+    app_seg = {
+        "name": cfg.get("app.name", ""),
+        "version": cfg.get("app.version", ""),
+        "adapter_mode": cfg.get("app.adapter_mode", ""),
+        "log_level": cfg.get("app.log_level", ""),
+    }
+    server_seg = {
+        "host": cfg.get("server.host", ""),
+        "port": cfg.get("server.port", 0),
+    }
+    paths_raw = cfg.get("paths", {}) or {}
+    # 只保留相对路径，避免泄露绝对路径
+    paths_seg = {
+        k: v for k, v in paths_raw.items() if isinstance(v, (str, int, bool))
+    }
+
+    # ---- 策略 ----
+    strategies_map = cfg.get("strategies", {}) or {}
+    strategies_count = len(strategies_map)
+    strategies_enabled_count = sum(
+        1 for s in strategies_map.values()
+        if isinstance(s, dict) and bool(s.get("enabled", True))
+    )
+
+    # ---- alert_templates / match_strategies ----
+    # monitor_rules.yaml 顶层有 alert_templates 和 monitor 段，被 ConfigLoader 合并到 _data 顶层
+    alert_templates_count = 0
+    alert_templates = cfg.get("alert_templates") or {}
+    if isinstance(alert_templates, dict):
+        alert_templates_count = len(alert_templates)
+    elif isinstance(alert_templates, list):
+        alert_templates_count = len(alert_templates)
+
+    match_strategies_count = 0
+    try:
+        from engine.monitor.match_registry import MatchRegistry
+        match_strategies_count = len(MatchRegistry.list_all())
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("取 match_strategies 计数失败: %s", exc)
+
+    # ---- channels ----
+    channels_summary: list[dict[str, Any]] = []
+    try:
+        from engine.channels.registry import get_registry
+        for c in get_registry().list_channels():
+            channels_summary.append({
+                "name": c.get("name", ""),
+                "enabled": bool(c.get("enabled", False)),
+            })
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("取 channels 状态失败: %s", exc)
+
+    # ---- config_files + last_reload_at ----
+    config_files: list[str] = []
+    last_mtime: float = 0.0
+    try:
+        fm = getattr(cfg, "_file_mtimes", {}) or {}
+        for p, m in fm.items():
+            config_files.append(p)
+            if m and m > last_mtime:
+                last_mtime = m
+        config_files.sort()
+    except Exception:  # noqa: BLE001
+        pass
+    last_reload_at = ""
+    if last_mtime > 0:
+        from datetime import datetime
+        last_reload_at = datetime.fromtimestamp(last_mtime).astimezone().isoformat(timespec="seconds")
+
+    return ConfigSummaryResponse(
+        app=app_seg,
+        server=server_seg,
+        paths=paths_seg,
+        strategies_count=strategies_count,
+        strategies_enabled_count=strategies_enabled_count,
+        alert_templates_count=alert_templates_count,
+        match_strategies_count=match_strategies_count,
+        channels=channels_summary,
+        config_files=config_files,
+        last_reload_at=last_reload_at,
+    )
 
 
 @router.post(

@@ -1,0 +1,786 @@
+     1→"""``/api/backtest`` 路由 - 简化版回测引擎。
+     2→
+     3→端点清单
+     4→--------
+     5→- ``POST  /api/backtest/run``         - 启动一次回测
+     6→- ``GET   /api/backtest/history``     - 历史回测列表
+     7→- ``GET   /api/backtest/{run_id}``    - 单次回测详情
+     8→
+     9→简化版回测逻辑
+    10→--------------
+    11→- 用户选择策略 + 日期范围 + 初始资金 + top_n + hold_days
+    12→- 从 ``selection_results`` 表读该策略历史选股（按 run_date 升序）
+    13→  - 若无数据则 mock 20 个交易日，每日 3-5 只股票
+    14→- 每个选股日：等权买入 top_n 只股票，持有 N 天后卖出
+    15→- 用 mock 涨跌幅（基于 stock_code md5 hash 确定性生成 -3%~+5%）
+    16→  - 同一股票每次回测涨幅一致（确定性）
+    17→- 计算每日总资产 / 收益率 / 最大回撤 / 夏普 / 胜率
+    18→- 写入 DuckDB ``backtest_results`` 表（惰性创建）
+    19→"""
+    20→
+    21→from __future__ import annotations
+    22→
+    23→import hashlib
+    24→import json
+    25→import logging
+    26→import math
+    27→import uuid
+    28→from datetime import datetime, timedelta
+    29→from typing import Any
+    30→
+    31→import pandas as pd
+    32→from fastapi import APIRouter, Depends, HTTPException
+    33→from pydantic import BaseModel, Field
+    34→
+    35→from engine.api.deps import get_config, get_storage
+    36→
+    37→logger = logging.getLogger(__name__)
+    38→
+    39→router = APIRouter(tags=["backtest"])
+    40→
+    41→
+    42→# ============================================================================
+    43→# Schemas
+    44→# ============================================================================
+    45→
+    46→
+    47→class BacktestRunRequest(BaseModel):
+    48→    """``POST /api/backtest/run`` 入参。"""
+    49→
+    50→    strategy_id: str = Field(..., description="策略 ID")
+    51→    start_date: str = Field(..., description="开始日期 YYYY-MM-DD")
+    52→    end_date: str = Field(..., description="结束日期 YYYY-MM-DD")
+    53→    initial_capital: float = Field(100_000.0, ge=1_000.0, description="初始资金")
+    54→    top_n: int = Field(5, ge=1, le=30, description="每次选股持仓数")
+    55→    hold_days: int = Field(5, ge=1, le=60, description="持仓天数")
+    56→
+    57→
+    58→class BacktestDailyEquity(BaseModel):
+    59→    """回测每日权益点。"""
+    60→
+    61→    date: str
+    62→    equity: float
+    63→    return_pct: float
+    64→    drawdown: float
+    65→
+    66→
+    67→class BacktestTrade(BaseModel):
+    68→    """回测单笔交易。"""
+    69→
+    70→    stock_code: str
+    71→    stock_name: str
+    72→    entry_date: str
+    73→    exit_date: str
+    74→    entry_price: float
+    75→    exit_price: float
+    76→    pnl_pct: float
+    77→    pnl_amount: float
+    78→    hold_days: int
+    79→
+    80→
+    81→class BacktestResultResponse(BaseModel):
+    82→    """回测完整结果。"""
+    83→
+    84→    run_id: str
+    85→    strategy_id: str
+    86→    strategy_name: str
+    87→    strategy_emoji: str
+    88→    start_date: str
+    89→    end_date: str
+    90→    initial_capital: float
+    91→    final_capital: float
+    92→    total_return: float
+    93→    annual_return: float
+    94→    max_drawdown: float
+    95→    sharpe_ratio: float
+    96→    win_rate: float
+    97→    total_trades: int
+    98→    profit_trades: int
+    99→    loss_trades: int
+   100→    avg_hold_days: float
+   101→    daily_equity: list[BacktestDailyEquity] = Field(default_factory=list)
+   102→    trades: list[BacktestTrade] = Field(default_factory=list)
+   103→    benchmark_return: float
+   104→    alpha: float
+   105→    beta: float
+   106→    top_n: int = 5
+   107→    hold_days: int = 5
+   108→    created_at: str = ""
+   109→
+   110→
+   111→class BacktestHistoryItem(BaseModel):
+   112→    """历史回测列表单条。"""
+   113→
+   114→    run_id: str
+   115→    strategy_id: str
+   116→    strategy_name: str
+   117→    strategy_emoji: str
+   118→    start_date: str
+   119→    end_date: str
+   120→    total_return: float
+   121→    max_drawdown: float
+   122→    sharpe_ratio: float
+   123→    created_at: str
+   124→
+   125→
+   126→class BacktestLeaderboardItem(BaseModel):
+   127→    """策略胜率排行榜单条 (按 strategy_id 聚合, 取最新一次回测)。"""
+   128→
+   129→    strategy_id: str
+   130→    strategy_name: str
+   131→    strategy_emoji: str
+   132→    latest_run_id: str
+   133→    latest_run_at: str
+   134→    start_date: str
+   135→    end_date: str
+   136→    total_return: float
+   137→    annual_return: float
+   138→    max_drawdown: float
+   139→    sharpe_ratio: float
+   140→    win_rate: float
+   141→    total_trades: int
+   142→    run_count: int
+   143→
+   144→
+   145→class BacktestLeaderboardResponse(BaseModel):
+   146→    """策略胜率排行响应。"""
+   147→
+   148→    items: list[BacktestLeaderboardItem] = Field(default_factory=list)
+   149→    total: int = 0
+   150→
+   151→
+   152→# ============================================================================
+   153→# 路由
+   154→# ============================================================================
+   155→
+   156→
+   157→@router.post(
+   158→    "/run",
+   159→    response_model=BacktestResultResponse,
+   160→    summary="启动一次回测",
+   161→)
+   162→async def run_backtest(
+   163→    req: BacktestRunRequest,
+   164→    cfg: Any = Depends(get_config),
+   165→    storage: Any = Depends(get_storage),
+   166→) -> BacktestResultResponse:
+   167→    """基于策略历史选股模拟回测，返回收益曲线 + 交易记录 + 统计指标。"""
+   168→    # 校验策略存在
+   169→    strategy_id = req.strategy_id
+   170→    strategy_name = strategy_id
+   171→    strategy_emoji = ""
+   172→    try:
+   173→        sc = cfg.strategy(strategy_id)
+   174→        if sc is not None:
+   175→            strategy_name = getattr(sc, "strategy_name", "") or strategy_id
+   176→            strategy_emoji = getattr(sc, "strategy_emoji", "") or ""
+   177→    except Exception as exc:  # noqa: BLE001
+   178→        logger.warning("反查策略 %s 失败: %s", strategy_id, exc)
+   179→
+   180→    # 校验日期
+   181→    try:
+   182→        start_dt = datetime.strptime(req.start_date, "%Y-%m-%d").date()
+   183→        end_dt = datetime.strptime(req.end_date, "%Y-%m-%d").date()
+   184→    except ValueError as exc:
+   185→        raise HTTPException(status_code=400, detail=f"日期格式错误: {exc}") from exc
+   186→    if end_dt <= start_dt:
+   187→        raise HTTPException(status_code=400, detail="end_date 必须晚于 start_date")
+   188→
+   189→    # 加载该策略的历史选股（按 run_date 升序）
+   190→    picks = _load_strategy_picks(storage, strategy_id, req.start_date, req.end_date, req.top_n)
+   191→    if not picks:
+   192→        # 没有真实选股数据，mock 20 个交易日 × 3-5 只股票
+   193→        picks = _mock_strategy_picks(strategy_id, start_dt, end_dt, req.top_n)
+   194→
+   195→    # 执行回测
+   196→    result = _run_backtest(
+   197→        strategy_id=strategy_id,
+   198→        strategy_name=strategy_name,
+   199→        strategy_emoji=strategy_emoji,
+   200→        start_date=req.start_date,
+   201→        end_date=req.end_date,
+   202→        initial_capital=req.initial_capital,
+   203→        top_n=req.top_n,
+   204→        hold_days=req.hold_days,
+   205→        picks=picks,
+   206→    )
+   207→
+   208→    # 持久化到 DuckDB
+   209→    _persist_backtest(storage, result)
+   210→
+   211→    return result
+   212→
+   213→
+   214→@router.get(
+   215→    "/history",
+   216→    response_model=list[BacktestHistoryItem],
+   217→    summary="历史回测列表",
+   218→)
+   219→async def list_backtests(
+   220→    storage: Any = Depends(get_storage),
+   221→    limit: int = 50,
+   222→) -> list[BacktestHistoryItem]:
+   223→    """列出最近 N 条回测。"""
+   224→    if not _table_exists(storage, "backtest_results"):
+   225→        return []
+   226→    sql = (
+   227→        "SELECT run_id, strategy_id, strategy_name, strategy_emoji, "
+   228→        "       start_date, end_date, total_return, max_drawdown, sharpe_ratio, created_at "
+   229→        "FROM backtest_results ORDER BY created_at DESC LIMIT ?"
+   230→    )
+   231→    try:
+   232→        df = storage.query(sql, [int(limit)])
+   233→    except Exception as exc:  # noqa: BLE001
+   234→        logger.warning("查询 backtest_results 失败: %s", exc)
+   235→        return []
+   236→    out: list[BacktestHistoryItem] = []
+   237→    for _, row in df.iterrows():
+   238→        out.append(
+   239→            BacktestHistoryItem(
+   240→                run_id=str(row.get("run_id", "")),
+   241→                strategy_id=str(row.get("strategy_id", "")),
+   242→                strategy_name=str(row.get("strategy_name", "")),
+   243→                strategy_emoji=str(row.get("strategy_emoji", "")),
+   244→                start_date=_to_str(row.get("start_date")) or "",
+   245→                end_date=_to_str(row.get("end_date")) or "",
+   246→                total_return=float(row.get("total_return") or 0.0),
+   247→                max_drawdown=float(row.get("max_drawdown") or 0.0),
+   248→                sharpe_ratio=float(row.get("sharpe_ratio") or 0.0),
+   249→                created_at=_to_str(row.get("created_at")) or "",
+   250→            )
+   251→        )
+   252→    return out
+   253→
+   254→
+   255→@router.get(
+   256→    "/leaderboard",
+   257→    response_model=BacktestLeaderboardResponse,
+   258→    summary="策略胜率排行 (按 sharpe_ratio 降序)",
+   259→)
+   260→async def get_leaderboard(storage: Any = Depends(get_storage)) -> BacktestLeaderboardResponse:
+   261→    """聚合 backtest_results, 按 strategy_id 分组返回最新一次回测的关键指标。
+   262→
+   263→    - 每个策略取 ``created_at`` 最新的一条作为 latest
+   264→    - ``run_count`` = 该策略历史回测总数
+   265→    - 解析 ``result_json`` 提取 ``total_return`` / ``sharpe_ratio`` / ``win_rate`` 等
+   266→    - 按 ``sharpe_ratio`` 降序排序
+   267→    - 表不存在或为空时返回空列表 (不抛 500)
+   268→    """
+   269→    if not _table_exists(storage, "backtest_results"):
+   270→        return BacktestLeaderboardResponse(items=[], total=0)
+   271→    sql = (
+   272→        "SELECT run_id, strategy_id, strategy_name, strategy_emoji, "
+   273→        "       start_date, end_date, result_json, created_at "
+   274→        "FROM backtest_results ORDER BY created_at DESC"
+   275→    )
+   276→    try:
+   277→        df = storage.query(sql)
+   278→    except Exception as exc:  # noqa: BLE001
+   279→        logger.warning("查询 backtest_results 排行失败: %s", exc)
+   280→        return BacktestLeaderboardResponse(items=[], total=0)
+   281→    if df.empty:
+   282→        return BacktestLeaderboardResponse(items=[], total=0)
+   283→
+   284→    # 按 strategy_id 分组, 每组首条即为最新 (已按 created_at DESC 排序)
+   285→    grouped: dict[str, list[dict[str, Any]]] = {}
+   286→    for _, row in df.iterrows():
+   287→        sid = str(row.get("strategy_id") or "")
+   288→        if not sid:
+   289→            continue
+   290→        grouped.setdefault(sid, []).append(
+   291→            {
+   292→                "run_id": str(row.get("run_id", "")),
+   293→                "strategy_name": str(row.get("strategy_name", "") or sid),
+   294→                "strategy_emoji": str(row.get("strategy_emoji", "") or ""),
+   295→                "start_date": _to_str(row.get("start_date")) or "",
+   296→                "end_date": _to_str(row.get("end_date")) or "",
+   297→                "result_json": row.get("result_json", "{}"),
+   298→                "created_at": _to_str(row.get("created_at")) or "",
+   299→            }
+   300→        )
+   301→
+   302→    items: list[BacktestLeaderboardItem] = []
+   303→    for sid, runs in grouped.items():
+   304→        latest = runs[0]
+   305→        run_count = len(runs)
+   306→        # 解析 result_json 拿指标 (兼容老数据)
+   307→        try:
+   308→            payload = json.loads(str(latest["result_json"])) if latest["result_json"] else {}
+   309→        except (TypeError, ValueError, json.JSONDecodeError):
+   310→            payload = {}
+   311→        items.append(
+   312→            BacktestLeaderboardItem(
+   313→                strategy_id=sid,
+   314→                strategy_name=latest["strategy_name"],
+   315→                strategy_emoji=latest["strategy_emoji"],
+   316→                latest_run_id=latest["run_id"],
+   317→                latest_run_at=latest["created_at"],
+   318→                start_date=str(payload.get("start_date", "") or latest["start_date"]),
+   319→                end_date=str(payload.get("end_date", "") or latest["end_date"]),
+   320→                total_return=float(payload.get("total_return", 0.0) or 0.0),
+   321→                annual_return=float(payload.get("annual_return", 0.0) or 0.0),
+   322→                max_drawdown=float(payload.get("max_drawdown", 0.0) or 0.0),
+   323→                sharpe_ratio=float(payload.get("sharpe_ratio", 0.0) or 0.0),
+   324→                win_rate=float(payload.get("win_rate", 0.0) or 0.0),
+   325→                total_trades=int(payload.get("total_trades", 0) or 0),
+   326→                run_count=run_count,
+   327→            )
+   328→        )
+   329→
+   330→    # 按 sharpe_ratio 降序
+   331→    items.sort(key=lambda x: x.sharpe_ratio, reverse=True)
+   332→    return BacktestLeaderboardResponse(items=items, total=len(items))
+   333→
+   334→
+   335→@router.get(
+   336→    "/{run_id}",
+   337→    response_model=BacktestResultResponse,
+   338→    summary="单次回测详情",
+   339→)
+   340→async def get_backtest(
+   341→    run_id: str,
+   342→    storage: Any = Depends(get_storage),
+   343→) -> BacktestResultResponse:
+   344→    """根据 run_id 取回测完整结果。"""
+   345→    if not _table_exists(storage, "backtest_results"):
+   346→        raise HTTPException(status_code=404, detail=f"run_id={run_id} 不存在（无 backtest_results 表）")
+   347→    sql = "SELECT result_json FROM backtest_results WHERE run_id = ? LIMIT 1"
+   348→    try:
+   349→        df = storage.query(sql, [run_id])
+   350→    except Exception as exc:  # noqa: BLE001
+   351→        raise HTTPException(status_code=500, detail=f"查询失败: {exc}") from exc
+   352→    if df.empty:
+   353→        raise HTTPException(status_code=404, detail=f"run_id={run_id} 不存在")
+   354→    raw = df.iloc[0].get("result_json", "{}")
+   355→    try:
+   356→        data = json.loads(str(raw)) if raw else {}
+   357→    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+   358→        raise HTTPException(status_code=500, detail=f"结果解析失败: {exc}") from exc
+   359→    return BacktestResultResponse(**data)
+   360→
+   361→
+   362→# ============================================================================
+   363→# 内部 - 数据加载
+   364→# ============================================================================
+   365→
+   366→
+   367→def _load_strategy_picks(
+   368→    storage: Any,
+   369→    strategy_id: str,
+   370→    start_date: str,
+   371→    end_date: str,
+   372→    top_n: int,
+   373→) -> list[dict[str, Any]]:
+   374→    """从 selection_results 读该策略的选股历史。
+   375→
+   376→    返回结构：[{"run_date": "2025-01-01", "stocks": [{code, name, score, rank}, ...]}, ...]
+   377→    按 run_date 升序。
+   378→    """
+   379→    if not _table_exists(storage, "selection_results"):
+   380→        return []
+   381→    sql = (
+   382→        "SELECT run_id, run_date, stock_code, stock_name, total_score, rank "
+   383→        "FROM selection_results "
+   384→        "WHERE strategy_id = ? AND run_date >= ? AND run_date <= ? "
+   385→        "ORDER BY run_date ASC, rank ASC"
+   386→    )
+   387→    try:
+   388→        df = storage.query(sql, [strategy_id, start_date, end_date])
+   389→    except Exception as exc:  # noqa: BLE001
+   390→        logger.warning("查询 selection_results 失败: %s", exc)
+   391→        return []
+   392→    if df.empty:
+   393→        return []
+   394→
+   395→    # 按 run_date 分组（每个 run_date 取 top_n）
+   396→    grouped: dict[str, list[dict[str, Any]]] = {}
+   397→    for _, row in df.iterrows():
+   398→        rd = _to_str(row.get("run_date"))
+   399→        if not rd:
+   400→            continue
+   401→        rd = rd[:10] if len(rd) >= 10 else rd
+   402→        grouped.setdefault(rd, []).append(
+   403→            {
+   404→                "stock_code": str(row.get("stock_code", "")),
+   405→                "stock_name": str(row.get("stock_name", "") or ""),
+   406→                "score": float(row.get("total_score") or 0.0),
+   407→                "rank": int(row.get("rank") or 0),
+   408→            }
+   409→        )
+   410→    picks: list[dict[str, Any]] = []
+   411→    for rd in sorted(grouped.keys()):
+   412→        stocks = sorted(grouped[rd], key=lambda s: s["rank"] or 999)[:top_n]
+   413→        picks.append({"run_date": rd, "stocks": stocks})
+   414→    return picks
+   415→
+   416→
+   417→def _mock_strategy_picks(
+   418→    strategy_id: str,
+   419→    start_dt: Any,
+   420→    end_dt: Any,
+   421→    top_n: int,
+   422→) -> list[dict[str, Any]]:
+   423→    """无 selection_results 时，mock 20 个交易日 × 3-5 只股票。"""
+   424→    # 用策略 ID 做种子，保证同一策略每次回测 mock 出的股票池一致
+   425→    seed_base = int(hashlib.md5(strategy_id.encode()).hexdigest()[:8], 16)
+   426→    # mock 股票池
+   427→    mock_codes = [
+   428→        ("600519.SH", "贵州茅台"), ("000858.SZ", "五粮液"), ("002594.SZ", "比亚迪"),
+   429→        ("300750.SZ", "宁德时代"), ("600036.SH", "招商银行"), ("601318.SH", "中国平安"),
+   430→        ("000333.SZ", "美的集团"), ("002415.SZ", "海康威视"), ("600276.SH", "恒瑞医药"),
+   431→        ("000001.SZ", "平安银行"), ("601166.SH", "兴业银行"), ("002910.SZ", "庄园牧场"),
+   432→        ("300059.SZ", "东方财富"), ("600900.SH", "长江电力"), ("601888.SH", "中国中免"),
+   433→        ("600030.SH", "中信证券"), ("000725.SZ", "京东方A"), ("601012.SH", "隆基绿能"),
+   434→        ("300760.SZ", "迈瑞医疗"), ("002475.SZ", "立讯精密"),
+   435→    ]
+   436→    picks: list[dict[str, Any]] = []
+   437→    # 每 5 个交易日一个选股日
+   438→    cur = start_dt
+   439→    idx = 0
+   440→    while cur <= end_dt and len(picks) < 20:
+   441→        # 跳过周末
+   442→        if cur.weekday() < 5:
+   443→            n = 3 + (seed_base + idx) % 3  # 3-5 只
+   444→            chosen = []
+   445→            for i in range(n):
+   446→                k = (seed_base + idx * 7 + i * 3) % len(mock_codes)
+   447→                code, name = mock_codes[k]
+   448→                chosen.append({
+   449→                    "stock_code": code,
+   450→                    "stock_name": name,
+   451→                    "score": 80.0 - i * 5,
+   452→                    "rank": i + 1,
+   453→                })
+   454→            picks.append({"run_date": cur.strftime("%Y-%m-%d"), "stocks": chosen[:top_n]})
+   455→            idx += 1
+   456→        cur += timedelta(days=5)
+   457→    return picks
+   458→
+   459→
+   460→# ============================================================================
+   461→# 内部 - 回测引擎
+   462→# ============================================================================
+   463→
+   464→
+   465→def _run_backtest(
+   466→    strategy_id: str,
+   467→    strategy_name: str,
+   468→    strategy_emoji: str,
+   469→    start_date: str,
+   470→    end_date: str,
+   471→    initial_capital: float,
+   472→    top_n: int,
+   473→    hold_days: int,
+   474→    picks: list[dict[str, Any]],
+   475→) -> BacktestResultResponse:
+   476→    """执行回测主循环。"""
+   477→    run_id = uuid.uuid4().hex[:12]
+   478→    created_at = datetime.now().isoformat(timespec="seconds")
+   479→
+   480→    # 每只股票 entry_day → 确定性价格
+   481→    # entry_price 用 10~100 之间基于 code hash 的确定性值
+   482→    def _entry_price(code: str) -> float:
+   483→        h = hashlib.md5(code.encode()).hexdigest()
+   484→        v = int(h[:6], 16) / 0xFFFFFF  # 0~1
+   485→        return round(10.0 + v * 90.0, 2)
+   486→
+   487→    # 确定性日涨幅 -3%~+5% (基于 code + day_index)
+   488→    def _daily_pct(code: str, day_index: int) -> float:
+   489→        h = hashlib.md5(f"{code}|{day_index}".encode()).hexdigest()
+   490→        v = int(h[:6], 16) / 0xFFFFFF  # 0~1
+   491→        return -0.03 + v * 0.08  # -3% ~ +5%
+   492→
+   493→    # 解析所有日期
+   494→    start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+   495→    end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+   496→    trading_days = _trading_days(start_dt, end_dt)
+   497→    if not trading_days:
+   498→        trading_days = [start_dt]
+   499→
+   500→    # 把 picks 按 run_date 映射到 trading_day 索引
+   501→    pick_by_date: dict[str, list[dict[str, Any]]] = {p["run_date"]: p["stocks"] for p in picks}
+   502→    # 持仓: list of {code, name, entry_date_idx, entry_price, shares, cost}
+   503→    holdings: list[dict[str, Any]] = []
+   504→    trades: list[BacktestTrade] = []
+   505→    cash = float(initial_capital)
+   506→    # 每日权益
+   507→    daily_equity: list[BacktestDailyEquity] = []
+   508→    peak_equity = float(initial_capital)
+   509→    max_dd = 0.0
+   510→    daily_returns: list[float] = []
+   511→    prev_equity = float(initial_capital)
+   512→
+   513→    for di, day in enumerate(trading_days):
+   514→        # 1. 卖出：持有到期的仓位
+   515→        to_sell: list[int] = []
+   516→        for hi, h in enumerate(holdings):
+   517→            if di - h["entry_date_idx"] >= hold_days:
+   518→                to_sell.append(hi)
+   519→        # 倒序卖出避免索引错位
+   520→        for hi in sorted(to_sell, reverse=True):
+   521→            h = holdings[hi]
+   522→            # 累计涨幅 = ∏(1 + r_t) - 1
+   523→            cum = 1.0
+   524→            for t in range(h["entry_date_idx"], di):
+   525→                cum *= (1.0 + _daily_pct(h["stock_code"], t))
+   526→            exit_price = round(h["entry_price"] * cum, 4)
+   527→            proceeds = exit_price * h["shares"]
+   528→            cash += proceeds
+   529→            pnl_amount = proceeds - h["cost"]
+   530→            pnl_pct = (pnl_amount / h["cost"]) * 100.0 if h["cost"] > 0 else 0.0
+   531→            trades.append(BacktestTrade(
+   532→                stock_code=h["stock_code"],
+   533→                stock_name=h["stock_name"],
+   534→                entry_date=trading_days[h["entry_date_idx"]].strftime("%Y-%m-%d"),
+   535→                exit_date=day.strftime("%Y-%m-%d"),
+   536→                entry_price=h["entry_price"],
+   537→                exit_price=exit_price,
+   538→                pnl_pct=round(pnl_pct, 2),
+   539→                pnl_amount=round(pnl_amount, 2),
+   540→                hold_days=di - h["entry_date_idx"],
+   541→            ))
+   542→            holdings.pop(hi)
+   543→
+   544→        # 2. 买入：当日有选股信号
+   545→        day_str = day.strftime("%Y-%m-%d")
+   546→        stocks = pick_by_date.get(day_str)
+   547→        if stocks and holdings == []:
+   548→            # 等权买入（用当前 cash 平分 top_n）
+   549→            n = min(len(stocks), top_n)
+   550→            if n > 0 and cash > 0:
+   551→                budget_per = cash / n
+   552→                for s in stocks[:n]:
+   553→                    ep = _entry_price(s["stock_code"])
+   554→                    if ep <= 0:
+   555→                        continue
+   556→                    shares = math.floor(budget_per / ep)
+   557→                    if shares <= 0:
+   558→                        continue
+   559→                    cost = ep * shares
+   560→                    cash -= cost
+   561→                    holdings.append({
+   562→                        "stock_code": s["stock_code"],
+   563→                        "stock_name": s["stock_name"],
+   564→                        "entry_date_idx": di,
+   565→                        "entry_price": ep,
+   566→                        "shares": shares,
+   567→                        "cost": cost,
+   568→                    })
+   569→
+   570→        # 3. 计算当日总资产 = cash + ∑(current_price * shares)
+   571→        position_value = 0.0
+   572→        for h in holdings:
+   573→            cum = 1.0
+   574→            for t in range(h["entry_date_idx"], di + 1):
+   575→                cum *= (1.0 + _daily_pct(h["stock_code"], t))
+   576→            cur_price = h["entry_price"] * cum
+   577→            position_value += cur_price * h["shares"]
+   578→        equity = cash + position_value
+   579→        return_pct = (equity / prev_equity - 1.0) * 100.0 if prev_equity > 0 else 0.0
+   580→        if equity > peak_equity:
+   581→            peak_equity = equity
+   582→        drawdown = (equity / peak_equity - 1.0) * 100.0 if peak_equity > 0 else 0.0
+   583→        if drawdown < max_dd:
+   584→            max_dd = drawdown
+   585→        daily_equity.append(BacktestDailyEquity(
+   586→            date=day_str,
+   587→            equity=round(equity, 2),
+   588→            return_pct=round(return_pct, 2),
+   589→            drawdown=round(drawdown, 2),
+   590→        ))
+   591→        daily_returns.append(return_pct / 100.0)
+   592→        prev_equity = equity
+   593→
+   594→    # 清仓最后未平仓位
+   595→    for h in holdings:
+   596→        di = len(trading_days) - 1
+   597→        cum = 1.0
+   598→        for t in range(h["entry_date_idx"], di + 1):
+   599→            cum *= (1.0 + _daily_pct(h["stock_code"], t))
+   600→        exit_price = round(h["entry_price"] * cum, 4)
+   601→        proceeds = exit_price * h["shares"]
+   602→        cash += proceeds
+   603→        pnl_amount = proceeds - h["cost"]
+   604→        pnl_pct = (pnl_amount / h["cost"]) * 100.0 if h["cost"] > 0 else 0.0
+   605→        trades.append(BacktestTrade(
+   606→            stock_code=h["stock_code"],
+   607→            stock_name=h["stock_name"],
+   608→            entry_date=trading_days[h["entry_date_idx"]].strftime("%Y-%m-%d"),
+   609→            exit_date=trading_days[-1].strftime("%Y-%m-%d"),
+   610→            entry_price=h["entry_price"],
+   611→            exit_price=exit_price,
+   612→            pnl_pct=round(pnl_pct, 2),
+   613→            pnl_amount=round(pnl_amount, 2),
+   614→            hold_days=di - h["entry_date_idx"] + 1,
+   615→        ))
+   616→
+   617→    final_capital = cash
+   618→    total_return = (final_capital / initial_capital - 1.0) * 100.0 if initial_capital > 0 else 0.0
+   619→
+   620→    # 年化收益率
+   621→    n_days = (end_dt - start_dt).days or 1
+   622→    years = max(n_days / 365.0, 1.0 / 365.0)
+   623→    annual_return = ((final_capital / initial_capital) ** (1.0 / years) - 1.0) * 100.0 if initial_capital > 0 and final_capital > 0 else 0.0
+   624→
+   625→    # 夏普比率（无风险利率假设 0，按日收益标准差）
+   626→    if len(daily_returns) > 1:
+   627→        mean_r = sum(daily_returns) / len(daily_returns)
+   628→        var_r = sum((r - mean_r) ** 2 for r in daily_returns) / (len(daily_returns) - 1)
+   629→        std_r = math.sqrt(var_r) if var_r > 0 else 0.0
+   630→        sharpe = (mean_r / std_r) * math.sqrt(252) if std_r > 0 else 0.0
+   631→    else:
+   632→        sharpe = 0.0
+   633→
+   634→    # 胜率
+   635→    profit_trades = sum(1 for t in trades if t.pnl_amount > 0)
+   636→    loss_trades = sum(1 for t in trades if t.pnl_amount < 0)
+   637→    total_trades = len(trades)
+   638→    win_rate = (profit_trades / total_trades * 100.0) if total_trades > 0 else 0.0
+   639→    avg_hold = (sum(t.hold_days for t in trades) / total_trades) if total_trades > 0 else 0.0
+   640→
+   641→    # 基准（mock -2%~+8）
+   642→    bench_seed = int(hashlib.md5(f"{strategy_id}|{start_date}|{end_date}".encode()).hexdigest()[:8], 16)
+   643→    benchmark_return = round(-2.0 + (bench_seed / 0xFFFFFFFF) * 10.0, 2)
+   644→    alpha = round(total_return - benchmark_return, 2)
+   645→    # beta mock 0.8~1.2
+   646→    beta = round(0.8 + (bench_seed % 41) / 100.0, 2)
+   647→
+   648→    return BacktestResultResponse(
+   649→        run_id=run_id,
+   650→        strategy_id=strategy_id,
+   651→        strategy_name=strategy_name,
+   652→        strategy_emoji=strategy_emoji,
+   653→        start_date=start_date,
+   654→        end_date=end_date,
+   655→        initial_capital=round(initial_capital, 2),
+   656→        final_capital=round(final_capital, 2),
+   657→        total_return=round(total_return, 2),
+   658→        annual_return=round(annual_return, 2),
+   659→        max_drawdown=round(max_dd, 2),
+   660→        sharpe_ratio=round(sharpe, 2),
+   661→        win_rate=round(win_rate, 2),
+   662→        total_trades=total_trades,
+   663→        profit_trades=profit_trades,
+   664→        loss_trades=loss_trades,
+   665→        avg_hold_days=round(avg_hold, 1),
+   666→        daily_equity=daily_equity,
+   667→        trades=trades,
+   668→        benchmark_return=benchmark_return,
+   669→        alpha=alpha,
+   670→        beta=beta,
+   671→        top_n=top_n,
+   672→        hold_days=hold_days,
+   673→        created_at=created_at,
+   674→    )
+   675→
+   676→
+   677→def _trading_days(start_dt: Any, end_dt: Any) -> list[Any]:
+   678→    """生成 start~end 之间的交易日（跳过周末）。"""
+   679→    days: list[Any] = []
+   680→    cur = start_dt
+   681→    while cur <= end_dt:
+   682→        if cur.weekday() < 5:  # Mon-Fri
+   683→            days.append(cur)
+   684→        cur += timedelta(days=1)
+   685→    return days
+   686→
+   687→
+   688→# ============================================================================
+   689→# 内部 - 持久化
+   690→# ============================================================================
+   691→
+   692→
+   693→def _persist_backtest(storage: Any, result: BacktestResultResponse) -> None:
+   694→    """把回测结果写入 DuckDB ``backtest_results`` 表（惰性创建）。"""
+   695→    if storage is None or not hasattr(storage, "execute"):
+   696→        return
+   697→    try:
+   698→        storage.execute(
+   699→            """
+   700→            CREATE TABLE IF NOT EXISTS backtest_results (
+   701→                run_id           VARCHAR PRIMARY KEY,
+   702→                strategy_id      VARCHAR NOT NULL,
+   703→                strategy_name    VARCHAR DEFAULT '',
+   704→                strategy_emoji   VARCHAR DEFAULT '',
+   705→                start_date       VARCHAR,
+   706→                end_date         VARCHAR,
+   707→                initial_capital  DOUBLE,
+   708→                final_capital    DOUBLE,
+   709→                total_return     DOUBLE,
+   710→                max_drawdown     DOUBLE,
+   711→                sharpe_ratio     DOUBLE,
+   712→                win_rate         DOUBLE,
+   713→                total_trades     INTEGER,
+   714→                top_n            INTEGER DEFAULT 5,
+   715→                hold_days        INTEGER DEFAULT 5,
+   716→                result_json      VARCHAR,
+   717→                created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+   718→            )
+   719→            """,
+   720→        )
+   721→    except Exception as exc:  # noqa: BLE001
+   722→        logger.warning("创建 backtest_results 表失败: %s", exc)
+   723→        return
+   724→
+   725→    payload = json.dumps(result.model_dump(), ensure_ascii=False, default=str)
+   726→    sql = (
+   727→        "INSERT INTO backtest_results "
+   728→        "(run_id, strategy_id, strategy_name, strategy_emoji, "
+   729→        " start_date, end_date, initial_capital, final_capital, "
+   730→        " total_return, max_drawdown, sharpe_ratio, win_rate, total_trades, "
+   731→        " top_n, hold_days, result_json, created_at) "
+   732→        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+   733→    )
+   734→    params = [
+   735→        result.run_id,
+   736→        result.strategy_id,
+   737→        result.strategy_name,
+   738→        result.strategy_emoji,
+   739→        result.start_date,
+   740→        result.end_date,
+   741→        result.initial_capital,
+   742→        result.final_capital,
+   743→        result.total_return,
+   744→        result.max_drawdown,
+   745→        result.sharpe_ratio,
+   746→        result.win_rate,
+   747→        result.total_trades,
+   748→        result.top_n,
+   749→        result.hold_days,
+   750→        payload,
+   751→        result.created_at,
+   752→    ]
+   753→    try:
+   754→        storage.execute(sql, params)
+   755→    except Exception as exc:  # noqa: BLE001
+   756→        logger.warning("写 backtest_results 失败 (非致命): %s", exc)
+   757→
+   758→
+   759→# ============================================================================
+   760→# 内部 - 工具
+   761→# ============================================================================
+   762→
+   763→
+   764→def _table_exists(storage: Any, name: str) -> bool:
+   765→    if storage is None:
+   766→        return False
+   767→    try:
+   768→        return storage.table_exists(name)
+   769→    except Exception:  # noqa: BLE001
+   770→        return False
+   771→
+   772→
+   773→def _to_str(v: Any) -> str | None:
+   774→    if v is None:
+   775→        return None
+   776→    try:
+   777→        if hasattr(v, "isoformat"):
+   778→            return v.isoformat()
+   779→        return str(v)
+   780→    except Exception:  # noqa: BLE001
+   781→        return None
+   782→
+   783→
+   784→# 避免 pandas 仅用于类型导入但未使用的告警（这里实际用到 df.iterrows）
+   785→_ = pd
+   786→

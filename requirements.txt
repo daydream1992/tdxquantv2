@@ -1,10 +1,14 @@
 # TdxQuant Engine - Python 依赖
 # 安装: pip install -r requirements.txt
-# 或在沙箱环境: /home/z/.venv/bin/python3 -m pip install -r requirements.txt
+# (Linux/macOS: venv 已在 PATH; Windows: 推荐用 .venv\Scripts\python -m pip install -r requirements.txt)
 
 # Web 服务
 fastapi>=0.115.0
-uvicorn[standard]>=0.30.0
+uvicorn>=0.30.0
+# uvicorn 高性能扩展 (拆分以兼容 Windows: uvloop 仅 Linux/macOS)
+uvloop>=0.19; sys_platform == "linux"
+httptools>=0.6; sys_platform == "linux"
+watchfiles>=0.3
 python-multipart>=0.0.9
 
 # 存储 / 数据处理
