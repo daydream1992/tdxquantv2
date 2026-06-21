@@ -11459,3 +11459,221 @@ Stage Summary:
   3. 聚合推送效果统计面板(今日聚合次数/节省推送数)
   4. 真实 Windows 环境验证 ps1 脚本(沙箱是 Linux)
   5. P3: 信号中心加"按策略/按通道"筛选 + 信号导出 CSV
+
+---
+Task ID: R12-2
+Agent: general-purpose
+Task: 更新 QUICKSTART_10MIN.md (R9→R11)
+
+Work Log:
+- 读 worklog.md 末 350 行 (offset 11111-11460) 梳理 R9/R10/R11 三轮进展:
+  * R9: 监控引擎实施 + 匹配策略层 + 9 bug 修复 + Windows 适配 88% (R9-3/R9-4)
+  * R10: 前端 7 tab (匹配策略+自选股) + 8 低 bug + ConfigLoader→ChannelRegistry + smoke_test/stop 脚本 + P1 (聚合推送/分级值班/health 端点) (R10-1~5)
+  * R11: Dashboard 健康度卡片 (EngineHealthCard.tsx) + 匹配策略复制 + 自选股批量导入 + P2 (聚合独立线程 + health 阈值可配 + thresholds 透出) (R11-1~4)
+- 读 docs/QUICKSTART_10MIN.md 全文 (294 行) 确认 R9 状态基线
+- 校验 scripts/ 目录确认 stop.sh/stop.ps1/smoke_test.sh/smoke_test.ps1 均存在
+- 校验 config/monitor_rules.yaml 确认 monitor.health 段 + alert_aggregate_* 字段已落地 (line 18-36)
+- 校验 docs/maintenance/{ARCHITECTURE,STRATEGY_LOGIC}.md 存在,可作配套文档引用
+- 按 9 章逐项更新:
+  1. 文档头: 日期 2026-06-17 → 2026-06-21 (R11 末), 配套文档补 2 个 maintenance 文档
+  2. 一章: L4 补"匹配策略装配+聚合推送+分级值班", 监控链补分级值班+聚合线程+signal_events 表落库
+  3. 二章: Linux 启动补 smoke_test 自动跑说明 + stop.sh + smoke_test.sh; Windows 补 stop.ps1 + smoke_test.ps1; 验证启动补 /api/monitor/health + thresholds 字段
+  4. 三章: 速查表 monitor_rules 行补"聚合窗口+健康度阈值", match_strategies 行补"装配 strategy_id+scope+alerts+params", channels 行补 R10-3 自动重载; 场景从 3 个扩到 5 个 (新增 health 阈值 / 聚合窗口, 原预警阈值补 match_strategies alerts.params 优先级说明)
+  5. 四章: 加新预警规则补 match 装配流程; 新增"加新匹配策略"(前端可视化 CRUD+复制+测试 / YAML); 新增"批量加自选股"(粘贴 CSV+预览+分组提交)
+  6. 五章: 常见报错表补 2 行 (聚合推送不 flush / channels.yaml 不生效); 健康检查命令补 /api/monitor/health 块 (status/thresholds/eval_count/lag/queue/error)
+  7. 六章: 补 R9-4 起提供 replace-paths.sh/ps1 一键替换脚本说明
+  8. 八章: 第 10 条 _default 保护从"未实施"改为"R9-3 三重保护 (前端 disabled + 后端 403 + toast)"; 新增第 11 条聚合窗口 alert_aggregate_window_seconds 最小 5s (engine.py max(5,...) 下限保护)
+  9. 九章: 标题日期改 R11 末, 状态表重写 (监控引擎/匹配策略层/自选股/健康度/Windows/Bug 扫描 6 行带 R 轮次标注), 末尾建议从"末 3 段"改"末 5 段 (R9-R11)"
+- 验证: wc -l = 387 行 (294→387, +93 行, 符合预计 ~380); grep -c "R11\|R10" = 22 处; 日期已改 2026-06-21
+
+Stage Summary:
+- 文件: docs/QUICKSTART_10MIN.md
+- 行数变化: 294 → 387 (+93)
+- 更新章节: 文档头 / 一章系统全貌 / 二章启动停止 / 三章改配置 / 四章加新功能 / 五章排查问题 / 六章路径替换 / 八章关键约束 / 九章项目现状 (共 9 章, 七章文档导航无需改)
+- 关键更新:
+  1. 文档头日期 2026-06-17 → 2026-06-21 (R11 末), 配套文档补 ARCHITECTURE.md + STRATEGY_LOGIC.md
+  2. 监控链数据流补全: 行情 push → _tick → evaluator → signal_events 表 → ChannelRegistry.dispatch 分级值班 (high 立即全通道 / medium+low 走聚合) → _aggregator_loop 独立线程 flush
+  3. 配置场景从 3 个扩到 5 个: 新增"改健康度判定阈值"(monitor.health 段) + "改聚合推送窗口"(alert_aggregate_window_seconds/max_size), 预警阈值补 match_strategies alerts.params 优先级 > monitor_rules default_params
+  4. 加新功能补 3 项: 加新匹配策略 (前端复制功能 R11-2) / 批量加自选股 (CSV 粘贴 R11-3) / 加新预警规则补 match 装配流程
+  5. 关键约束: _default 保护更新为"R9-3 三重保护 (前端 disabled + 后端 403 + toast)"; 新增第 11 条聚合窗口最小 5s 下限保护 (R11-4)
+  6. 项目现状表重写 6 行带 R 轮次标注 (R9-1/R10-1/R10-5/R11-1~4), 末尾建议读 worklog 末 5 段
+- 风格: 保持原文简洁 (10 分钟读完), 代码块标注语言 (bash/yaml/powershell/text), 表格 Markdown, 不编造功能 (全部以 worklog R9-R11 记录为准)
+
+---
+Task ID: R12-3
+Agent: general-purpose
+Task: 更新 PROJECT_HANDOVER.md (R8→R11)
+
+Work Log:
+- 读 worklog.md 最后 350 行（覆盖 R9 全部子任务 R9-1 ~ R9-6 + R10-1 ~ R10-5 + R11-1 ~ R11-4 + R11 总结），
+  提取三轮关键交付：R9 监控引擎主体 + 9 bug 修复 + Windows 适配 88% / R10 前端 7 tab + 8 低 bug + P1 优化
+  (聚合推送+分级值班+健康度) / R11 健康度卡片 + 匹配策略复制 + 自选股批量导入 + P2 优化(daemon 线程+阈值可配)
+- 读 docs/PROJECT_HANDOVER.md 全文（838 行），按 10 个关键更新点清单逐节修改
+- 文档头（第 6 行）：`最后更新：R8 轮次` → `R11 轮次（健康度卡片 + 匹配策略复制 + 自选股批量导入 + P2 后端优化）`
+- 第 13 行配套文档行：`最后 2 轮必读` → `最后 3 轮 R9/R10/R11 必读`
+- 1.3 节：标题 `R7 末` → `R11 末`；表格补 smoke_test 18/18 PASS、7 Tab、监控引擎行、Windows 88%；
+  新增子节「R9-R11 三轮关键交付」表格，列出每轮主题 + 关键交付
+- 2.1 准则 1：`最后 2 个轮次章节` → `最后 5 段（覆盖 R9/R10/R11 三轮，不是 2 段）`
+- 2.1 新增准则 8：监控引擎的聚合推送独立 daemon（_aggregator_loop），不要在 tick 里手动 flush
+- 2.2 标准动作流程第 1 步：`读 worklog.md 最后 400 行` → `最后 5 段（覆盖 R9/R10/R11 三轮，不是 2 段）`
+- 2.3 禁止行为清单：新增「删 `_default` 匹配策略」行，说明三重保护
+- 3.4 Windows 启动脚本：整节重写，从「待补，建议接手 AI 创建」改为「R9-4/R10-4 已补全」，
+  列出 7 个 ps1 脚本（start_all/stop/daemon/smoke_test/replace-paths/setup-env）+ 一键启动示例
+- 3.5 Windows 常见问题速查：新增 3 行（channels.yaml 热加载 / 健康度阈值 / _default 保护）
+- 4.1 配置文件地图：补 `config/match_strategies.yaml` ★★★ 匹配策略套餐；
+  monitor_rules.yaml 从 ★★ 提到 ★★★ 并补说明（alert_templates + monitor.health + 聚合推送）
+- 4.2 核心配置字段速查：新增两个子节
+  * `config/monitor_rules.yaml`：alert_aggregate_window_seconds / alert_aggregate_max_size /
+    monitor.health(lag_healthy/lag_degraded/error_healthy) / alert_templates 的 emoji/label/default_params
+  * `config/match_strategies.yaml`：match_id / name / strategy_id / enabled / scope / alerts / debounce_override
+- 4.4 代码入口位置：表格从 11 行扩到 18 行，补
+  * engine/monitor/engine.py（MonitorEngine + _aggregator_loop daemon）
+  * engine/monitor/match_registry.py（MatchRegistry）
+  * engine/monitor/rules.py（RuleSet）
+  * engine/api/routes/match_strategy.py（6 端点 CRUD+reload+test）
+  * engine/api/routes/watchlist.py（4 端点 list/add/remove/by-sector）
+  * engine/api/routes/monitor.py 的 get_health（健康度透出 thresholds）
+  * src/components/quant/EngineHealthCard.tsx（R11-1 健康度卡片）
+  * src/components/quant/MatchStrategyManager.tsx（R10-1+R11-2 含复制）
+  * src/components/quant/WatchlistManager.tsx（R10-1+R11-3 含批量导入）
+  前端入口改 5 Tab → 7 Tab；前端代理补 forwardFastAPI 说明
+- 5.2 新增 API 端点完整流程：Step 6 后新增「R9-R11 新增端点参考案例」表格，
+  列出 4 个端点（GET /api/monitor/health / match-strategies 6 端点 / watchlist 4 端点 / GET /api/config）
+- 7.2 worklog 写作规范：Task ID 格式补 R9-1/R9-5a/R10-1/R11-1/R11-2/R11-3/R11-4 示例
+  + 注释 R11 轮 4 个并行子任务（R11-1 ~ R11-4）可同一轮次并发
+- 8.1 每轮必须通过：新增 2 行
+  * 健康度端点：curl /api/monitor/health 返回 status=healthy + thresholds
+  * smoke_test：bash scripts/smoke_test.sh 18/18 PASS（R10-4 起 start_all.sh 自动跑）
+- 8.2 agent-browser 必验交互：5 Tab → 7 Tab（含匹配策略/自选股）+ Dashboard 健康度卡片可见
+- 8.3 回归测试：补 4 行 curl（health/match-strategies/watchlist/DELETE _default 应返 403）
+- 9.2 高风险操作：新增 2 行
+  * 改 monitor.health 阈值后未 reload：必须 /api/config/reload 才生效
+  * 聚合推送 daemon 线程异常：logger.warning catch 不挂主进程，但长期不 flush 丢信号——监控 error_count 和 queue_size
+- 9.3 已知限制：删「Windows 启动脚本缺失」行，新增 3 行
+  * Windows ps1 未真实验证（沙箱是 Linux）
+  * 健康度趋势图仅内存（规划 DuckDB 持久化）
+  * 聚合推送 daemon 线程 logger 不可见
+  * 前端无健康度阈值编辑 UI
+- 10 接手 Checklist：从 10 项扩到 15 项，补
+  * curl /api/monitor/health 返回 healthy + thresholds
+  * curl /api/monitor/match-strategies 返回 3 套餐
+  * curl /api/monitor/watchlist 返回自选股带 strategy_id
+  * bash scripts/smoke_test.sh 18/18 PASS
+  * 点击 7 个 Tab（不只是 5 个）
+  * Dashboard 健康度卡片可见
+- 附录文档索引：补 API_CAPABILITY_MAP.md / QUICKSTART_10MIN.md / PATH_REPLACEMENT_GUIDE.md 3 条；
+  worklog 行从「最后 2 轮」改为「最后 3 轮（R9/R10/R11）」
+- 验证三件套：
+  * wc -l: 838 → 952 (+114 行)
+  * grep -c "R9\|R10\|R11": 54 处提及
+  * 文档头第 6 行: "最后更新：R11 轮次" ✓
+  * 1.3 标题: "当前项目状态（R11 末）" ✓
+
+Stage Summary:
+- 文件: docs/PROJECT_HANDOVER.md
+- 行数变化: 838 → 952 (+114 行)
+- 更新章节: 文档头 / 1.3 / 2.1 / 2.2 / 2.3 / 3.4 / 3.5 / 4.1 / 4.2 / 4.4 / 5.2 / 7.2 / 8.1 / 8.2 / 8.3 / 9.2 / 9.3 / 10 / 附录
+- 关键更新:
+  1. 文档头从 R8 → R11，配套文档行同步更新到「最后 3 轮 R9/R10/R11 必读」
+  2. 1.3 节标题改为 R11 末，表格补 smoke_test 18/18 PASS + 7 Tab + 监控引擎 + Windows 88%，
+     新增 R9-R11 三轮关键交付表（接手 AI 一眼看全）
+  3. 第二章补「准则 8 监控引擎聚合推送独立 daemon」，禁止行为加「删 _default 三重保护」
+  4. 第三章 3.4 整节重写为「R9-4/R10-4 已补全」，列出 7 个 ps1 脚本矩阵 + 一键启动示例
+  5. 第四章 4.1/4.2/4.4 全面扩展：新增 match_strategies.yaml 配置地图，
+     新增 monitor_rules.yaml 与 match_strategies.yaml 字段速查两个子节，
+     代码入口表从 11 行扩到 18 行覆盖监控引擎全部入口
+  6. 第八章 8.1 加 smoke_test 18/18 PASS + 健康度端点门禁；8.2 加 7 Tab + Dashboard 健康度卡片必验
+  7. 第九章 9.2 加聚合推送 daemon 异常 + 健康度阈值未 reload 两条高风险；9.3 删「Windows 脚本缺失」加 4 条新限制
+  8. 第十章 Checklist 从 10 项扩到 15 项，覆盖 7 Tab + 健康度 + smoke_test + match-strategies + watchlist
+
+---
+Task ID: R12-1
+Agent: general-purpose
+Task: 更新 PROJECT_MAINTENANCE.md (R7→R11)
+
+Work Log:
+- 读 worklog.md 行 9951-11462 共 ~1500 行,完整提取 R8-R11 四轮进展:
+  * R8: 交接文档强化 + Windows 运行匹配 + 策略因子扩展 + 监控引擎方案设计(不写代码)
+  * R9: 监控引擎实施(MonitorEngine + MatchRegistry + P0 优化 ~900 行) + 9 bug 修复 + Windows 适配 88% + 接口能力地图 + 10 分钟上手
+  * R10: 前端 7 tab + 8 低 bug + ConfigLoader 通知 ChannelRegistry + Windows 脚本增强(smoke_test/stop) + P1(聚合推送/分级值班/健康度)
+  * R11: EngineHealthCard.tsx + 匹配策略复制(enableCopy bug 修) + 自选股批量导入 + P2(独立 _aggregator_loop daemon 线程 + monitor.health 阈值段 + thresholds 透出)
+- 读 PROJECT_MAINTENANCE.md 全文 766 行,理解 12 章 + 附录结构
+- 用 LS 验证 5 个关键目录下文件实际存在(engine/monitor/ 4 文件 / engine/api/routes/ 12 文件 / src/components/quant/ 27 文件 / scripts/ 18 文件 / config/ 9 文件)
+- 读 config/monitor_rules.yaml 头 75 行 + config/match_strategies.yaml 头 40 行,确认 monitor.health/alert_aggregate_*/alert_templates.emoji.label.default_params 等字段命名准确
+- 用 MultiEdit 分批修改 docs/PROJECT_MAINTENANCE.md 共 7 个章节:
+  1. 文档头: R7→R11, v0.1.0/v0.4.0/v1.0 → v0.3.0/v0.6.0/v1.2
+  2. 第二章架构: L4 补"匹配策略装配/聚合推送/分级值班"; L5 补 match_strategies.yaml; 新增 §2.2.1 监控引擎信号链路图; §2.3 补聚合推送定时器线程说明
+  3. 第三章技术栈: §3.1 加 5 行后端组件(MonitorEngine/MatchRegistry/聚合推送/分级值班/健康度); §3.2 加 7 Tab 表 + R11 3 重点组件表
+  4. 第五章目录: routes 10→12 + 补 match_strategy/watchlist; monitor/ 空→4 文件; quant 24→27 + 补 EngineHealthCard/MatchStrategyManager/WatchlistManager; scripts 7→18 + 补 stop/smoke_test/replace-paths/setup-env; config 8→9 + 补 match_strategies.yaml; 补 .gitattributes + data/logs/ + docs/MONITOR_ENGINE_PLAN.md 等
+  5. 第六章部署: §6.1 启动改 bash scripts/start_all.sh + 补 stop.sh + smoke_test; §6.2 Windows 全改用 ps1 脚本 + smoke_test.ps1 + stop.ps1; §6.5 加 R10-3 ChannelRegistry 联动通知表
+  6. 第七章配置: 加 match_strategies.yaml 行 + §7.1 monitor_rules.yaml 字段详解(monitor.health/alert_aggregate_*/emoji/label/default_params) + §7.2 match_strategies.yaml schema
+  7. 第八章数据: §8.2 加 monitor_subscriptions 表 + uq_mon_stock_active UNIQUE 说明; §8.3 重画数据流转图含 MonitorEngine 链路 + 聚合队列 flush
+  8. 第九章监控: §9.1 加 GET /api/monitor/health 端点示例 + status 判定逻辑表 + EngineHealthCard 前端呈现; §9.2 FastAPI 日志路径 engine.log → fastapi.log(R9-4a 规范化)
+  9. 第十章 FAQ: §10.1 加 2 条(channels.yaml 不生效/Windows python 探测); §10.2 加 3 条(聚合推送不 flush/健康度 unhealthy/UNIQUE 冲突); §10.3 加 2 条(匹配策略 CRUD/_default 删除保护); §10.4 加 3 条(7 tab 横向滚动/复制副本不生效/批量导入代码格式)
+  10. 第十二章版本: §12.1 版本号表更新 3 层; §12.2 开发轮次记录加 R8-R11 4 行; 新增 §12.3 变更历史表 4 行(R8/R9/R10/R11 主要交付/涉及层/验证结果); §12.5 回滚策略加匹配策略 YAML + 健康度阈值 2 行
+  11. 附录命令速查: 加 stop.sh/ps1 + smoke_test.sh/ps1 + monitor/health/match-strategies/watchlist curl + R10-3 注释
+- 中途修了 3 处小 bug: 4 backticks → 3 backticks(§8.3 代码块); "兄底" → "兜底"; "间隄" → "间隔"; curl 前导空格清除
+- 验证:
+  * wc -l docs/PROJECT_MAINTENANCE.md → 1046 行(从 766 增加 280 行)
+  * grep -c "R11\|R10\|R9" docs/PROJECT_MAINTENANCE.md → 126 处提及新轮次
+  * 文档头 "最后更新：R11 轮次" + "前端 v0.3.0" 已改
+  * Python 正则检查: 36 个代码栅栏(18 对平衡) + 14 个顶层标题(目录+12 章+附录) 结构完整
+  * 无遗留 "R7 轮次" / "engine.log" / "v0.1.0 (P1)" 旧标记(v0.1.0/v0.4.0 仅出现在版本演进叙事中,属预期)
+
+Stage Summary:
+- 文件: docs/PROJECT_MAINTENANCE.md
+- 行数变化: 766 → 1046 (+280 行)
+- 更新章节: 12 章 + 附录全覆盖
+  * 文档头(行 11-12 版本号)
+  * §2 系统架构(L4/L5 5 层图 + §2.2.1 监控引擎信号链路新增 + §2.3 聚合推送定时器线程)
+  * §3 技术栈(§3.1 后端 +5 组件 + §3.2 前端 7 Tab 表 + R11 3 组件表)
+  * §5 目录结构(全树刷新: routes 10→12 / monitor 0→4 / quant 24→27 / scripts 7→18 / config 8→9)
+  * §6 部署流程(§6.1/6.2 启停脚本 + §6.5 R10-3 联动通知表)
+  * §7 配置文件总览(新增 §7.1 monitor_rules 字段详解 + §7.2 match_strategies schema)
+  * §8 数据存储(§8.2 加 monitor_subscriptions 表 + §8.3 重画数据流转图)
+  * §9 监控与日志(§9.1 加 /api/monitor/health 端点 + status 判定表 + EngineHealthCard 呈现; §9.2 fastapi.log 路径)
+  * §10 常见问题(§10.1/10.2/10.3/10.4 共加 10 条新 FAQ)
+  * §12 版本变更(§12.1 版本号表 + §12.2 轮次记录 + 新增 §12.3 变更历史表 + §12.5 回滚策略)
+  * 附录命令速查(加 stop/smoke_test/monitor 三组命令)
+- 关键更新:
+  1. 文档头从 R7 → R11,版本号前端 v0.1.0→v0.3.0 / 引擎 v0.4.0→v0.6.0 / 配置 v1.0→v1.2
+  2. 新增 §2.2.1 监控引擎信号链路图,完整呈现行情 push → MonitorEngine._tick → MatchRegistry → evaluate → record_signal → DuckDB INSERT → ChannelRegistry.dispatch(分级 high 立即 / medium+low 走聚合) + 聚合队列 flush(R10-5 tick 驱动 + R11-4 独立 daemon 线程)
+  3. 第七章新增 §7.1/§7.2 配置字段详解,覆盖 monitor.health 段(R11-4) / alert_aggregate_*(R10-5) / alert_templates.emoji.label.default_params(R9/R10-2) / match_strategies.yaml 装配单 schema(R9)
+  4. 第九章新增 GET /api/monitor/health 端点示例 + status 判定逻辑表(healthy/degraded/unhealthy 三态 + 阈值可配 + thresholds 透出) + EngineHealthCard 前端呈现说明
+  5. 第12章新增 §12.3 变更历史表 R8/R9/R10/R11 四行,每行列出主要交付 + 涉及层 + 验证结果,方便快速定位每轮做了什么
+
+---
+Task ID: R12-总结
+Agent: main
+Task: R12 轮次总结 - 更新 3 个维护文档(PROJECT_MAINTENANCE / QUICKSTART_10MIN / PROJECT_HANDOVER)到 R11 状态
+
+Work Log:
+- 并行派发 3 个 general-purpose 子代理(R12-1/R12-2/R12-3),每个先读 worklog 末 350 行 + 对应文档全文,再更新
+- R12-1: PROJECT_MAINTENANCE.md 766→1046 行(+280),126 处提及 R9-R11,新增监控引擎信号链路图/配置字段详解/health 端点/变更历史表 R8-R11
+- R12-2: QUICKSTART_10MIN.md 294→387 行(+93),23 处提及 R9-R11,补 5 个改配置场景/3 个加新功能/聚合推送+健康度排查
+- R12-3: PROJECT_HANDOVER.md 838→952 行(+114),54 处提及 R9-R11,19 处更新含 Windows 脚本矩阵/代码入口 18 行/Checklist 15 项
+
+Stage Summary:
+- 文件变更:
+  修改 (3):
+    docs/PROJECT_MAINTENANCE.md (766→1046 行)
+    docs/QUICKSTART_10MIN.md (294→387 行)
+    docs/PROJECT_HANDOVER.md (838→952 行)
+- 验证结果:
+  * 三文档版本标记全部统一:R11 末 / 2026-06-21 / 前端 v0.3.0 · 引擎 v0.6.0 · 配置 v1.2
+  * 新功能全覆盖:健康度 health 端点 / match_strategies.yaml / 聚合推送 daemon / 7 tab 均在 3 文档中出现
+  * 交叉引用一致:3 文档互相引用 + worklog.md + USER_GUIDE.md
+  * 无残留旧版本标记(R7/R8 轮次 / 2026-06-17 日期已清除,仅变更历史叙事中保留)
+  * R9/R10/R11 提及次数:维护 126 / 快速上手 23 / 交接 54
+- 设计要点:
+  1. 并行更新 3 文档(无依赖),统一关键更新点清单保证一致性
+  2. 每个 subagent 先读 worklog 再改,确保以实际进展为准不编造
+  3. 保持原文档结构/风格/层级不变,只更新内容
+  4. 交叉引用交叉验证(MAINTENANCE↔HANDOVER↔QUICKSTART 互引)
+- 未解决问题:
+  1. QUICKSTART 第 102 行 curl /health(FastAPI 根)与第 107 行 /api/monitor/health(监控健康度)并存,前者检查进程存活后者检查引擎状态,均合理保留
+  2. docs/API_CAPABILITY_MAP.md(R7 时期)和 docs/PATH_REPLACEMENT_GUIDE.md 未在本轮更新范围(用户只要求 3 个维护文档)
+- 下一阶段建议:
+  1. 更新 docs/API_CAPABILITY_MAP.md(接口能力地图,补 R9-R11 新增的 11 个端点)
+  2. 更新 docs/USER_GUIDE.md(用户指南,补 7 tab 用法)
+  3. 更新 docs/maintenance/ARCHITECTURE.md(5 层架构深度说明,补监控引擎层)

@@ -3,14 +3,14 @@
 > **本文档是接手 AI 的第一手资料。任何动作前，请完整阅读本文档「第二章 AI 基本提示词」。**
 > **若按本文档操作时发现与实际代码不符，以代码为准，并回填修正本文档。**
 >
-> **最后更新**：R8 轮次（交接文档强化 + Windows 运行匹配 + 策略因子扩展方案）
+> **最后更新**：R11 轮次（健康度卡片 + 匹配策略复制 + 自选股批量导入 + P2 后端优化）
 > **配套文档**：
 > - `docs/STRATEGY_FACTOR_EXTENSION.md` — 策略与因子扩展完整步骤（本文档第六章的详尽版）
 > - `docs/maintenance/ARCHITECTURE.md` — 5 层架构深度说明
 > - `docs/maintenance/STRATEGY_LOGIC.md` — 5 策略公式与阈值唯一依据
 > - `docs/PROJECT_MAINTENANCE.md` — 运维 / 部署 / 常见问题
 > - `docs/USER_GUIDE.md` — 终端用户使用说明
-> - `worklog.md` — AI 开发全程记录（按轮次归档，最后 2 轮必读）
+> - `worklog.md` — AI 开发全程记录（按轮次归档，最后 3 轮 R9/R10/R11 必读）
 
 ---
 
@@ -57,16 +57,25 @@ Linux 沙箱开发环境：
 
 **关键结论**：用户端**永远是浏览器**，开发者要启动的是后端 + 前端两个进程。
 
-### 1.3 当前项目状态（R7 末）
+### 1.3 当前项目状态（R11 末）
 
 | 维度 | 状态 |
 |------|------|
-| 稳定性 | P1++++ 极度稳定，lint 0 错误，全 API 200 |
-| 已完成轮次 | R1–R7（7 轮迭代） |
-| 后端 | FastAPI :8000，10 路由，4 通道，26 因子，5 策略 |
-| 前端 | Next.js :3000，5 Tab，24 量化组件 |
-| 数据 | Mock 模式（沙箱）/ Real 模式（Windows 生产） |
-| 待办 | 因子公式补全 / K 线真实数据 / 回测真实数据 |
+| 稳定性 | P1++++ 极度稳定，lint 0 错误，全 API 200，smoke_test 18/18 PASS |
+| 已完成轮次 | R1–R11（11 轮迭代） |
+| 后端 | FastAPI :8000，11 路由模块（+ match_strategy/watchlist/health），4 通道，26 因子，5 策略 |
+| 前端 | Next.js :3000，**7 Tab**（+ 匹配策略 / 自选股），26+ 量化组件（+ 健康度卡片） |
+| 监控引擎 | MonitorEngine 主循环 + `_aggregator_loop` daemon 线程 + MatchStrategy 匹配层 + MatchRegistry 注册表 |
+| 数据 | Mock 模式（沙箱）/ Real 模式（Windows 生产，适配度 ~88%） |
+| 待办 | 健康度趋势图持久化 / 真实 Windows 验证 ps1 / 聚合推送统计面板 |
+
+#### R9–R11 三轮关键交付（接手 AI 必看）
+
+| 轮次 | 主题 | 关键交付 |
+|------|------|----------|
+| **R9** | 监控引擎主体实施 | engine/monitor/ 4 文件（engine/rules/match_registry/__init__） + 匹配策略层（MatchStrategy + MatchRegistry） + 9 bug 修复（3 高 6 中） + Windows 适配 Top5（62→88 分） + 路径替换脚本 + 接口能力地图 + 10 分钟上手文档 |
+| **R10** | 前端管理 UI + 后端 P1 优化 | 匹配策略 tab + 自选股 tab（7 tab 总数） + 8 低 bug 修复 + ConfigLoader `_notify_reload` 通知 ChannelRegistry + Windows 脚本增强（smoke_test.sh/ps1 + stop.sh/ps1 + start_all 集成 smoke test） + P1 优化（聚合推送 `_agg_queue` / 分级值班 high 立即全通道 / 健康度监控 `GET /api/monitor/health`） |
+| **R11** | Dashboard 健康度卡片 + 匹配策略复制 + 自选股批量导入 + P2 后端优化 | EngineHealthCard.tsx（状态徽章+6 指标+SVG 趋势图+阈值脚注） + 匹配策略复制功能（CopyForm，修了 enableCopy checkbox bug） + 自选股批量导入（parseBatchInput + 分组提交） + P2 优化（聚合推送独立 daemon 线程 `_aggregator_loop` 不依赖 tick / 健康度阈值放 `config/monitor_rules.yaml` `monitor.health` 段 / health 响应透出 `thresholds` 字段） |
 
 ---
 
@@ -80,7 +89,7 @@ Linux 沙箱开发环境：
 你是 TdxQuant 项目的 AI 维护者。你的所有动作必须遵循以下准则：
 
 【准则 1：先读后写】
-任何代码修改前，必须先读 worklog.md 最后 2 个轮次章节 + 本文档对应章节。
+任何代码修改前，必须先读 worklog.md 最后 5 段（覆盖 R9/R10/R11 三轮，不是 2 段） + 本文档对应章节。
 不确定的事，先用 Read/Grep 工具核实，不要凭印象改。
 
 【准则 2：配置驱动优先】
@@ -121,6 +130,13 @@ Linux 沙箱开发环境：
   - engine/channels/registry.py（自动扫描机制）
   - src/lib/api-proxy.ts（tryFastAPI 三件套）
   - Caddyfile（沙箱网关，Windows 不用）
+
+【准则 8：监控引擎的聚合推送独立 daemon】
+聚合推送（`_aggregator_loop`）从 R11-4 起是独立 daemon 线程，不依赖 tick 循环。
+不要在 tick 循环里手动 flush 聚合队列：
+  - `_flush_all_aggregation(force=False)`（tick 调用）只 flush 窗口到期的 key，让出主导权给独立线程
+  - `_flush_all_aggregation(force=True)`（daemon 线程调用）无条件 flush，保证不漏推
+在 tick 里强制 flush 会架空 60s 聚合窗口，破坏分级值班降噪逻辑。
 ```
 
 ### 2.2 接手后的标准动作流程
@@ -128,7 +144,7 @@ Linux 沙箱开发环境：
 ```
 第 1 步：环境确认（5 分钟）
   ├─ cd /home/z/my-project
-  ├─ 读 worklog.md 最后 400 行
+  ├─ 读 worklog.md 最后 5 段（覆盖 R9/R10/R11 三轮，不是 2 段）
   ├─ 读本文档第二、三、四章
   └─ ps aux | grep -E "uvicorn|next dev"  确认进程在
 
@@ -173,6 +189,7 @@ Linux 沙箱开发环境：
 | API URL 写端口号 | Caddy 不转发 | 用 ?XTransformPort=N |
 | 硬编码阈值到代码 | 无法热加载 | 全走 YAML |
 | 删启用中的策略 | 运行中策略异常 | 先 disable 再删 |
+| 删 `_default` 匹配策略 | 兑底预警全丢，所有未命中 match 的股票再无预警 | 三重保护：前端按钮 disabled + 后端 403 + toast 友好提示 |
 
 ### 2.4 遇到不确定情况怎么办
 
@@ -336,27 +353,29 @@ Windows 生产**不需要 Caddy**，浏览器直接访问：
 | 后端 API 文档 | `http://localhost:8000/docs` |
 | 健康检查 | `http://localhost:8000/health` |
 
-### 3.4 Windows 启动脚本（待补，建议接手 AI 创建）
+### 3.4 Windows 启动脚本（R9-4 / R10-4 已补全）
 
-当前 `scripts/` 只有 `.sh`，Windows 需要补：
+R9-4 与 R10-4 已补全 Windows 脚本矩阵，接手 AI 无需再创建，直接用即可：
 
-| 待创建文件 | 对应 Linux | 功能 |
-|------------|-----------|------|
-| `scripts/start_all.bat` | `start_all.sh` | 一键启动 FastAPI + Next.js |
-| `scripts/stop_all.bat` | 无 | 停止两个进程 |
-| `scripts/start_engine.ps1` | `start_engine.py` | PowerShell 版引擎启动 |
+| 脚本 | 对应 Linux | 功能 |
+|------|-----------|------|
+| `scripts/start_all.ps1` | `start_all.sh` | Windows 版一键启动 FastAPI + Next.js（自动探测 `python`/`python3`/`py`，启动后自动跑 `smoke_test.ps1`） |
+| `scripts/start_all.sh` | — | Linux 版一键启动，启动后自动跑 `smoke_test.sh`（R10-4 集成） |
+| `scripts/stop.ps1` | `scripts/stop.sh` | 按端口 + 进程名精准停服务（R10-4 新增） |
+| `scripts/daemon.ps1` | `scripts/daemon.sh` | 5s 轮询守护（R9-4a 创建） |
+| `scripts/smoke_test.ps1` | `scripts/smoke_test.sh` | 18 项检查（9 后端 API + 2 写操作 + 1 `_default` 保护 + 6 前端代理），退出码=失败数（适合 CI）（R10-4 新增） |
+| `scripts/replace-paths.ps1` | `scripts/replace-paths.sh` | 路径一键替换（5 占位符 + 双环境）（R9-4b 创建） |
+| `scripts/setup-env.ps1` | `scripts/setup-env.sh` | Windows 环境初始化 6 步（检查 → 建目录 → pip → bun → init_db → 路径替换）（R9-4b 创建） |
 
-`start_all.bat` 示例（接手 AI 可参考）：
-```bat
-@echo off
-cd /d %~dp0\..
-echo Starting TdxQuant FastAPI...
-start "TdxQuant-Engine" cmd /k "python scripts\start_engine.py --reload"
-timeout /t 5 /nobreak >nul
-echo Starting TdxQuant Next.js...
-start "TdxQuant-Web" cmd /k "bun run dev"
-echo Both services started. Access http://localhost:3000
+Windows 一键启动示例：
+```powershell
+cd D:\tdxquant
+.\scripts\start_all.ps1
+# 脚本会自动启动 FastAPI + Next.js 并跑 smoke_test.ps1 验证 18 项
+# 看到 "All 18 smoke checks PASS" 即成功
 ```
+
+> ⚠️ R9-4 / R10-4 脚本均在 Linux 沙箱静态语法审查，未在真实 Windows 验证（沙箱是 Linux）。首次运行如遇问题请查 `data/logs/fastapi.log` 与 `data/logs/dev.log`。
 
 ### 3.5 Windows 常见问题速查
 
@@ -370,6 +389,9 @@ echo Both services started. Access http://localhost:3000
 | 板块回写失败 | 终端未启动 | 启动通达信终端 |
 | YAML 路径反斜杠 | 单 `\` 转义 | 用 `/` 或 `\\` |
 | 飞书推送不生效 | webhook 没配 | 编辑 channels.yaml + 热加载 + 测试 |
+| 改 channels.yaml 后未生效 | ConfigLoader 未通知 ChannelRegistry | R10-3 起已修：改完调 `POST /api/config/reload` 即重载通道（无需重启或 PUT /api/channels） |
+| 健康度状态不准 | 阈值硬编码在 `monitor.py` | R11-4 起阈值放 `config/monitor_rules.yaml` 的 `monitor.health` 段；改完必须 `POST /api/config/reload` 才生效 |
+| `_default` 匹配策略被误删 | 历史可 DELETE | R9-5a 起三重保护：前端按钮 disabled + 后端 403 + toast，确保兑底套餐不会被误删 |
 
 ### 3.6 Windows 生产构建（可选提速）
 
@@ -402,7 +424,8 @@ nssm start TdxQuant-Engine
 │   ├── app.yaml                 ★★★ 全局配置（适配器 / 端口 / 路径）
 │   ├── channels.yaml            ★★★ 推送通道（4 通道开关与参数）
 │   ├── cleaning_rules.yaml      ★★  数据清洗规则（7 条）
-│   ├── monitor_rules.yaml       ★★  监控预警规则
+│   ├── monitor_rules.yaml       ★★★ 监控预警规则（alert_templates + monitor.health + 聊合推送）
+│   ├── match_strategies.yaml    ★★★ 匹配策略套餐（3 套餐 + 兑底 `_default`）
 │   ├── export.yaml              ★   导出格式
 │   ├── theme.yaml               ★   前端主题
 │   ├── sector_mapping.yaml      ★   策略↔板块映射
@@ -473,6 +496,56 @@ channels:
 - `monitor.alert_conditions[]`（预警条件 + `channels`）
 - `export`（CSV/Excel/板块回写）
 
+#### `config/monitor_rules.yaml`（监控预警规则）
+
+```yaml
+monitor:
+  trading_hours: ["09:30-11:30", "13:00-15:00"]
+  alert_aggregate_window_seconds: 60    # ★ R10-5 聊合推送窗口
+  alert_aggregate_max_size: 10          # ★ R10-5 队列达 max_size 即时 flush
+  debounce_default_seconds: 30
+  health:                               # ★★★ R11-4 健康度阈值（热加载）
+    lag_healthy_seconds: 60
+    lag_degraded_seconds: 120
+    error_healthy_threshold: 10
+
+alert_templates:                        # ★★★ R10-2 补齐 14 个模板
+  rzq_ignite:
+    emoji: "🔥"                          # ★ R10-2 #17 _alert_prefix() 读取
+    label: "弱转强点火"
+    default_params: { pct_threshold: 0.03, volume_ratio: 1.2 }
+    condition: "pct_change > {pct_threshold} and volume_ratio > {volume_ratio}"
+  # ... 共 14 个 alert_type，全有 emoji/label/default_params
+```
+
+热加载验证：`curl :8000/api/monitor/health` 返回 `thresholds` 字段透出当前生效阈值。
+
+#### `config/match_strategies.yaml`（匹配策略套餐）
+
+```yaml
+match_strategies:
+  - match_id: rzq_default              # ★ 匹配 ID（全局唯一，复制时加 _copy/_copy_2 后缀）
+    name: 弱转强默认监控
+    strategy_id: rzq                    # ★ 绑定策略（空字符串则作兑底 match）
+    enabled: true
+    scope:                              # ★ 市场过滤 + 排除条件
+      markets: ["SH", "SZ", "BJ"]
+      exclude_st: true
+      exclude_suspended: true
+      exclude_codes: []
+    alerts:                             # ★ 预警规则列表
+      - alert_type: rzq_ignite
+        priority: high                  # high/medium/low（R10-5 分级值班）
+        channels: [feishu, websocket, tdx_warn, csv_log]
+        params: { pct_threshold: 0.03 }
+    debounce_override: 30               # 覆盖默认 debounce
+  - match_id: _default                  # ★★★ 兑底套餐，三重保护不可删
+    strategy_id: ""                     # 空字符串 = 兑底
+    # ...
+```
+
+生效方式：编辑后 `POST /api/monitor/match-strategies/reload`，MatchRegistry 单例自动 invalidate + 重读。
+
 ### 4.3 配置修改标准流程
 
 ```
@@ -491,17 +564,26 @@ channels:
 
 | 层 | 入口文件 | 关键函数 / 类 |
 |----|----------|---------------|
-| FastAPI | `engine/api/main.py` | `create_app()` + `lifespan` |
-| 路由 | `engine/api/routes/*.py` | 10 个路由模块 |
+| FastAPI | `engine/api/main.py` | `create_app()` + `lifespan`（启动时 SELECT monitor_subscriptions 重建内存） |
+| 路由 | `engine/api/routes/*.py` | 11 个路由模块（含 R9-1 新增 match_strategy + watchlist） |
+| 监控引擎 | `engine/monitor/engine.py` | `MonitorEngine`（主循环 + `_aggregator_loop` daemon 线程 + `_fire_match` 分级值班） |
+| 匹配策略 | `engine/monitor/match_registry.py` | `MatchRegistry`（YAML 加载 + `get_applicable(strategy_id, code)` + CRUD 持久化） |
+| 预警规则 | `engine/monitor/rules.py` | `RuleSet`（加载 alert_templates + `evaluate(snap)`） |
+| 匹配策略路由 | `engine/api/routes/match_strategy.py` | 6 端点：GET 列表 / POST 创建 / PUT 改参 / DELETE（`_default` 403 保护）/ reload / test 调参预览 |
+| 自选股路由 | `engine/api/routes/watchlist.py` | 4 端点：GET 列表 / POST 加入 / DELETE 移除（归档 active=false）/ POST by-sector/{code} |
+| 健康度路由 | `engine/api/routes/monitor.py` `get_health` | `GET /api/monitor/health`（返回 status + 6 指标 + `thresholds` 透出阈值） |
 | 适配器 | `engine/data_adapter/factory.py` | `get_adapter()` / `reset_adapter()` |
-| 配置加载 | `engine/config/loader.py` | `ConfigLoader` 单例 |
+| 配置加载 | `engine/config/loader.py` | `ConfigLoader` 单例（`_notify_reload` 联动 RuleSet/MatchRegistry/ChannelRegistry） |
 | 选股流水线 | `engine/pipeline/` | `PipelineRunner` |
 | 因子注册 | `engine/factors/registry.py` | `FactorRegistry`（自动扫描） |
-| 通道注册 | `engine/channels/registry.py` | `ChannelRegistry`（自动扫描） |
+| 通道注册 | `engine/channels/registry.py` | `ChannelRegistry`（自动扫描；`reload_channel_config()` R10-3 加入热加载回调） |
 | DuckDB | `engine/storage/` | `DuckDBStore` |
-| 前端入口 | `src/app/page.tsx` | 5 Tab 布局 |
-| 前端 API | `src/lib/api.ts` | `monitorAPI` / `configAPI` / ... |
-| 前端代理 | `src/lib/api-proxy.ts` | `tryFastAPI(path)` |
+| 前端入口 | `src/app/page.tsx` | 7 Tab 布局（+ 匹配策略 / 自选股） |
+| 前端 API | `src/lib/api.ts` | `monitorAPI` / `configAPI` / `matchStrategyAPI` / `watchlistAPI` / ... |
+| 前端代理 | `src/lib/api-proxy.ts` | `tryFastAPI(path)` + `forwardFastAPI`（R10-1 不拦截 4xx 透传） |
+| 健康度卡片 | `src/components/quant/EngineHealthCard.tsx` | R11-1：状态徽章 + 6 指标 + SVG 趋势图 + 阈值脚注 + 5s 轮询 |
+| 匹配策略 UI | `src/components/quant/MatchStrategyManager.tsx` | R10-1 创建 + R11-2 复制功能（CopyForm + enableCopy checkbox） |
+| 自选股 UI | `src/components/quant/WatchlistManager.tsx` | R10-1 创建 + R11-3 批量导入（parseBatchInput + 分组提交） |
 
 ---
 
@@ -587,6 +669,17 @@ curl http://127.0.0.1:8000/api/example/hello           # 后端直连
 curl http://127.0.0.1:3000/api/example/hello           # 前端代理
 curl "http://127.0.0.1:81/api/example/hello?XTransformPort=8000"  # 网关直达
 ```
+
+#### R9–R11 新增端点参考案例
+
+后续轮次按本流程新增的端点可作模板参考：
+
+| 端点 | 轮次 | 文件 | 关键设计 |
+|------|------|------|----------|
+| `GET /api/monitor/health` | R10-5 | `engine/api/routes/monitor.py` `get_health` | 返回 status + 6 指标 + `thresholds` 透出阈值；R11-4 起阈值改读 `monitor.health` config |
+| `GET/POST/PUT/DELETE /api/monitor/match-strategies` | R9-1 | `engine/api/routes/match_strategy.py` | 6 端点（含 `/reload` 与 `/{id}/test`）；DELETE 对 `_default` 返 403；test 端点 R9-5a 起兼容扁平 / `{"snap":{}}` 嵌套两种 body |
+| `POST/DELETE/GET /api/monitor/watchlist` + `POST /api/monitor/watchlist/by-sector/{code}` | R9-1 | `engine/api/routes/watchlist.py` | 4 端点；DELETE 改为归档 active=false（R9-5a bug #8），避免 DuckDB UPDATE 索引 bug |
+| `GET /api/config` | R9-5a | `engine/api/routes/config.py` | 返回 ConfigSummaryResponse（不返回完整 yaml 避免泄露敏感字段） |
 
 ### 5.3 接口修改规范
 
@@ -695,7 +788,9 @@ sector:
 
 ```markdown
 ---
-Task ID: <轮次>-<子任务，如 R8-A>
+Task ID: <轮次>-<子任务>
+  示例：R8-A / R9-1 / R9-5a / R10-1 / R11-1 / R11-2 / R11-3 / R11-4
+  R11 轮 4 个并行子任务（R11-1 ~ R11-4）可同一轮次并发，Task ID 需各自唯一
 Agent: <agent 名称>
 Task: <任务简述>
 
@@ -732,7 +827,9 @@ Stage Summary:
 | FastAPI 健康 | `curl :8000/health` | 200 + `status: ok` |
 | 核心 API | `curl :8000/api/strategies` 等 | 全 200 |
 | 前端代理 | `curl :3000/api/strategies` | 200（透传或降级 mock） |
+| 健康度端点 | `curl :8000/api/monitor/health` | 200 + `status=healthy` + `thresholds` 字段透出（R10-5/R11-4） |
 | dev.log | `tail dev.log` | 无 Fatal / Error |
+| smoke_test | `bash scripts/smoke_test.sh` | 18/18 PASS（9 后端 API + 2 写 + 1 `_default` 403 保护 + 6 前端代理）。R10-4 起 `start_all.sh` 启动后自动跑 |
 | agent-browser | 打开 `/` 路由 | 页面渲染 + 核心交互可用 |
 
 ### 8.2 agent-browser 验证步骤
@@ -745,16 +842,20 @@ agent-browser click <selector>    # 点击
 agent-browser console             # 检查控制台
 ```
 
-**必验交互**：5 Tab 切换 / 策略启停运行 / 信号抽屉 / 全局搜索 / 通知中心 / 通道配置。
+**必验交互**：7 Tab 切换（含 R10-1 新增的匹配策略 / 自选股 tab）/ 策略启停运行 / 信号抽屉 / 全局搜索 / 通知中心 / 通道配置 / Dashboard 健康度卡片可见（R11-1）。
 
 ### 8.3 回归测试
 
 ```bash
 curl :8000/api/strategies           # 策略列表
 curl :8000/api/monitor?action=status # 监控状态
+curl :8000/api/monitor/health       # ★ R10-5 健康度：status=healthy + thresholds 字段透出
+curl :8000/api/monitor/match-strategies  # ★ R9-1 匹配策略列表（含 `_default`）
+curl :8000/api/monitor/watchlist    # ★ R9-1 自选股列表（带 strategy_id）
 curl :8000/api/signals?limit=1      # 信号
 curl :8000/api/channels             # 通道
 curl :8000/api/backtest/history     # 回测
+curl -X DELETE :8000/api/monitor/match-strategies/_default  # ★ 应返 403（R9-5a 保护生效）
 ```
 
 ---
@@ -785,6 +886,8 @@ curl :8000/api/backtest/history     # 回测
 | 改 `engine/api/main.py` lifespan | 引擎启动失败 | 充分测试 |
 | 升级 `next`/`react` 大版本 | 全前端可能崩 | 锁版本 + 全量回归 |
 | 升级 `fastapi`/`pydantic` | API 行为变化 | 检查 v1→v2 迁移 |
+| 改 `monitor.health` 阈值后未 reload | 用旧阈值判定 | 必须 `POST /api/config/reload` 才生效（R11-4 起阈值热加载）；否则 health 端点会继续返回旧 `thresholds` |
+| 聊合推送 daemon 线程异常 | 队列不 flush → 丢信号 | daemon 线程异常被 `logger.warning` catch 不会让主进程挂，但若长期不 flush 会丢信号——监控 `error_count` 和 `queue_size`（health 端点透出） |
 
 ### 9.3 已知限制
 
@@ -797,7 +900,10 @@ curl :8000/api/backtest/history     # 回测
 | Prisma schema 是脚手架 | 仅 User/Post | 业务数据用 DuckDB |
 | 版本号不一致 | 4 处未对齐 | 统一 1.0.0 |
 | `package.json` name 是脚手架名 | `nextjs_tailwind_shadcn_ts` | 改 `tdxquant` |
-| Windows 启动脚本缺失 | 只有 `.sh` | 待补 `.bat`/`.ps1` |
+| Windows ps1 脚本未真实验证 | 沙箱是 Linux，仅静态语法审查 | 真实 Windows 跑 `start_all.ps1` 验证 |
+| 健康度趋势图仅内存 | 刷新页面清空 lag 历史 | 持久化到 DuckDB 新表 `engine_health_snapshots` |
+| 聊合推送 daemon 线程 logger 不可见 | `uvicorn --log-level warning` 过滤掉 engine logger | 加 logger.basicConfig 或 health 端点加 `agg_thread_alive` 字段 |
+| 前端无健康度阈值编辑 UI | 后端 `thresholds` 字段已就绪 | 加配置页或系统设置 tab |
 
 ---
 
@@ -805,15 +911,20 @@ curl :8000/api/backtest/history     # 回测
 
 ```
 □ cd /home/z/my-project（沙箱）/ D:\tdxquant（Windows）
-□ 读 worklog.md 最后 2 轮章节
+□ 读 worklog.md 最后 5 段（覆盖 R9/R10/R11 三轮，不是 2 段）
 □ 读本文档第二、三、四章
 □ ps aux | grep -E "uvicorn|next dev"（沙箱）确认进程
 □ curl :8000/health 确认 FastAPI
 □ curl :3000/api 确认 Next.js 代理
 □ curl :8000/api/strategies 确认策略加载
+□ curl :8000/api/monitor/health 返回 status=healthy + thresholds 字段（R10-5/R11-4）
+□ curl :8000/api/monitor/match-strategies 返回 3 套餐（含 `_default`）
+□ curl :8000/api/monitor/watchlist 返回自选股带 strategy_id
 □ tail dev.log 确认无错误
+□ bash scripts/smoke_test.sh 18/18 PASS（R10-4 起 start_all.sh 自动跑）
 □ agent-browser 打开 / 确认页面渲染
-□ 点击 5 个 Tab 确认切换正常
+□ 点击 7 个 Tab 确认切换正常（不只是 5 个；含匹配策略 / 自选股）
+□ Dashboard 健康度卡片可见（状态徽章 + 6 指标 + SVG 趋势图 + 阈值脚注）
 □ bun run lint 确认 0 错误
 ```
 
@@ -831,7 +942,10 @@ curl :8000/api/backtest/history     # 回测
 | `docs/maintenance/STRATEGY_LOGIC.md` | 5 策略公式唯一依据 | 实现因子公式时 |
 | `docs/PROJECT_MAINTENANCE.md` | 运维 / 部署 / 常见问题 | 部署 / 排错时 |
 | `docs/USER_GUIDE.md` | 终端用户使用说明 | 回答用户功能问题时 |
-| `worklog.md` | 开发全程记录 | 每轮开始前读最后 2 轮 |
+| `worklog.md` | 开发全程记录 | 每轮开始前读最后 3 轮（R9/R10/R11） |
+| `docs/API_CAPABILITY_MAP.md` | 接口能力地图（40 后端路由 + 27 前端代理） | 加接口 / 定位接口时 |
+| `docs/QUICKSTART_10MIN.md` | 10 分钟维护上手 | 新环境初始化 / 快速上手 |
+| `docs/PATH_REPLACEMENT_GUIDE.md` | 路径一键替换脚本说明 | 跨平台迁移 / 占位符替换时 |
 
 ---
 

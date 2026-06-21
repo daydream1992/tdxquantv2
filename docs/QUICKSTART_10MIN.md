@@ -3,8 +3,8 @@
 > 目标：读完这份文档，你能在 10 分钟内启动系统、改配置、排查问题。
 >
 > - 适用读者：新接手的人类运维 / AI Agent
-> - 生成日期：2026-06-17
-> - 配套文档：`docs/API_CAPABILITY_MAP.md`、`docs/PATH_REPLACEMENT_GUIDE.md`、`docs/PROJECT_MAINTENANCE.md`
+> - 生成日期：2026-06-21（R11 末）
+> - 配套文档：`docs/API_CAPABILITY_MAP.md`、`docs/PATH_REPLACEMENT_GUIDE.md`、`docs/PROJECT_MAINTENANCE.md`、`docs/maintenance/ARCHITECTURE.md`、`docs/maintenance/STRATEGY_LOGIC.md`
 
 ---
 
@@ -17,7 +17,7 @@
 | L1 基础设施 | DuckDB 存储 / 通达信 tqcenter 数据适配器 / SSE 实时流 | `data/duckdb/quant.db`、`config/duckdb_schema.sql`、`engine/data_adapter/`、`src/app/api/realtime/` |
 | L2 核心引擎 | FastAPI 后端 + Next.js 前端 + 表达式 / 因子 / 通道三大注册表 | `engine/api/main.py`、`engine/expression/`、`engine/factors/registry.py`、`engine/channels/registry.py` |
 | L3 组件抽象 | Base 类定义扩展契约 | `engine/factors/base.py`、`engine/channels/base.py`、`engine/pipeline/base.py`、`engine/data_adapter/base.py` |
-| L4 业务规则 | 选股 pipeline 6 步 + 监控引擎求值循环 | `engine/pipeline/runner.py`、`engine/monitor/engine.py`、`engine/monitor/match_registry.py` |
+| L4 业务规则 | 选股 pipeline 6 步 + 监控引擎求值循环 + 匹配策略装配 + 聚合推送 + 分级值班 | `engine/pipeline/runner.py`、`engine/monitor/engine.py`、`engine/monitor/match_registry.py` |
 | L5 用户配置 | 策略 / 预警 / 通道 / 匹配 / 应用全局 | `strategies/strategy_*.yaml`、`config/{monitor_rules,match_strategies,channels,app,cleaning_rules}.yaml` |
 
 ### 核心数据流
@@ -32,10 +32,14 @@
 
 ┌─ 监控链 ─────────────────────────────────────────────────────────────┐
 │ FastAPI lifespan 启动 → adapter.subscribe_hq(codes, callback)         │
-│   → MonitorEngine.on_quote(snap)                                      │
+│   行情 push → MonitorEngine._tick/on_quote(snap)                      │
 │   → MatchRegistry.get_applicable(code) 求得适用 match                │
 │   → ExpressionEvaluator.evaluate_safe(condition, snap_vars)          │
-│   → 命中 → record_signal + dispatch(channels) + 写 signal_events 表  │
+│   → 命中 → record_signal 写 signal_events 表                         │
+│   → ChannelRegistry.dispatch 分级值班:                                │
+│       high    → 立即全通道 (feishu/tdx_warn/websocket/csv_log)        │
+│       medium/low → websocket 立即推 + 其余通道走聚合队列              │
+│   → 聚合队列: _aggregator_loop 独立线程按窗口/max_size flush 摘要     │
 │   → channels: csv_log(强制开) / websocket / tdx_warn / feishu        │
 └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -47,7 +51,7 @@
 ### Linux（沙箱 / 生产）
 
 ```bash
-# 一键启动（FastAPI:8000 + Next.js:3000，会先 pkill 旧进程）
+# 一键启动（FastAPI:8000 + Next.js:3000，会先 pkill 旧进程；R10-4 起启动后自动跑 smoke_test.sh）
 bash scripts/start_all.sh
 
 # 或手动后台拉起
@@ -59,18 +63,24 @@ setsid ./node_modules/.bin/next dev -H 127.0.0.1 -p 3000 \
 # 前端独立启动（开发模式）
 bun run dev
 
-# 停止
-pkill -f "uvicorn engine.api"; pkill -f "next dev"; pkill -f "next-server"
+# 停止（R10-4 起有专用脚本，按端口+进程名精准停）
+bash scripts/stop.sh
+
+# 冒烟测试（18 项：9 后端 API + 2 写操作 + 1 _default 保护 + 6 前端代理）
+bash scripts/smoke_test.sh
 ```
 
 ### Windows
 
 ```powershell
-# 一键启动（FastAPI + Next.js）
-powershell -ExecutionPolicy Bypass -File scripts\start_all.ps1
+# 一键启动（FastAPI + Next.js，启动后自动跑 smoke_test.ps1）
+.\scripts\start_all.ps1
 
-# 停止
-Get-Process | Where-Object { $_.ProcessName -match 'python|node|bun' } | Stop-Process -Force
+# 停止（按端口+进程名精准停）
+.\scripts\stop.ps1
+
+# 冒烟测试
+.\scripts\smoke_test.ps1
 
 # 生产环境用 nssm 注册服务，详见 docs\PROJECT_MAINTENANCE.md
 ```
@@ -93,6 +103,10 @@ curl -s http://127.0.0.1:8000/health                              # → 200
 curl -s http://127.0.0.1:8000/api/monitor/status | python -m json.tool
 # 期望: engine_status="running", today_signals>0
 
+# 监控引擎健康度（R10-5 起提供，R11-4 起 thresholds 字段透出当前生效阈值）
+curl -s http://127.0.0.1:8000/api/monitor/health | python -m json.tool
+# 期望: status="healthy", thresholds={lag_healthy_seconds:60, lag_degraded_seconds:120, error_healthy_threshold:10}
+
 # 前端
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3000/    # → 200
 ```
@@ -106,9 +120,9 @@ curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3000/    # → 200
 | 要改什么 | 改哪个文件 | 改完怎么生效 |
 |----------|-----------|-------------|
 | 选股策略（因子 / 权重 / 评分公式） | `strategies/strategy_*.yaml` | `POST /api/config/reload` |
-| 预警规则模板（条件 / 阈值 / 通道） | `config/monitor_rules.yaml` | `POST /api/config/reload` |
-| 匹配策略（策略 ↔ 预警套餐绑定） | `config/match_strategies.yaml` | `POST /api/monitor/match-strategies/reload` |
-| 推送通道（飞书 / webhook / 开关） | `config/channels.yaml` | `PUT /api/channels` |
+| 预警规则模板（条件 / 阈值 / 通道）+ 聚合推送窗口 + 健康度阈值 | `config/monitor_rules.yaml` | `POST /api/config/reload` |
+| 匹配策略装配（绑定 strategy_id + scope + alerts + params） | `config/match_strategies.yaml` | `POST /api/monitor/match-strategies/reload` |
+| 推送通道（飞书 / webhook / 开关） | `config/channels.yaml` | `PUT /api/channels`（或 `POST /api/config/reload`，R10-3 起自动重载 ChannelRegistry） |
 | 数据清洗规则 | `config/cleaning_rules.yaml` | `POST /api/config/reload` |
 | 应用全局（adapter_mode / 路径 / 时段） | `config/app.yaml` | **需重启 FastAPI** |
 | 板块映射 | `config/sector_mapping.yaml` | `POST /api/config/reload` |
@@ -116,11 +130,13 @@ curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3000/    # → 200
 
 > 配置文件被 ConfigLoader 的 watcher 监听，改完 2 秒内会自动 reload；显式调 POST 接口可立即生效。
 
-### 3 个最常见改配置场景
+### 5 个最常见改配置场景
 
 #### 1. 调预警阈值
 
-`config/monitor_rules.yaml` → `alert_templates.xxx.default_params`：
+两处可改，**优先级：`match_strategies.yaml` 的 `alerts.params` > `monitor_rules.yaml` 的 `alert_templates.xxx.default_params`**。
+
+`config/monitor_rules.yaml` → `alert_templates.xxx.default_params`（全局默认）：
 
 ```yaml
 alert_templates:
@@ -130,11 +146,53 @@ alert_templates:
     channels: [tdx_warn, websocket, feishu]
 ```
 
+`config/match_strategies.yaml` → 某个 match 的 `alerts[].params`（覆盖默认，仅影响该 match）：
+
+```yaml
+- match_id: rzq_default
+  alerts:
+    - alert_type: limit_up_surge
+      params: { pct_threshold: 0.08 }   # ← 这里覆盖 default_params 的同名键
+```
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/config/reload
+curl -X POST http://127.0.0.1:8000/api/monitor/match-strategies/reload   # 若改了 match_strategies.yaml
+```
+
+#### 2. 改健康度判定阈值（R11-4 新增）
+
+`config/monitor_rules.yaml` → `monitor.health` 段（3 个阈值，缺省回退 60/120/10）：
+
+```yaml
+monitor:
+  health:
+    lag_healthy_seconds: 60        # lag < 此值 且 errors < threshold => healthy
+    lag_degraded_seconds: 120      # lag < 此值 => degraded, 否则 unhealthy
+    error_healthy_threshold: 10    # 错误数 < 此值才算 healthy
+```
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/config/reload
+# 验证 thresholds 字段已更新
+curl -s http://127.0.0.1:8000/api/monitor/health | python -m json.tool
+```
+
+#### 3. 改聚合推送窗口（R10-5 / R11-4 新增）
+
+`config/monitor_rules.yaml` → `monitor` 段下两个键（影响 medium/low 优先级信号的合并粒度）：
+
+```yaml
+monitor:
+  alert_aggregate_window_seconds: 60   # 聚合窗口（秒），也是 agg-flush 线程循环间隔，下限 5s
+  alert_aggregate_max_size: 10         # 队列达此长度立即 flush（不等窗口结束）
+```
+
 ```bash
 curl -X POST http://127.0.0.1:8000/api/config/reload
 ```
 
-#### 2. 加监控股票
+#### 4. 加监控股票
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/monitor/watchlist \
@@ -142,7 +200,7 @@ curl -X POST http://127.0.0.1:8000/api/monitor/watchlist \
   -d '{"codes": ["600519.SH","000001.SZ"], "strategy_id": "rzq"}'
 ```
 
-#### 3. 开关通道
+#### 5. 开关通道
 
 ```bash
 curl -X PUT http://127.0.0.1:8000/api/channels \
@@ -164,9 +222,30 @@ curl -X PUT http://127.0.0.1:8000/api/channels \
 
 ### 加新预警规则
 
-1. `config/monitor_rules.yaml` 的 `alert_templates` 加一条（`condition` 用表达式语法，变量见 `docs/API_CAPABILITY_MAP.md` §6.2）
-2. `config/match_strategies.yaml` 的某个 `match.alerts` 引用该 `alert_type`
-3. `curl -X POST http://127.0.0.1:8000/api/monitor/match-strategies/reload`
+1. `config/monitor_rules.yaml` 的 `alert_templates` 加一条模板（`condition` 用表达式语法，变量见 `docs/API_CAPABILITY_MAP.md` §6.2）
+2. `config/match_strategies.yaml` 加一个 `match` 装配（绑定 `strategy_id` + `scope` + `alerts[]`），在 `alerts[].alert_type` 引用上一步的模板
+3. `curl -X POST http://127.0.0.1:8000/api/monitor/match-strategies/reload` 热加载
+
+### 加新匹配策略（R10-1 前端 UI / R11-2 复制功能）
+
+两种方式任选：
+
+- **可视化**：前端 Dashboard → 「匹配策略」tab → 点「新建」填表（match_id / name / strategy_id / scope / alerts）；或基于现有策略点「复制」按钮生成副本（默认禁用，可勾选「启用副本」直接启用），改 ID 即用
+- **直接编辑**：`config/match_strategies.yaml` 加一条 `match`，调 `POST /api/monitor/match-strategies/reload`
+
+新建/复制后可用「测试」面板验证：填 code + 4 个可选数字（pct_change/volume_ratio/main_inflow/auction_pct）→ 命中结果显示 alert_type + priority + condition 表达式。
+
+### 批量加自选股（R11-3 新增）
+
+前端 Dashboard → 「自选股」tab → 点「批量导入」→ 粘贴 CSV（每行 `code,name,strategy_id`，也支持纯代码列表）→ 实时预览（无效行高亮 + 三色 Badge 统计）→ 选择默认策略 → 「导入 (N)」分组提交。
+
+```text
+600519,贵州茅台,rzq_ignite
+000858,五粮液,rzq_ignite
+300750,宁德时代,_manual
+```
+
+后端按 `strategy_id` 分组串行提交，避免 unique index 冲突；导入完成 toast 显示「新增 N 只, 跳过 M 只」。
 
 ### 加新因子
 
@@ -209,6 +288,8 @@ curl -X PUT http://127.0.0.1:8000/api/channels \
 | `422 /api/monitor/match-strategies/{id}/test` | body 缺 `snap` 包装 | 正确格式：`{"snap": {"code":"...","pct_change":0.04,...}}`（详见 API_CAPABILITY_MAP §6.2） |
 | 启动后 monitor_subscriptions 全空 | lifespan 未从 DuckDB 冷启动加载（bug #1） | 重启后调 `POST /api/strategies/{id}/run` 重订阅 Top 20，或 `POST /api/monitor/watchlist` 手动补 |
 | `pip install` 卡在 uvloop（Windows） | uvloop 是 Linux-only | `requirements.txt` 已拆 `uvicorn[standard]` 为 4 行，重新 `pip install -r` 即可 |
+| 聚合推送不 flush | R11-4 前依赖 tick 循环，行情停推则积压 | R11-4 起有独立 `_aggregator_loop` daemon 线程兜底；若仍异常，检查 `monitor.alert_aggregate_window_seconds` 配置（下限 5s） |
+| 改 `channels.yaml` 不生效 | 旧版本需 `PUT /api/channels` 或重启 | R10-3 起 ConfigLoader reload 会通知 ChannelRegistry 自动重载，调 `POST /api/config/reload` 即可 |
 
 ### 健康检查命令
 
@@ -217,6 +298,12 @@ curl -X PUT http://127.0.0.1:8000/api/channels \
 curl -s http://127.0.0.1:8000/api/monitor/status           | python -m json.tool
 curl -s http://127.0.0.1:8000/api/monitor/match-strategies | python -m json.tool
 curl -s http://127.0.0.1:8000/api/channels                 | python -m json.tool
+
+# 监控引擎健康度（R10-5 起提供）
+curl -s http://127.0.0.1:8000/api/monitor/health | python -m json.tool
+# 看 status 字段: healthy / degraded / unhealthy
+# 看 thresholds 字段确认当前生效阈值 (lag_healthy_seconds / lag_degraded_seconds / error_healthy_threshold)
+# 看 eval_count / quote_lag_seconds / queue_size / error_count 判断引擎负载
 
 # 看 DuckDB 里的数据
 python -c "import duckdb; print(duckdb.connect('data/duckdb/quant.db').execute('SELECT alert_type, COUNT(*) FROM signal_events WHERE event_date=CURRENT_DATE GROUP BY 1').fetchall())"
@@ -243,6 +330,8 @@ bash scripts/replace-paths.sh --env windows --dry-run
 ```
 
 占位符定义在 `scripts/paths.yaml`（共 5 个：`{{VENV_PYTHON}}` / `{{PROJECT_ROOT}}` / `{{LOG_DIR}}` / `{{TMP_DIR}}` / `{{NULL_DEV}}`）。需要绝对路径就改 `paths.yaml` 的 `placeholders` 段，无需动脚本。
+
+> R9-4 起提供 `scripts/replace-paths.sh`（Linux/macOS）与 `scripts/replace-paths.ps1`（Windows）一键替换脚本，两个平台功能等价。
 
 > **注意**：脚本只替换 `{{...}}` 占位符，不会动已有硬编码路径（避免误伤）。新代码请用 `pathlib.Path` + 占位符，不要写死 `/home/z/...` 或 `C:\...`。
 
@@ -277,18 +366,22 @@ bash scripts/replace-paths.sh --env windows --dry-run
 7. **`send_user_block` 是追加非覆盖**（必须先 `clear_sector`，`SectorManager.update_stocks` 已封装原子操作）
 8. **`subscribe_hq` 上限 100 只**（分批 50，`config/app.yaml: tqcenter.subscribe_batch_size`）
 9. **改完跑 `bun run lint` + 重启 FastAPI 验证**（`bash scripts/start_all.sh` 会自动重启）
-10. **不要 `DELETE /api/monitor/match-strategies/_default`**（兜底套餐保护未实施，误删会让所有非绑定股票失预警；详见 worklog R9-3 bug #2）
+10. **不要 `DELETE /api/monitor/match-strategies/_default`**（兜底套餐，误删会让所有非绑定股票失预警；R9-3 已实施三重保护：前端按钮 disabled + 后端 403 + 友好 toast，详见 worklog R9-3 bug #2 / R10-1）
+11. **聚合推送窗口 `alert_aggregate_window_seconds` 最小 5s**（`engine.py` 的 `_aggregator_loop` 有 `max(5, ...)` 下限保护，避免误配 0/负值导致 CPU 空转；R11-4）
 
 ---
 
-## 九、本次文档对应的项目现状（2026-06-17）
+## 九、本次文档对应的项目现状（2026-06-21，R11 末）
 
-| 项目 | 状态 |
+| 模块 | 状态 |
 |------|------|
-| 监控引擎 | 已实施（R9-1 完成） |
-| Windows 跨平台适配 | 已完成 88%（R9-4，剩真实 Windows 机器验证） |
-| Bug 扫描 | 已完成（R9-3，3 高 + 6 中 + 8 低） |
+| 监控引擎 | 已实施（R9-1）+ P1 优化（R10-5）+ P2 优化（R11-4） |
+| 匹配策略层 | 已实施（R9-1）+ 前端管理 UI（R10-1）+ 复制功能（R11-2） |
+| 自选股管理 | 前端 UI（R10-1）+ 批量导入（R11-3） |
+| 健康度监控 | 后端端点（R10-5）+ Dashboard 卡片（R11-1）+ 阈值可配（R11-4） |
+| Windows 跨平台适配 | 88%（R9-4 / R10-4，剩真实 Windows 机器验证） |
+| Bug 扫描 | R9-3（9 个）+ R10-2（8 个）全部修复 |
 | 5 层架构 / DuckDB 8 表 / 26 因子 / 4 通道 | 全部就绪 |
-| 待修高优 bug | R9-3 #1 lifespan 冷启动 / #2 _default 保护 / #3 channels.yaml 格式 |
+| 待办 | 真实 Windows 验证 ps1 脚本 / 健康度历史持久化 / 聚合推送效果统计面板 |
 
-> 新接手者建议先读 `worklog.md` 末 3 段，了解 R9-3 / R9-4 已知 bug，再动手。
+> 新接手者建议先读 `worklog.md` 末 5 段，了解 R9 / R10 / R11 三轮进展与遗留项，再动手。
