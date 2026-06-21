@@ -11677,3 +11677,36 @@ Stage Summary:
   1. 更新 docs/API_CAPABILITY_MAP.md(接口能力地图,补 R9-R11 新增的 11 个端点)
   2. 更新 docs/USER_GUIDE.md(用户指南,补 7 tab 用法)
   3. 更新 docs/maintenance/ARCHITECTURE.md(5 层架构深度说明,补监控引擎层)
+
+---
+Task ID: R12-4-交接提示词组
+Agent: main
+Task: 生成一组场景化交接提示词,写入 docs/HANDOVER_PROMPTS.md
+
+Work Log:
+- 确认项目最新状态:FastAPI 200 / Next.js 200 / 7 tab / 5 策略 / 服务运行中
+- 设计 8 个场景化提示词,覆盖接手/修bug/加策略/加预警/加通道/加前端/部署/巡检
+- 每个提示词自包含(可整段复制给 AI),含必读文件+流程+worklog模板+约束
+- 统一通用约束段(不换语言/MVP/复用/每步验证/不破坏/worklog强制/TaskID规范/质量门禁)
+- 写入 docs/HANDOVER_PROMPTS.md(502 行)
+
+Stage Summary:
+- 新增文件: docs/HANDOVER_PROMPTS.md (502 行, 8 个场景提示词)
+- 提示词清单:
+  1. 首次接手冷启动(读文档+验服务+agent-browser截图)
+  2. 修 Bug(定位+最小改动+三步验证+worklog)
+  3. 加新选股策略(YAML+因子注册+run验证)
+  4. 加新预警规则+匹配策略(alert_templates+match_strategies+test端点)
+  5. 加新推送通道(BaseChannel+registry+channels.yaml+热加载)
+  6. 前端加新Tab/组件(shadcn-ui+代理路由+响应式+agent-browser)
+  7. Windows生产部署(路径替换+Mock→Real+nssm自启+health验证)
+  8. 日常巡检+自主开发(15分钟定时任务用,含候选方向)
+- 设计要点:
+  1. 每个提示词可直接复制粘贴,占位符用 <在此描述...> 标注
+  2. 通用约束段独立,8 个提示词共享,避免重复
+  3. 每个提示词含 worklog 追加模板,保证接手 AI 必留记录
+  4. 提示词 8 对应已配置的 15 分钟 webDevReview cron job
+  5. 末尾有使用说明(如何选场景+组合建议+维护规则)
+- 验证: 8 个提示词全确认 / 502 行 / 通用约束段完整
+- 未解决问题: 无(纯文档产出)
+- 下一阶段建议: 每轮重大架构变更后更新本文档对应提示词
