@@ -178,6 +178,18 @@ class RuleSet:
         """把行情快照 dict 映射成表达式变量字典。
 
         字段缺失时给默认值 0，不报错（PLAN §6.3）。
+
+        R14 形态预警扩展变量（基于 V8 快照 HisHigh/HisLow/OpenZAF/MA5Value）：
+          - his_high            历史最高价
+          - his_low             历史最低价
+          - open_pct            开盘涨跌幅（OpenZAF/100）
+          - ma5                 5 日均价
+          - last_vs_high_pct    距前高的距离 (his_high - last) / his_high
+                                 正值=还有空间到前高, 0=在前高, 负值=已破前高
+          - last_vs_low_pct     距前低的距离 (last - his_low) / his_low
+                                 正值=高于前低, 0=在前低, 负值=破前低
+          - last_vs_open_pct    盘中相对开盘的涨跌 (ZAF - OpenZAF) / 100
+                                 正值=盘中拉回(开盘低于现价), 负值=盘中回落
         """
         if not isinstance(snap, dict):
             return {}
@@ -207,12 +219,35 @@ class RuleSet:
         if not snap.get("auction_pct") and vopen_zaf:
             auction_pct = vopen_zaf / 100
 
+        # R14 形态预警扩展变量
+        his_high = _num("HisHigh")
+        his_low = _num("HisLow")
+        open_zaf = _num("OpenZAF", "VOpenZAF")
+        open_pct = open_zaf / 100 if open_zaf else 0.0
+        ma5 = _num("MA5Value")
+        last = _num("last", "Now", "MA5Value")
+
+        # 距前高/前低/开盘的距离（避免除零）
+        last_vs_high_pct = (his_high - last) / his_high if his_high > 0 else 0.0
+        last_vs_low_pct = (last - his_low) / his_low if his_low > 0 else 0.0
+        # 盘中相对开盘的涨跌 = 当前涨跌 - 开盘涨跌 (单位:小数)
+        # 正值=盘中拉回(现价高于开盘), 负值=盘中回落(现价低于开盘)
+        last_vs_open_pct = (zaf - open_zaf) / 100.0 if (zaf or open_zaf) else 0.0
+
         return {
             "pct_change": pct_change,
             "volume_ratio": _num("volume_ratio", "Wtb"),
             "main_inflow": _num("main_inflow", "Zjl"),
             "auction_pct": auction_pct,
-            "last": _num("last", "Now", "MA5Value"),
+            "last": last,
             "volume": _num("volume", "Volume"),
             "amount": _num("amount", "Amount"),
+            # R14 形态预警扩展
+            "his_high": his_high,
+            "his_low": his_low,
+            "open_pct": open_pct,
+            "ma5": ma5,
+            "last_vs_high_pct": last_vs_high_pct,
+            "last_vs_low_pct": last_vs_low_pct,
+            "last_vs_open_pct": last_vs_open_pct,
         }

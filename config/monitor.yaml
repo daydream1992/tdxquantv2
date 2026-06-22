@@ -216,6 +216,102 @@ alert_templates:
     default_params:
       inflow_threshold: 1000
 
+  # ============================================================================
+  # R14 形态预警零件（基于扩展变量 his_high/his_low/open_pct/last_vs_high_pct 等）
+  # ============================================================================
+  near_high_reject:
+    condition: last_vs_high_pct > 0 and last_vs_high_pct <= {high_proximity} and volume_ratio < {vol_ratio_threshold} and pct_change < {pct_threshold}
+    alert_type: near_high_reject
+    emoji: 📐
+    label: 接近前高回落
+    channels:
+    - websocket
+    - feishu
+    priority: high
+    description: 接近前高(距前高≤3%)但量能萎缩未冲过，准备回落
+    default_params:
+      high_proximity: 0.03
+      vol_ratio_threshold: 1.2
+      pct_threshold: 0.0
+  drop_exhaustion:
+    condition: pct_change < 0 and volume_ratio < {vol_ratio_threshold} and last_vs_low_pct < {low_proximity} and last_vs_low_pct > 0
+    alert_type: drop_exhaustion
+    emoji: 🕳️
+    label: 下跌枯竭
+    channels:
+    - websocket
+    - feishu
+    priority: high
+    description: 下跌中但缩量且接近前期低点，下跌动能枯竭准备反弹
+    default_params:
+      vol_ratio_threshold: 0.8
+      low_proximity: 0.05
+  open_bait_bears:
+    condition: open_pct < -{open_drop_pct} and last_vs_open_pct > {rebound_pct}
+    alert_type: open_bait_bears
+    emoji: 🪤
+    label: 开盘诱空
+    channels:
+    - websocket
+    - feishu
+    priority: high
+    description: 开盘下杀(-2%以上)但盘中拉回(+1%以上)，诱空洗盘
+    default_params:
+      open_drop_pct: 0.02
+      rebound_pct: 0.01
+  open_bait_bulls:
+    condition: open_pct > {open_rise_pct} and last_vs_open_pct < -{fallback_pct}
+    alert_type: open_bait_bulls
+    emoji: 🎣
+    label: 开盘诱多
+    channels:
+    - websocket
+    - feishu
+    priority: high
+    description: 开盘冲高(+2%以上)但盘中回落(-1%以上)，诱多出货
+    default_params:
+      open_rise_pct: 0.02
+      fallback_pct: 0.01
+  intraday_low_vol_bait:
+    condition: pct_change > {pct_threshold} and volume_ratio < {vol_ratio_threshold}
+    alert_type: intraday_low_vol_bait
+    emoji: 🫧
+    label: 无量诱多
+    channels:
+    - websocket
+    priority: medium
+    description: 盘中上涨但量能极度萎缩(量比<0.8)，无量拉升诱多
+    default_params:
+      pct_threshold: 0.02
+      vol_ratio_threshold: 0.8
+  intraday_real_drop:
+    condition: pct_change < -{pct_threshold} and volume_ratio > {vol_ratio_threshold} and main_inflow < 0
+    alert_type: intraday_real_drop
+    emoji: 💥
+    label: 急跌真跌
+    channels:
+    - websocket
+    - feishu
+    priority: high
+    description: 盘中急跌(-3%以上)且放量(量比>1.5)且主力净流出，真跌非洗盘
+    default_params:
+      pct_threshold: 0.03
+      vol_ratio_threshold: 1.5
+  rebound_setup:
+    condition: last_vs_low_pct < {low_proximity} and last_vs_low_pct > 0 and volume_ratio < {vol_ratio_threshold} and pct_change > -{pct_threshold}
+    alert_type: rebound_setup
+    emoji: 🔄
+    label: 准备反弹
+    channels:
+    - websocket
+    - feishu
+    priority: high
+    description: 接近前期低点+缩量+跌幅收窄，准备反弹
+    default_params:
+      low_proximity: 0.03
+      vol_ratio_threshold: 1.0
+      pct_threshold: 0.01
+
 # ============================================================================
 # 3. dedup 段：告警去重配置
 # ============================================================================
@@ -301,6 +397,79 @@ match_strategies:
     - feishu
     priority: high
   debounce_override: 60
+  trading_hours_override: null
+- match_id: pattern_alerts
+  name: 形态预警套餐(R14)
+  enabled: true
+  strategy_id: ''
+  scope:
+    markets:
+    - SH
+    - SZ
+    - BJ
+    exclude_st: true
+    exclude_suspended: true
+    exclude_codes: []
+    include_only: []
+  alerts:
+  - alert_type: near_high_reject
+    params:
+      high_proximity: 0.03
+      vol_ratio_threshold: 1.2
+      pct_threshold: 0.0
+    channels:
+    - websocket
+    - feishu
+    priority: high
+  - alert_type: drop_exhaustion
+    params:
+      vol_ratio_threshold: 0.8
+      low_proximity: 0.05
+    channels:
+    - websocket
+    - feishu
+    priority: high
+  - alert_type: open_bait_bears
+    params:
+      open_drop_pct: 0.02
+      rebound_pct: 0.01
+    channels:
+    - websocket
+    - feishu
+    priority: high
+  - alert_type: open_bait_bulls
+    params:
+      open_rise_pct: 0.02
+      fallback_pct: 0.01
+    channels:
+    - websocket
+    - feishu
+    priority: high
+  - alert_type: intraday_low_vol_bait
+    params:
+      pct_threshold: 0.02
+      vol_ratio_threshold: 0.8
+    channels:
+    - websocket
+    priority: medium
+  - alert_type: intraday_real_drop
+    params:
+      pct_threshold: 0.03
+      vol_ratio_threshold: 1.5
+    channels:
+    - websocket
+    - feishu
+    priority: high
+  - alert_type: rebound_setup
+    params:
+      low_proximity: 0.03
+      vol_ratio_threshold: 1.0
+      pct_threshold: 0.01
+    channels:
+    - websocket
+    - feishu
+    priority: high
+  debounce_override: 120
   trading_hours_override: null
 - match_id: _default
   name: 通用兜底监控

@@ -1,0 +1,997 @@
+     1→"""监控循环引擎主体（MonitorEngine）。
+     2→
+     3→设计要点（PLAN 第四章 + 第五~九章）：
+     4→
+     5→1. **daemon 线程**：FastAPI lifespan 启动；adapter 是同步 API，不用 asyncio。
+     6→2. **行情获取双模式**：
+     7→   - Mock 模式 → ``subscribe_hq`` 回调（MockAdapter 有 ``_push_loop`` 后台线程）
+     8→   - Real 模式 → 优先 ``subscribe_hq``，失败降级轮询 ``get_pricevol``
+     9→3. **时段控制**：``_in_trading_hours()`` 在 Mock 模式强制 True（沙箱友好），
+    10→   Real 模式严格执行 09:25-11:30 / 13:00-15:00。非交易时段 sleep 30s 不退出。
+    11→4. **防抖**：``(stock_code, alert_type)`` 在 ``alert_debounce_seconds`` 内只推一次。
+    12→   跨 match 共享同 key，避免多策略重复推（PLAN §14.8）。
+    13→5. **跨日清理**（§15.8）：主循环每次 tick 检测日期变更 → ``_on_new_day``
+    14→   清计数 + 清 debounce + 归档。
+    15→6. **异常隔离**：所有异常 try-except，只 warning/error，不阻断 FastAPI 主流程。
+    16→
+    17→求值入口 :meth:`on_quote` 在 Step 1-6 用 ``RuleSet`` 全局求值，Step 9 后改走
+    18→``MatchRegistry``（按 ``snap.strategy_id`` 取匹配策略）。
+    19→"""
+    20→from __future__ import annotations
+    21→
+    22→import json
+    23→import logging
+    24→import threading
+    25→import time
+    26→from datetime import datetime
+    27→from typing import Any
+    28→from uuid import uuid4
+    29→
+    30→from engine.api.state import EngineState
+    31→from engine.channels.base import ChannelPayload
+    32→from engine.channels.registry import get_registry
+    33→from engine.config.loader import ConfigLoader
+    34→from engine.expression.evaluator import ExpressionEvaluator, ExpressionError
+    35→from engine.monitor.match_registry import AlertRef, MatchRegistry, MatchStrategy
+    36→from engine.monitor.rules import AlertRule, RuleSet
+    37→
+    38→logger = logging.getLogger(__name__)
+    39→
+    40→
+    41→# ============================================================================
+    42→# MonitorEngine 单例
+    43→# ============================================================================
+    44→
+    45→
+    46→class MonitorEngine:
+    47→    """监控循环引擎（daemon 线程）。
+    48→
+    49→    用法：
+    50→        >>> mon = MonitorEngine()
+    51→        >>> mon.start()
+    52→        >>> ...  # FastAPI 运行期
+    53→        >>> mon.stop()
+    54→    """
+    55→
+    56→    _instance: "MonitorEngine | None" = None
+    57→    _instance_lock = threading.Lock()
+    58→
+    59→    def __new__(cls) -> "MonitorEngine":
+    60→        with cls._instance_lock:
+    61→            if cls._instance is None:
+    62→                cls._instance = super().__new__(cls)
+    63→                cls._instance._initialized = False
+    64→            return cls._instance
+    65→
+    66→    def __init__(self) -> None:
+    67→        if getattr(self, "_initialized", False):
+    68→            return
+    69→        self._initialized = True
+    70→
+    71→        # 线程控制
+    72→        self._thread: threading.Thread | None = None
+    73→        self._stop_event = threading.Event()
+    74→        self._lock = threading.RLock()
+    75→
+    76→        # P2-1: 聚合推送独立 flush 线程（不依赖 tick 循环，
+    77→        # 避免行情停推/非交易时段聚合队列不 flush 的问题）
+    78→        self._agg_thread: threading.Thread | None = None
+    79→
+    80→        # 防抖：{(stock_code, alert_type): last_ts}
+    81→        self._debounce: dict[tuple[str, str], float] = {}
+    82→
+    83→        # subscribe_hq 状态
+    84→        self._subscribed = False
+    85→
+    86→        # 健康度（PLAN §15.6 P1，先记录基础指标）
+    87→        self._last_quote_ts: float = 0.0
+    88→        self._eval_count: int = 0
+    89→        self._error_count: int = 0
+    90→        self._last_error: str = ""
+    91→
+    92→        # P1: 聚合推送队列
+    93→        # key = (strategy_id, priority), value = list[payload]
+    94→        # 窗口内同 strategy+priority 的信号聚合为一条摘要推送
+    95→        self._agg_queue: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    96→        self._agg_last_flush: dict[tuple[str, str], float] = {}
+    97→
+    98→        # 跨日检测
+    99→        self._last_date: datetime.date = datetime.now().date()
+   100→
+   101→        # 求值器（避免每 tick new 一个）
+   102→        self._evaluator = ExpressionEvaluator()
+   103→
+   104→    # ------------------------------------------------------------------
+   105→    # 生命周期
+   106→    # ------------------------------------------------------------------
+   107→
+   108→    def start(self) -> None:
+   109→        """启动 daemon 线程（lifespan 调用，幂等）。"""
+   110→        # 灰度开关（PLAN §13.3）
+   111→        cfg = ConfigLoader()
+   112→        if not cfg.get("monitor.enabled", True):
+   113→            logger.info("MonitorEngine 已禁用 (monitor.enabled=false)")
+   114→            return
+   115→
+   116→        if self._thread and self._thread.is_alive():
+   117→            logger.debug("MonitorEngine 线程已在运行")
+   118→            return
+   119→
+   120→        self._stop_event.clear()
+   121→        self._thread = threading.Thread(
+   122→            target=self._run, name="MonitorEngine", daemon=True
+   123→        )
+   124→        self._thread.start()
+   125→        logger.info("MonitorEngine 已启动")
+   126→
+   127→        # P2-1: 起独立的聚合 flush 线程，避免 tick 循环依赖
+   128→        # （行情停推/非交易时段 tick 不调 _flush_all_aggregation）
+   129→        if not (self._agg_thread and self._agg_thread.is_alive()):
+   130→            self._agg_thread = threading.Thread(
+   131→                target=self._aggregator_loop,
+   132→                name="agg-flush",
+   133→                daemon=True,
+   134→            )
+   135→            self._agg_thread.start()
+   136→            logger.info("MonitorEngine 聚合 flush 线程已启动")
+   137→
+   138→    def stop(self) -> None:
+   139→        """停止 daemon 线程（lifespan 关闭时调）。"""
+   140→        self._stop_event.set()
+   141→        # 取消订阅（清 Mock 推送线程）
+   142→        try:
+   143→            from engine.data_adapter.factory import get_adapter
+   144→
+   145→            adapter = get_adapter()
+   146→            if hasattr(adapter, "unsubscribe_hq"):
+   147→                adapter.unsubscribe_hq([])
+   148→        except Exception as exc:  # noqa: BLE001
+   149→            logger.debug("unsubscribe_hq 失败: %s", exc)
+   150→
+   151→        if self._thread:
+   152→            self._thread.join(timeout=5)
+   153→            self._thread = None
+   154→        # P2-1: 等 agg-flush 线程退出
+   155→        if self._agg_thread:
+   156→            self._agg_thread.join(timeout=5)
+   157→            self._agg_thread = None
+   158→        self._subscribed = False
+   159→        logger.info("MonitorEngine 已停止")
+   160→
+   161→    # ------------------------------------------------------------------
+   162→    # 主循环
+   163→    # ------------------------------------------------------------------
+   164→
+   165→    def _run(self) -> None:
+   166→        """主循环：检测跨日 → 检测交易时段 → tick。"""
+   167→        while not self._stop_event.is_set():
+   168→            try:
+   169→                # 跨日检测（§15.8）
+   170→                now_date = datetime.now().date()
+   171→                if now_date != self._last_date:
+   172→                    self._on_new_day()
+   173→                    self._last_date = now_date
+   174→
+   175→                # 非交易时段空转
+   176→                if not self._in_trading_hours():
+   177→                    self._stop_event.wait(30)
+   178→                    continue
+   179→
+   180→                # 行情获取（subscribe 或轮询）
+   181→                self._tick()
+   182→
+   183→            except Exception as exc:  # noqa: BLE001
+   184→                self._error_count += 1
+   185→                self._last_error = str(exc)
+   186→                logger.error("MonitorEngine 循环异常: %s", exc)
+   187→                self._stop_event.wait(10)  # 退避 10s
+   188→
+   189→    def _tick(self) -> None:
+   190→        """单次 tick：subscribe 模式 sleep；轮询模式主动拉。"""
+   191→        cfg = ConfigLoader()
+   192→        if self._should_poll(cfg):
+   193→            self._poll_and_eval()
+   194→        else:
+   195→            # subscribe 模式：行情由 callback 推送，主循环保活 + 顺带清 debounce + flush 聚合
+   196→            self._ensure_subscribed()
+   197→            self._cleanup_debounce()
+   198→            self._flush_all_aggregation()
+   199→            self._stop_event.wait(
+   200→                float(cfg.get("monitor.poll_interval_seconds", 10))
+   201→            )
+   202→
+   203→    def _should_poll(self, cfg: ConfigLoader) -> bool:
+   204→        """是否走轮询模式（subscribe_hq 不可用时降级）。"""
+   205→        if self._subscribed:
+   206→            return False
+   207→        # 尝试 subscribe，失败则轮询
+   208→        self._ensure_subscribed()
+   209→        return not self._subscribed
+   210→
+   211→    # ------------------------------------------------------------------
+   212→    # 行情获取
+   213→    # ------------------------------------------------------------------
+   214→
+   215→    def _ensure_subscribed(self) -> None:
+   216→        """首次 / 重连时调 subscribe_hq（成功后回调驱动）。"""
+   217→        if self._subscribed:
+   218→            return
+   219→        try:
+   220→            from engine.data_adapter.factory import get_adapter
+   221→
+   222→            adapter = get_adapter()
+   223→        except Exception as exc:  # noqa: BLE001
+   224→            logger.warning("取 adapter 失败: %s", exc)
+   225→            return
+   226→
+   227→        codes = self._get_monitor_codes()
+   228→        if not codes:
+   229→            return
+   230→
+   231→        try:
+   232→            ok = adapter.subscribe_hq(codes, callback=self.on_quote)
+   233→            if ok:
+   234→                self._subscribed = True
+   235→                logger.info(
+   236→                    "MonitorEngine subscribe_hq 成功: %d 个代码", len(codes)
+   237→                )
+   238→            else:
+   239→                logger.warning("subscribe_hq 返回 False，降级轮询模式")
+   240→        except Exception as exc:  # noqa: BLE001
+   241→            logger.warning("subscribe_hq 异常，降级轮询模式: %s", exc)
+   242→
+   243→    def _poll_and_eval(self) -> None:
+   244→        """轮询模式：主动调 get_pricevol，对每只股票 on_quote。"""
+   245→        cfg = ConfigLoader()
+   246→        interval = float(cfg.get("monitor.poll_interval_seconds", 10))
+   247→        try:
+   248→            from engine.data_adapter.factory import get_adapter
+   249→
+   250→            adapter = get_adapter()
+   251→        except Exception as exc:  # noqa: BLE001
+   252→            logger.warning("取 adapter 失败: %s", exc)
+   253→            self._stop_event.wait(interval)
+   254→            return
+   255→
+   256→        codes = self._get_monitor_codes()
+   257→        if not codes:
+   258→            self._stop_event.wait(interval)
+   259→            return
+   260→
+   261→        try:
+   262→            pv = adapter.get_pricevol(codes)
+   263→            if pv and isinstance(pv, dict):
+   264→                # 找 strategy_id 归属（从 state 订阅缓存）
+   265→                strat_map = self._code_to_strategy_map()
+   266→                for code, fields in pv.items():
+   267→                    snap = self._normalize_snap(code, fields)
+   268→                    snap["strategy_id"] = strat_map.get(code, "")
+   269→                    self.on_quote(snap)
+   270→        except Exception as exc:  # noqa: BLE001
+   271→            self._error_count += 1
+   272→            self._last_error = str(exc)
+   273→            logger.error("轮询失败: %s", exc)
+   274→
+   275→        self._stop_event.wait(interval)
+   276→
+   277→    # ------------------------------------------------------------------
+   278→    # 行情回调 → 求值
+   279→    # ------------------------------------------------------------------
+   280→
+   281→    def on_quote(self, snap: dict[str, Any]) -> None:
+   282→        """行情回调统一入口（subscribe 模式由 adapter 推；轮询模式由 _poll_and_eval 调）。
+   283→
+   284→        Step 1-6：用 ``RuleSet.evaluate`` 全局求值。
+   285→        Step 9+：走 ``MatchRegistry``（按 ``snap.strategy_id`` 取 match）。
+   286→        """
+   287→        if not isinstance(snap, dict):
+   288→            return
+   289→        if not self._in_trading_hours():
+   290→            return
+   291→        code = snap.get("code") or snap.get("Code") or ""
+   292→        if not code:
+   293→            return
+   294→        snap.setdefault("code", code)
+   295→
+   296→        self._last_quote_ts = time.time()
+   297→
+   298→        # 规一化 V8 快照字段（subscribe_hq 推的是 raw V8 dict）
+   299→        snap = self._normalize_snap(code, snap)
+   300→        # strategy_id 由订阅注入（_ensure_subscribed 时已挂到 EngineState）；
+   301→        # 若 snap 缺则从 state 反查
+   302→        if not snap.get("strategy_id"):
+   303→            snap["strategy_id"] = self._code_to_strategy_map().get(code, "")
+   304→
+   305→        try:
+   306→            # Step 9+：走 MatchRegistry（按 snap.strategy_id 取 match + scope 过滤）
+   307→            match_hits = MatchRegistry.evaluate(snap)
+   308→        except Exception as exc:  # noqa: BLE001
+   309→            self._error_count += 1
+   310→            self._last_error = str(exc)
+   311→            logger.warning("on_quote 求值异常 %s: %s", code, exc)
+   312→            return
+   313→
+   314→        # 跨 match 去重：同 (code, alert_type) 命中多个 match 时只推一次，
+   315→        # 但 payload.extra.match_ids 标注所有命中的 match_id（PLAN §14.8）
+   316→        fired_by_type: dict[str, list[str]] = {}
+   317→        for match, alert_ref, _condition in match_hits:
+   318→            fired_by_type.setdefault(alert_ref.alert_type, []).append(match.match_id)
+   319→
+   320→        # _eval_count 放在锁内，避免 subscribe 模式下并发计数丢失（bug #10）
+   321→        with self._lock:
+   322→            self._eval_count += 1
+   323→        # 遍历 match_hits，跳过已 debounced / 已 fire 的同类型
+   324→        fired_types: set[str] = set()
+   325→        for match, alert_ref, condition in match_hits:
+   326→            atype = alert_ref.alert_type
+   327→            if atype in fired_types:
+   328→                # 同股票同类型本轮已推一次，跨 match 去重
+   329→                continue
+   330→            if self._is_debounced(code, atype, match.debounce_override):
+   331→                continue
+   332→            try:
+   333→                self._fire_match(match, alert_ref, condition, snap, fired_by_type[atype])
+   334→                fired_types.add(atype)
+   335→            except Exception as exc:  # noqa: BLE001
+   336→                self._error_count += 1
+   337→                self._last_error = str(exc)
+   338→                logger.error("fire 异常 %s %s: %s", code, atype, exc)
+   339→            self._mark_debounce(code, atype)
+   340→
+   341→    def _evaluate(self, snap: dict[str, Any]) -> list[AlertRule]:
+   342→        """遗留接口：用 RuleSet 全局求值（Step 9 后改走 MatchRegistry，本方法保留兼容）。"""
+   343→        return RuleSet.evaluate(snap)
+   344→
+   345→    # ------------------------------------------------------------------
+   346→    # 时段控制
+   347→    # ------------------------------------------------------------------
+   348→
+   349→    def _in_trading_hours(self) -> bool:
+   350→        """是否在交易时段（Mock 模式强制 True）。"""
+   351→        cfg = ConfigLoader()
+   352→        mode = str(cfg.get("app.adapter_mode", "mock"))
+   353→        if mode == "mock":
+   354→            return True
+   355→        th = cfg.get("monitor.trading_hours", {}) or {}
+   356→        if not th:
+   357→            return True
+   358→        hhmm = datetime.now().strftime("%H:%M")
+   359→        m_start = th.get("morning_start", "09:25")
+   360→        m_end = th.get("morning_end", "11:30")
+   361→        a_start = th.get("afternoon_start", "13:00")
+   362→        a_end = th.get("afternoon_end", "15:00")
+   363→        return (m_start <= hhmm < m_end) or (a_start <= hhmm < a_end)
+   364→
+   365→    # ------------------------------------------------------------------
+   366→    # 防抖
+   367→    # ------------------------------------------------------------------
+   368→
+   369→    def _is_debounced(
+   370→        self, code: str, alert_type: str, debounce_override: int | None = None
+   371→    ) -> bool:
+   372→        """是否在防抖窗口内（True=跳过推送）。
+   373→
+   374→        Args:
+   375→            code: 股票代码
+   376→            alert_type: 预警类型
+   377→            debounce_override: match 级覆盖秒数；None 时用全局 ``alert_debounce_seconds``
+   378→        """
+   379→        cfg = ConfigLoader()
+   380→        if debounce_override is not None:
+   381→            window = float(debounce_override)
+   382→        else:
+   383→            window = float(cfg.get("monitor.alert_debounce_seconds", 30))
+   384→        key = (code, alert_type)
+   385→        now = time.time()
+   386→        with self._lock:
+   387→            last = self._debounce.get(key, 0.0)
+   388→            return (now - last) < window
+   389→
+   390→    def _mark_debounce(self, code: str, alert_type: str) -> None:
+   391→        with self._lock:
+   392→            self._debounce[(code, alert_type)] = time.time()
+   393→
+   394→    def _cleanup_debounce(self) -> None:
+   395→        """清理过期 debounce key（避免内存泄漏）。
+   396→
+   397→        cutoff 取 ``max(window*10, 3600)`` 秒前（bug #11：原 86400s 频率太低，
+   398→        subscribe 模式下窗口短时 key 会堆积几小时才清）。
+   399→        """
+   400→        cfg = ConfigLoader()
+   401→        window = float(cfg.get("monitor.alert_debounce_seconds", 30))
+   402→        cutoff = time.time() - max(window * 10, 3600)
+   403→        with self._lock:
+   404→            stale = [k for k, ts in self._debounce.items() if ts < cutoff]
+   405→            for k in stale:
+   406→                self._debounce.pop(k, None)
+   407→            if stale:
+   408→                logger.debug("清理 %d 个过期 debounce key", len(stale))
+   409→
+   410→    # ------------------------------------------------------------------
+   411→    # 触发：落库 + 计数 + 推送
+   412→    # ------------------------------------------------------------------
+   413→
+   414→    def _fire(
+   415→        self, rule: AlertRule, snap: dict[str, Any]
+   416→    ) -> None:
+   417→        """遗留接口（Step 1-6 用）：用 RuleSet 触发。Step 9 后实际调 :meth:`_fire_match`。"""
+   418→        code = str(snap.get("code", ""))
+   419→        name = str(snap.get("name", "") or snap.get("Name", "") or "")
+   420→        strategy_id = str(snap.get("strategy_id", ""))
+   421→        signal_id = str(uuid4())
+   422→
+   423→        condition_expr = RuleSet.render_condition(
+   424→            rule.condition, params={}, defaults=rule.default_params
+   425→        )
+   426→        severity = self._priority_to_severity(rule.priority)
+   427→
+   428→        self._insert_signal_event(
+   429→            event_id=signal_id,
+   430→            strategy_id=strategy_id,
+   431→            stock_code=code,
+   432→            stock_name=name,
+   433→            alert_type=rule.alert_type,
+   434→            condition_expr=condition_expr,
+   435→            snapshot=json.dumps(snap, ensure_ascii=False, default=str),
+   436→            severity=severity,
+   437→            channels_fired=json.dumps(rule.channels, ensure_ascii=False),
+   438→        )
+   439→        EngineState().record_signal(rule.alert_type)
+   440→        payload = ChannelPayload(
+   441→            signal_id=signal_id,
+   442→            signal_type=rule.alert_type,
+   443→            strategy_id=strategy_id,
+   444→            stock_code=code,
+   445→            stock_name=name,
+   446→            title=self._build_title(rule, snap),
+   447→            content=self._build_content(rule, snap),
+   448→            severity=severity,
+   449→            priority=rule.priority,
+   450→            extra={
+   451→                "pct_change": snap.get("pct_change"),
+   452→                "last": snap.get("last"),
+   453→                "volume_ratio": snap.get("volume_ratio"),
+   454→                "alert_type": rule.alert_type,
+   455→            },
+   456→        )
+   457→        try:
+   458→            results = get_registry().dispatch(payload, channels=rule.channels)
+   459→            logger.info(
+   460→                "预警触发 %s %s %s -> %s",
+   461→                code, rule.alert_type, name,
+   462→                [(r.channel, r.ok) for r in results],
+   463→            )
+   464→        except Exception as exc:  # noqa: BLE001
+   465→            self._error_count += 1
+   466→            self._last_error = str(exc)
+   467→            logger.warning("推送通道异常 %s %s: %s", code, rule.alert_type, exc)
+   468→
+   469→    def _fire_match(
+   470→        self,
+   471→        match: MatchStrategy,
+   472→        alert_ref: AlertRef,
+   473→        condition_expr: str,
+   474→        snap: dict[str, Any],
+   475→        match_ids: list[str],
+   476→    ) -> None:
+   477→        """触发一次预警（match 套餐路径，Step 9+ 主入口）。
+   478→
+   479→        Args:
+   480→            match: 命中的 MatchStrategy
+   481→            alert_ref: 命中的 AlertRef
+   482→            condition_expr: 已渲染的条件表达式（落库留痕）
+   483→            snap: 行情快照
+   484→            match_ids: 同 (code, alert_type) 跨 match 命中的所有 match_id（标注去重）
+   485→        """
+   486→        code = str(snap.get("code", ""))
+   487→        name = str(snap.get("name", "") or snap.get("Name", "") or "")
+   488→        strategy_id = str(snap.get("strategy_id", "") or match.strategy_id)
+   489→        signal_id = str(uuid4())
+   490→
+   491→        severity = self._priority_to_severity(alert_ref.priority)
+   492→        # 通道：alert_ref.channels 非空则用，否则查模板默认
+   493→        channels = list(alert_ref.channels or [])
+   494→        if not channels:
+   495→            tpl = RuleSet.get_template(alert_ref.alert_type) or {}
+   496→            channels = list(tpl.get("channels", []) or [])
+   497→
+   498→        # 1. 落库 signal_events
+   499→        self._insert_signal_event(
+   500→            event_id=signal_id,
+   501→            strategy_id=strategy_id,
+   502→            stock_code=code,
+   503→            stock_name=name,
+   504→            alert_type=alert_ref.alert_type,
+   505→            condition_expr=condition_expr,
+   506→            snapshot=json.dumps(snap, ensure_ascii=False, default=str),
+   507→            severity=severity,
+   508→            channels_fired=json.dumps(channels, ensure_ascii=False),
+   509→        )
+   510→
+   511→        # 2. 内存计数
+   512→        EngineState().record_signal(alert_ref.alert_type)
+   513→
+   514→        # 3. 推送通道（extra.match_ids 标注所有命中 match）
+   515→        # P1: 分级值班 — high 优先级立即推, medium/low 走聚合队列
+   516→        payload = ChannelPayload(
+   517→            signal_id=signal_id,
+   518→            signal_type=alert_ref.alert_type,
+   519→            strategy_id=strategy_id,
+   520→            stock_code=code,
+   521→            stock_name=name,
+   522→            title=self._build_title_match(alert_ref, snap),
+   523→            content=self._build_content_match(alert_ref, snap),
+   524→            severity=severity,
+   525→            priority=alert_ref.priority,
+   526→            extra={
+   527→                "pct_change": snap.get("pct_change"),
+   528→                "last": snap.get("last"),
+   529→                "volume_ratio": snap.get("volume_ratio"),
+   530→                "alert_type": alert_ref.alert_type,
+   531→                "match_ids": match_ids,
+   532→            },
+   533→        )
+   534→
+   535→        # P1 分级值班: high 立即推全通道; medium 立即推 websocket, feishu 走聚合;
+   536→        #            low 只推 websocket, 其他走聚合
+   537→        if alert_ref.priority == "high":
+   538→            try:
+   539→                results = get_registry().dispatch(payload, channels=channels)
+   540→                logger.info(
+   541→                    "预警触发 %s %s %s match=%s -> %s",
+   542→                    code, alert_ref.alert_type, name, match_ids,
+   543→                    [(r.channel, r.ok) for r in results],
+   544→                )
+   545→            except Exception as exc:  # noqa: BLE001
+   546→                self._error_count += 1
+   547→                self._last_error = str(exc)
+   548→                logger.warning("推送通道异常 %s %s: %s", code, alert_ref.alert_type, exc)
+   549→        else:
+   550→            # medium/low: websocket 立即推, 其他通道聚合
+   551→            immediate_ch = [c for c in channels if c == "websocket"]
+   552→            agg_ch = [c for c in channels if c != "websocket"]
+   553→            if immediate_ch:
+   554→                try:
+   555→                    get_registry().dispatch(payload, channels=immediate_ch)
+   556→                except Exception as exc:  # noqa: BLE001
+   557→                    self._error_count += 1
+   558→                    self._last_error = str(exc)
+   559→                    logger.debug("websocket 推送异常 %s: %s", code, exc)
+   560→            if agg_ch:
+   561→                self._enqueue_aggregation(strategy_id, alert_ref.priority, payload, agg_ch)
+   562→                logger.debug(
+   563→                    "聚合入队 %s %s %s (队列=%d)",
+   564→                    code, alert_ref.alert_type, alert_ref.priority,
+   565→                    len(self._agg_queue.get((strategy_id, alert_ref.priority), [])),
+   566→                )
+   567→
+   568→    def _insert_signal_event(
+   569→        self,
+   570→        *,
+   571→        event_id: str,
+   572→        strategy_id: str,
+   573→        stock_code: str,
+   574→        stock_name: str,
+   575→        alert_type: str,
+   576→        condition_expr: str,
+   577→        snapshot: str,
+   578→        severity: str,
+   579→        channels_fired: str,
+   580→    ) -> None:
+   581→        """写 signal_events 表（表已存在，不建表）。"""
+   582→        try:
+   583→            from engine.storage.duckdb_store import DuckDBStore
+   584→
+   585→            store = DuckDBStore()
+   586→            store.execute(
+   587→                """
+   588→                INSERT INTO signal_events
+   589→                    (event_id, strategy_id, stock_code, stock_name, alert_type,
+   590→                     condition_expr, snapshot, severity, channels_fired, triggered_at)
+   591→                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+   592→                """,
+   593→                [
+   594→                    event_id, strategy_id, stock_code, stock_name, alert_type,
+   595→                    condition_expr, snapshot, severity, channels_fired,
+   596→                ],
+   597→            )
+   598→        except Exception as exc:  # noqa: BLE001
+   599→            logger.warning("signal_events 写入失败: %s", exc)
+   600→
+   601→    # ------------------------------------------------------------------
+   602→    # 监控代码来源
+   603→    # ------------------------------------------------------------------
+   604→
+   605→    def _get_monitor_codes(self) -> list[str]:
+   606→        """获取当前要监控的代码列表。
+   607→
+   608→        优先级：
+   609→        1. ``EngineState.list_subscriptions()`` 的 stock_code
+   610→        2. 兜底：``selection_results`` 表最近一次选股 Top N（复用 monitor.py 逻辑）
+   611→        """
+   612→        state = EngineState()
+   613→        subs = state.list_subscriptions()
+   614→        codes: list[str] = []
+   615→        seen: set[str] = set()
+   616→        for s in subs:
+   617→            c = str(s.get("stock_code", "")).strip()
+   618→            if c and c not in seen:
+   619→                codes.append(c)
+   620→                seen.add(c)
+   621→        if codes:
+   622→            return codes[:200]  # 上限 200（subscribe_hq 分批内部处理）
+   623→
+   624→        # 兜底：从 selection_results 取 Top 50
+   625→        try:
+   626→            from engine.storage.duckdb_store import DuckDBStore
+   627→
+   628→            store = DuckDBStore()
+   629→            if not store.table_exists("selection_results"):
+   630→                return []
+   631→            df = store.query(
+   632→                "SELECT DISTINCT stock_code FROM selection_results "
+   633→                "ORDER BY created_at DESC LIMIT 50"
+   634→            )
+   635→            for v in df["stock_code"].astype(str).tolist():
+   636→                c = v.strip()
+   637→                if c and c not in seen:
+   638→                    codes.append(c)
+   639→                    seen.add(c)
+   640→                    # 注入 EngineState（subscriber=monitor_fallback，strategy_id 空）
+   641→                    state.upsert_subscription(
+   642→                        c,
+   643→                        strategy_id="",
+   644→                        subscriber="monitor_fallback",
+   645→                        batch_no=1,
+   646→                    )
+   647→        except Exception as exc:  # noqa: BLE001
+   648→            logger.warning("兜底取 selection_results 失败: %s", exc)
+   649→        return codes
+   650→
+   651→    def _code_to_strategy_map(self) -> dict[str, str]:
+   652→        """``{stock_code: strategy_id}``，从 EngineState 订阅缓存读。"""
+   653→        out: dict[str, str] = {}
+   654→        for s in EngineState().list_subscriptions():
+   655→            out[str(s.get("stock_code", ""))] = str(s.get("strategy_id", ""))
+   656→        return out
+   657→
+   658→    # ------------------------------------------------------------------
+   659→    # 快照规一化（V8 raw → 标准 snap 字段）
+   660→    # ------------------------------------------------------------------
+   661→
+   662→    def _normalize_snap(self, code: str, raw: dict[str, Any]) -> dict[str, Any]:
+   663→        """把 V8 raw 快照 / get_pricevol 结果规一化为标准 snap。
+   664→
+   665→        输出字段：code / name / pct_change / volume_ratio / main_inflow /
+   666→        auction_pct / last / volume / amount / strategy_id（外部再注入）
+   667→        """
+   668→        if not isinstance(raw, dict):
+   669→            raw = {}
+   670→
+   671→        def _num(*keys: str, default: float = 0.0) -> float:
+   672→            for k in keys:
+   673→                v = raw.get(k)
+   674→                if v is None or v == "":
+   675→                    continue
+   676→                try:
+   677→                    f = float(v)
+   678→                    if f == f:
+   679→                        return f
+   680→                except (TypeError, ValueError):
+   681→                    continue
+   682→            return default
+   683→
+   684→        # pct_change: 优先显式，其次 ZAF/100，否则 Now/LastClose-1
+   685→        # bug #12: 原 `if not pct:` 把 0.0 当 falsy 跳过, 改为显式 None 判断
+   686→        pct = _num("pct_change", default=float("nan"))
+   687→        if pct != pct:  # NaN 检查
+   688→            zaf = _num("ZAF")
+   689→            pct = zaf / 100 if zaf else 0.0
+   690→        if pct != pct:  # 仍 NaN, 走 Now/LastClose
+   691→            now = _num("Now", "MA5Value")
+   692→            last_close = _num("LastClose")
+   693→            if now > 0 and last_close > 0:
+   694→                pct = now / last_close - 1
+   695→            else:
+   696→                pct = 0.0
+   697→
+   698→        # main_inflow: Zjl
+   699→        main_inflow = _num("main_inflow", "Zjl")
+   700→
+   701→        # volume_ratio: Wtb
+   702→        volume_ratio = _num("volume_ratio", "Wtb")
+   703→
+   704→        # auction_pct: VOpenZAF/100
+   705→        vopen = _num("VOpenZAF")
+   706→        auction_pct = _num("auction_pct", default=float("nan"))
+   707→        if auction_pct != auction_pct:  # NaN
+   708→            auction_pct = vopen / 100 if vopen else 0.0
+   709→
+   710→        last = _num("last", "Now", "MA5Value")
+   711→        volume = _num("volume", "Volume")
+   712→        amount = _num("amount", "Amount")
+   713→        name = str(raw.get("name") or raw.get("Name") or "")
+   714→
+   715→        snap: dict[str, Any] = {
+   716→            "code": code,
+   717→            "name": name,
+   718→            "pct_change": pct,
+   719→            "volume_ratio": volume_ratio,
+   720→            "main_inflow": main_inflow,
+   721→            "auction_pct": auction_pct,
+   722→            "last": last,
+   723→            "volume": volume,
+   724→            "amount": amount,
+   725→        }
+   726→        # 保留原 raw 供 debug
+   727→        snap["_raw"] = {k: v for k, v in raw.items() if k not in snap}
+   728→        return snap
+   729→
+   730→    # ------------------------------------------------------------------
+   731→    # 跨日清理（§15.8）
+   732→    # ------------------------------------------------------------------
+   733→
+   734→    def _on_new_day(self) -> None:
+   735→        """跨日清理：信号计数清零 + 清 debounce + 归档 active=false 订阅。"""
+   736→        try:
+   737→            EngineState().reset_daily()
+   738→        except Exception as exc:  # noqa: BLE001
+   739→            logger.warning("reset_daily 失败: %s", exc)
+   740→
+   741→        # 清所有 debounce key（跨日彻底清，不只是过期）
+   742→        with self._lock:
+   743→            n = len(self._debounce)
+   744→            self._debounce.clear()
+   745→        logger.info("跨日清理完成: 清零信号计数 + 清 %d 个 debounce key", n)
+   746→
+   747→        # 归档：把 monitor_subscriptions 表中 active=false 的记录补 unsubscribed_at
+   748→        # 用 DELETE+INSERT 规避 DuckDB UPDATE 索引 bug；这里直接 DELETE active=false 旧记录
+   749→        try:
+   750→            from engine.storage.duckdb_store import DuckDBStore
+   751→
+   752→            store = DuckDBStore()
+   753→            if store.table_exists("monitor_subscriptions"):
+   754→                store.execute(
+   755→                    "DELETE FROM monitor_subscriptions WHERE active = false"
+   756→                )
+   757→        except Exception as exc:  # noqa: BLE001
+   758→            logger.debug("归档订阅失败（可忽略）: %s", exc)
+   759→
+   760→    # ------------------------------------------------------------------
+   761→    # 文案 / 优先级
+   762→    # ------------------------------------------------------------------
+   763→
+   764→    def _build_title(self, rule: AlertRule, snap: dict[str, Any]) -> str:
+   765→        """构造推送标题（RuleSet 路径）。"""
+   766→        return self._format_title(rule.alert_type, snap)
+   767→
+   768→    def _build_title_match(self, alert_ref: AlertRef, snap: dict[str, Any]) -> str:
+   769→        """构造推送标题（Match 路径）。"""
+   770→        return self._format_title(alert_ref.alert_type, snap)
+   771→
+   772→    def _format_title(self, alert_type: str, snap: dict[str, Any]) -> str:
+   773→        name = str(snap.get("name", "") or "")
+   774→        pct = snap.get("pct_change", 0)
+   775→        pct_str = f"{pct * 100:+.2f}%" if isinstance(pct, (int, float)) else ""
+   776→        prefix = self._alert_prefix(alert_type)
+   777→        return f"{prefix} {name}({snap.get('code','')}) {pct_str}".strip()
+   778→
+   779→    @staticmethod
+   780→    def _alert_prefix(alert_type: str) -> str:
+   781→        """alert_type → emoji 前缀。
+   782→
+   783→        bug #17: 原 prefix_map 硬编码 8 项, 新增 alert_type 需同步改字典。
+   784→        改为从 alert_templates YAML 读 ``emoji`` 字段, 没有则用默认 ``📌``。
+   785→        """
+   786→        try:
+   787→            from engine.monitor.rules import RuleSet
+   788→
+   789→            tpl = RuleSet.get_template(alert_type) or {}
+   790→            emoji = str(tpl.get("emoji", "")).strip()
+   791→            label = str(tpl.get("label", "")).strip()
+   792→            if emoji and label:
+   793→                return f"{emoji} {label}"
+   794→            if label:
+   795→                return f"📌 {label}"
+   796→        except Exception:  # noqa: BLE001
+   797→            pass
+   798→        return f"📌 {alert_type}"
+   799→
+   800→    def _build_content(self, rule: AlertRule, snap: dict[str, Any]) -> str:
+   801→        """构造推送内容（RuleSet 路径）。"""
+   802→        tpl = RuleSet.get_template(rule.alert_type) or {}
+   803→        description = str(tpl.get("description", ""))
+   804→        return self._format_content(rule.alert_type, snap, description)
+   805→
+   806→    def _build_content_match(self, alert_ref: AlertRef, snap: dict[str, Any]) -> str:
+   807→        """构造推送内容（Match 路径）。"""
+   808→        tpl = RuleSet.get_template(alert_ref.alert_type) or {}
+   809→        description = str(tpl.get("description", ""))
+   810→        return self._format_content(alert_ref.alert_type, snap, description)
+   811→
+   812→    def _format_content(
+   813→        self, alert_type: str, snap: dict[str, Any], description: str
+   814→    ) -> str:
+   815→        parts = [
+   816→            f"代码: {snap.get('code','')}",
+   817→            f"名称: {snap.get('name','')}",
+   818→            f"涨跌幅: {snap.get('pct_change', 0) * 100:+.2f}%",
+   819→            f"量比: {snap.get('volume_ratio', 0):.2f}",
+   820→            f"主力净流入: {snap.get('main_inflow', 0):.0f}万",
+   821→        ]
+   822→        if description:
+   823→            parts.append(f"说明: {description}")
+   824→        return " | ".join(parts)
+   825→
+   826→    @staticmethod
+   827→    def _priority_to_severity(priority: str) -> str:
+   828→        """优先级 → 严重度（high→error / medium→warn / low→info）。"""
+   829→        p = (priority or "medium").lower()
+   830→        if p == "high":
+   831→            return "error"
+   832→        if p == "medium":
+   833→            return "warn"
+   834→        return "info"
+   835→
+   836→    # ------------------------------------------------------------------
+   837→    # P1: 聚合推送
+   838→    # ------------------------------------------------------------------
+   839→
+   840→    def _enqueue_aggregation(
+   841→        self,
+   842→        strategy_id: str,
+   843→        priority: str,
+   844→        payload: ChannelPayload,
+   845→        channels: list[str],
+   846→    ) -> None:
+   847→        """把 medium/low 优先级信号入队，窗口内聚合为一条摘要推送。
+   848→
+   849→        聚合 key = (strategy_id, priority)，窗口 = alert_aggregate_window_seconds (默认 60s)。
+   850→        窗口满或队列达到 max_size (默认 10) 时自动 flush。
+   851→        """
+   852→        cfg = ConfigLoader()
+   853→        window = float(cfg.get("monitor.alert_aggregate_window_seconds", 60))
+   854→        max_size = int(cfg.get("monitor.alert_aggregate_max_size", 10))
+   855→        key = (strategy_id, priority)
+   856→        now = time.time()
+   857→
+   858→        with self._lock:
+   859→            self._agg_queue.setdefault(key, []).append({
+   860→                "signal_id": payload.signal_id,
+   861→                "stock_code": payload.stock_code,
+   862→                "stock_name": payload.stock_name,
+   863→                "alert_type": payload.signal_type,
+   864→                "pct_change": payload.extra.get("pct_change"),
+   865→                "title": payload.title,
+   866→                "channels": channels,
+   867→            })
+   868→            last_flush = self._agg_last_flush.get(key, now)
+   869→            should_flush = (
+   870→                len(self._agg_queue[key]) >= max_size
+   871→                or (now - last_flush) >= window
+   872→            )
+   873→            if should_flush:
+   874→                self._flush_aggregation_locked(key, channels)
+   875→
+   876→    def _flush_aggregation_locked(
+   877→        self, key: tuple[str, str], channels: list[str]
+   878→    ) -> None:
+   879→        """刷新聚合队列（调用方需持锁）。"""
+   880→        items = self._agg_queue.pop(key, [])
+   881→        if not items:
+   882→            return
+   883→        self._agg_last_flush[key] = time.time()
+   884→        strategy_id, priority = key
+   885→        # 构造摘要 payload
+   886→        codes = [it["stock_code"] for it in items[:10]]
+   887→        names = [it.get("stock_name", "") for it in items[:10]]
+   888→        summary = ChannelPayload(
+   889→            signal_id=f"agg_{int(time.time())}_{strategy_id}_{priority}",
+   890→            signal_type="aggregate",
+   891→            strategy_id=strategy_id,
+   892→            stock_code=",".join(codes[:3]) + ("..." if len(codes) > 3 else ""),
+   893→            stock_name=",".join(n for n in names[:3] if n),
+   894→            title=f"📊 [{strategy_id}] {priority}级信号聚合 x{len(items)}",
+   895→            content=self._format_aggregate_content(items),
+   896→            severity=self._priority_to_severity(priority),
+   897→            priority=priority,
+   898→            extra={
+   899→                "aggregate": True,
+   900→                "count": len(items),
+   901→                "items": items,
+   902→            },
+   903→        )
+   904→        try:
+   905→            get_registry().dispatch(summary, channels=channels)
+   906→            logger.info(
+   907→                "聚合推送 flush: strategy=%s priority=%s count=%d -> %s",
+   908→                strategy_id, priority, len(items), channels,
+   909→            )
+   910→        except Exception as exc:  # noqa: BLE001
+   911→            self._error_count += 1
+   912→            self._last_error = str(exc)
+   913→            logger.warning("聚合推送异常: %s", exc)
+   914→
+   915→    def _flush_all_aggregation(self, force: bool = False) -> None:
+   916→        """刷新所有聚合队列。
+   917→
+   918→        Args:
+   919→            force: True 时即使窗口未满也 flush（独立 flush 线程使用，
+   920→                确保行情停推 / 非交易时段也能 flush 漏推信号）；
+   921→                False 时仅 flush 窗口已超 ``alert_aggregate_window_seconds`` 的队列
+   922→                （tick 循环调用，让出主导权给独立 flush 线程）。
+   923→        """
+   924→        cfg = ConfigLoader()
+   925→        window = float(cfg.get("monitor.alert_aggregate_window_seconds", 60))
+   926→        now = time.time()
+   927→        with self._lock:
+   928→            for key in list(self._agg_queue.keys()):
+   929→                items = self._agg_queue.get(key) or []
+   930→                if not items:
+   931→                    continue
+   932→                last_flush = self._agg_last_flush.get(key, 0.0)
+   933→                if force or (now - last_flush) >= window:
+   934→                    self._flush_aggregation_locked(
+   935→                        key, items[0].get("channels", [])
+   936→                    )
+   937→
+   938→    # ------------------------------------------------------------------
+   939→    # P2-1: 聚合推送独立 flush 线程
+   940→    # ------------------------------------------------------------------
+   941→
+   942→    def _aggregator_loop(self) -> None:
+   943→        """独立线程：定时 flush 聚合队列，不依赖 tick 循环。
+   944→
+   945→        - 间隔取 ``monitor.alert_aggregate_window_seconds``（默认 60s，下限 5s）
+   946→        - 每次 flush 调 ``_flush_all_aggregation(force=True)``，
+   947→          force=True 即使窗口未满也 flush（避免漏推）
+   948→        - 异常 catch + warning，不让线程挂掉
+   949→        - 退出信号：``self._stop_event`` 被 set
+   950→        """
+   951→        cfg = ConfigLoader()
+   952→        interval = max(5, float(cfg.get("monitor.alert_aggregate_window_seconds", 60)))
+   953→        logger.info(
+   954→            "agg-flush 线程启动 (interval=%.1fs, force=True)", interval
+   955→        )
+   956→        while not self._stop_event.wait(interval):
+   957→            try:
+   958→                self._flush_all_aggregation(force=True)
+   959→            except Exception as exc:  # noqa: BLE001
+   960→                logger.warning("aggregator flush 失败: %s", exc)
+   961→        logger.info("agg-flush 线程退出")
+   962→
+   963→    @staticmethod
+   964→    def _format_aggregate_content(items: list[dict[str, Any]]) -> str:
+   965→        """格式化聚合推送内容。"""
+   966→        lines = [f"聚合 {len(items)} 条信号:"]
+   967→        for i, it in enumerate(items[:10], 1):
+   968→            pct = it.get("pct_change", 0)
+   969→            pct_str = f"{pct * 100:+.2f}%" if isinstance(pct, (int, float)) else ""
+   970→            lines.append(
+   971→                f"  {i}. {it.get('stock_name','')}({it.get('stock_code','')}) "
+   972→                f"{it.get('alert_type','')} {pct_str}"
+   973→            )
+   974→        if len(items) > 10:
+   975→            lines.append(f"  ... 共 {len(items)} 条")
+   976→        return "\n".join(lines)
+   977→
+   978→    # ------------------------------------------------------------------
+   979→    # 健康度查询（供 /api/monitor/health 用，P1）
+   980→    # ------------------------------------------------------------------
+   981→
+   982→    def health(self) -> dict[str, Any]:
+   983→        """返回引擎健康指标。"""
+   984→        with self._lock:
+   985→            return {
+   986→                "subscribe_alive": self._subscribed,
+   987→                "last_quote_ts": self._last_quote_ts,
+   988→                "quote_lag_seconds": (
+   989→                    time.time() - self._last_quote_ts
+   990→                    if self._last_quote_ts else -1
+   991→                ),
+   992→                "eval_count": self._eval_count,
+   993→                "error_count": self._error_count,
+   994→                "last_error": self._last_error,
+   995→                "debounce_size": len(self._debounce),
+   996→            }
+   997→

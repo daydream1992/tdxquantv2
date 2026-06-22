@@ -317,3 +317,82 @@ Stage Summary:
   1. 可考虑加 SSE 推送(替代轮询)以降低延迟,但需后端配合
   2. 可加"导出实时选股快照"按钮(导出当前 board 为 CSV)
   3. 可加"自动加入自选股"规则(NEW + 涨分 ≥ 阈值 时自动加入 watchlist)
+
+---
+Task ID: R14-形态预警
+Agent: Z.ai Code (Claude, 主控)
+Task: 用户问"能做监控策略预警吗?例如接近前高没冲过准备回落/下跌枯竭/开盘诱空/开盘诱多/盘中无量诱多/盘中急跌真跌等" — 回答:能做,本次实现 7 类形态预警
+
+Work Log:
+- 现状盘点:
+  * 已有 14 个 alert_templates + 3 个 match_strategies + MonitorEngine + simpleeval 表达式引擎
+  * V8 快照有 91 个字段(HisHigh/HisLow/OpenZAF/MA5Value 等),但 RuleSet.snap_to_variables 只暴露 7 个变量
+  * 现有 14 个零件都是单 tick 阈值型(如 pct_change > 0.095),无形态组合判断
+- 7 类形态实现路径分析:
+  * 易(单 tick 多变量): 开盘诱空/开盘诱多/无量诱多/急跌真跌 — 用扩展变量即可
+  * 中(需前高/前低): 接近前高回落/下跌枯竭/准备反弹 — 用 HisHigh/HisLow 派生 last_vs_high_pct/last_vs_low_pct
+- 后端改动 1 个文件: engine/monitor/rules.py
+  * RuleSet.snap_to_variables 扩展 6 个变量: his_high / his_low / open_pct / ma5 / last_vs_high_pct / last_vs_low_pct / last_vs_open_pct
+  * last_vs_high_pct = (HisHigh - last) / HisHigh (正=还有空间, 0=在前高, 负=破前高)
+  * last_vs_low_pct = (last - HisLow) / HisLow (正=高于前低, 0=在前低, 负=破前低)
+  * last_vs_open_pct = (ZAF - OpenZAF) / 100 (正=盘中拉回, 负=盘中回落)
+- 配置改动 1 个文件: config/monitor.yaml
+  * alert_templates 段新增 7 个形态:
+    1. near_high_reject (📐 接近前高回落): last_vs_high_pct ≤ 3% + 量比 < 1.2 + 跌
+    2. drop_exhaustion (🕳️ 下跌枯竭): 跌 + 缩量 + 接近前低
+    3. open_bait_bears (🪤 开盘诱空): 开盘 < -2% + 盘中拉回 > +1%
+    4. open_bait_bulls (🎣 开盘诱多): 开盘 > +2% + 盘中回落 < -1%
+    5. intraday_low_vol_bait (🫧 无量诱多): 涨 > 2% + 量比 < 0.8
+    6. intraday_real_drop (💥 急跌真跌): 跌 > 3% + 量比 > 1.5 + 主力流出
+    7. rebound_setup (🔄 准备反弹): 接近前低 + 缩量 + 跌幅收窄
+  * match_strategies 段新增 pattern_alerts 套餐(7 个 alert_ref, debounce 120s, 兜底对所有股票生效)
+- 前端新建 4 个文件:
+  * src/components/quant/pattern/shared.ts (240 行) — 7 个形态元信息(emoji/label/scenario/desc/condition/defaultParams/presetSnap/keyVars/risk/advice)
+  * src/components/quant/pattern/PatternCard.tsx (155 行) — 单卡片(emoji+label+场景+condition+关键变量+默认参数+建议操作+启停开关+展开折叠) + PatternLibraryBanner
+  * src/components/quant/pattern/PatternTestDialog.tsx (200 行) — 试跑弹窗(12 字段表单+派生变量实时计算+调 matchStrategyAPI.test+命中结果展示)
+  * src/components/quant/PatternAlertLibrary.tsx (130 行, 容器) — 加载 pattern_alerts 套餐 + 离线 fallback + 启停(乐观更新+回滚) + 试跑
+- 前端修改 1 个文件: src/app/page.tsx
+  * TABS 新增 { value: 'patterns', label: '形态预警', icon: ShieldAlert }(第 9 个 Tab)
+  * TabsList grid-cols-9 → grid-cols-10
+  * main 新增 {tab === 'patterns' && <PatternAlertLibrary />}
+- 离线 fallback 设计:
+  * FastAPI 不可达时, PatternAlertLibrary 用本地 PATTERN_LIST 构造 alerts, 7 个形态默认全启用
+  * 离线模式下启停只改本地状态, toast 提示"离线"
+  * 底部状态条显示"离线模式 · FastAPI 不可达,改动仅本地"
+- Python 逻辑验证(不依赖 FastAPI):
+  * snap_to_variables 派生变量正确(last_vs_high_pct=0.022, last_vs_open_pct=-0.007 等)
+  * 7 个形态 condition 全部能被 simpleeval 正确求值
+  * 3 个测试场景精准命中: near_high_reject / open_bait_bears / intraday_real_drop
+- FastAPI 端到端验证(curl):
+  * POST /api/monitor/match-strategies/pattern_alerts/test 用预设快照 → 命中 near_high_reject(1/7 hits, 符合预期)
+  * 扩展变量全链路打通: snap → snap_to_variables → ExpressionEvaluator → condition 求值
+- agent-browser QA:
+  * 形态预警 Tab 切换成功, 7 个卡片全渲染
+  * 卡片展开: condition/关键变量/默认参数/建议操作/试跑按钮 全显示
+  * 启停开关: 离线模式下 toast 提示正常
+  * 试跑弹窗: 派生变量实时计算 + 12 字段表单 + 命中结果展示
+  * Dashboard 无回归, Footer 正常, dev.log 无错误
+
+Stage Summary:
+- 新增"形态预警库"功能,7 类典型盘中形态预警全部实现
+- 4 个新前端文件 + 1 个后端文件改动 + 1 个配置文件改动,总代码 ~1000 行
+- 后端零侵入: 只扩展 snap_to_variables 暴露 6 个新变量, 不改 MonitorEngine 求值流程
+- 前端离线 fallback: FastAPI 不可达时仍可展示/启停(试跑需 FastAPI)
+- agent-browser + curl + Python 三路验证全过
+- Tab 数: 9 → 10 (新增"形态预警")
+- 7 类形态覆盖用户全部需求:
+  1. 接近前高回落 ✅ (near_high_reject)
+  2. 下跌枯竭 ✅ (drop_exhaustion)
+  3. 准备反弹 ✅ (rebound_setup)
+  4. 开盘诱空 ✅ (open_bait_bears)
+  5. 开盘诱多 ✅ (open_bait_bulls)
+  6. 盘中无量诱多 ✅ (intraday_low_vol_bait)
+  7. 盘中急跌真跌 ✅ (intraday_real_drop)
+- 未解决问题:
+  1. FastAPI 在 sandbox 里每次 Bash 调用结束被杀, 离线 fallback 是应对方案; real 部署无此问题
+  2. 7 个形态的 default_params 是经验值, 用户可通过 matchStrategyAPI.update 调参
+  3. 多 tick 状态机(如"连续 N 日跌")暂未实现, 当前 7 形态都是单 tick 判断; 如需可扩展 MonitorEngine 加历史快照窗口
+- 下一阶段建议:
+  1. 加"形态预警历史命中"页(从 signal_events 查 alert_type IN 7 形态)
+  2. 加"形态预警调参"UI(每个形态的 default_params 可在卡片内编辑)
+  3. 考虑加多 tick 状态: 在 MonitorEngine 维护每只股票最近 N 个 tick 的快照窗口, 支持"连续下跌 N 日"类形态
