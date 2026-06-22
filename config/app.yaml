@@ -24,9 +24,10 @@ paths:
   logs: ./data/logs
   # 策略 YAML 目录（热加载扫描）
   strategies_dir: ./strategies
-  # 监控规则 / 匹配策略 / 通道配置 YAML（bug #15：原未显式声明，走默认值）
-  monitor_rules: ./config/monitor_rules.yaml
-  match_strategies: ./config/match_strategies.yaml
+  # 监控配置统一入口（Task 2-b：合并 monitor_rules.yaml + match_strategies.yaml）
+  # 含 monitor / alert_templates / dedup / match_strategies 4 段
+  monitor: ./config/monitor.yaml
+  # 通道配置
   channels: ./config/channels.yaml
 
 tqcenter:
@@ -43,9 +44,9 @@ tqcenter:
   burst: 20
   acquire_timeout: 5
 
-# R14-3: 板块热度 + 同板块联动开关的实际配置在 config/monitor_rules.yaml 的 monitor 段下
-# （ConfigLoader 按 alphabetical 加载 yaml，monitor_rules.yaml 后于 app.yaml 加载，
-#  故 monitor.* 配置统一放在 monitor_rules.yaml，避免被覆盖）
+# R14-3: 板块热度 + 同板块联动开关的实际配置在 config/monitor.yaml 的 monitor 段下
+# （ConfigLoader 按 alphabetical 加载 yaml，monitor.yaml 后于 app.yaml 加载，
+#  故 monitor.* 配置统一放在 monitor.yaml，避免被覆盖）
 # 修改后调 POST /api/config/reload 热加载，前端按 enabled 字段决定是否显示
 
 # R14-2: FastAPI 端点限流（Mock/Real 都生效，保护 Next 代理层 CPU）
@@ -78,6 +79,6 @@ api:
 
 mock:
   # Mock 适配器读取 V8 CSV 样本数据的目录
-  data_dir: ./docs/v8-data/stock_selection_v8_1_standalone/data
+  data_dir: ./data/v8-samples/data
   # Mock subscribe_hq 模拟推送间隔（秒）
   push_interval: 3

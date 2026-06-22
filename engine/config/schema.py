@@ -65,9 +65,9 @@ class PathsConfig:
     excel_output: str = "./data/excel"
     logs: str = "./data/logs"
     strategies_dir: str = "./strategies"
-    # bug #15: 原未显式声明，走默认值。现补齐 3 个 YAML 配置路径
-    monitor_rules: str = "./config/monitor_rules.yaml"
-    match_strategies: str = "./config/match_strategies.yaml"
+    # Task 2-b: 合并 monitor_rules.yaml + match_strategies.yaml → monitor.yaml
+    # 监控配置统一入口：monitor / alert_templates / dedup / match_strategies 4 段
+    monitor: str = "./config/monitor.yaml"
     channels: str = "./config/channels.yaml"
 
 
@@ -106,7 +106,7 @@ class TqCenterConfig:
 class MockConfig:
     """``config/app.yaml`` 中 ``mock`` 段（Mock 模式专用）。"""
 
-    data_dir: str = "./docs/v8-data/stock_selection_v8_1_standalone/data"
+    data_dir: str = "./data/v8-samples/data"
     push_interval: int = 3  # Mock subscribe_hq 模拟推送间隔（秒）
 
 

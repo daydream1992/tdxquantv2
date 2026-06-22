@@ -5,8 +5,7 @@
  * GET /api/monitor?action=subscriptions — 订阅列表
  */
 
-import { tryFastAPI, ok } from '@/lib/api-proxy'
-import { genMonitorStatus, genQuotes } from '@/lib/mock-data'
+import { tryFastAPI, ok, fallback } from '@/lib/api-proxy'
 
 export async function GET(req: Request) {
   const url = new URL(req.url)
@@ -17,7 +16,7 @@ export async function GET(req: Request) {
     const count = url.searchParams.get('count') || '12'
     const r = await tryFastAPI(`/api/monitor/quotes?count=${count}`)
     if (r) return ok(await r.json())
-    return ok(genQuotes(Number(count) || 12))
+    return ok(fallback('/api/monitor/quotes', { count }))
   }
 
   if (path === 'health') {
@@ -36,5 +35,5 @@ export async function GET(req: Request) {
   // status
   const r = await tryFastAPI('/api/monitor/status')
   if (r) return ok(await r.json())
-  return ok(genMonitorStatus())
+  return ok(fallback('/api/monitor/status'))
 }

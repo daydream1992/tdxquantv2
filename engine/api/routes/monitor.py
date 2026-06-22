@@ -358,7 +358,7 @@ async def get_auction(
 async def list_alert_templates(
     cfg: Any = Depends(get_config),
 ) -> dict[str, Any]:
-    """列出 ``monitor_rules.yaml`` 的 ``alert_templates`` 段，供前端编辑 match 策略时下拉选择。
+    """列出 ``config/monitor.yaml`` 的 ``alert_templates`` 段，供前端编辑 match 策略时下拉选择。
 
     返回每个模板的:
     - ``alert_type``      - 模板 ID（全局唯一，编辑 alert 时填入 alerts[].alert_type）
@@ -376,7 +376,7 @@ async def list_alert_templates(
     raw = cfg.get("alert_templates") or {}
     templates: list[dict[str, Any]] = []
     if isinstance(raw, dict):
-        # monitor_rules.yaml 中 alert_templates 是 mapping: { template_id: { ... } }
+        # monitor.yaml 中 alert_templates 是 mapping: { template_id: { ... } }
         # 保留声明顺序（Python 3.7+ dict 顺序 = 插入顺序 = YAML 顺序）
         for tpl_id, body in raw.items():
             if not isinstance(body, dict):
@@ -463,7 +463,7 @@ async def get_health(
     - status: healthy / degraded / unhealthy
       (基于 lag + error_count 判定, 阈值来自 monitor.health.*, 缺省 60/120/10)
 
-    P2-2: 阈值改为读 config/monitor_rules.yaml 的 monitor.health 段,
+    P2-2: 阈值改为读 config/monitor.yaml 的 monitor.health 段,
           配置缺失时回退默认值 (60/120/10) 保证向后兼容。
     """
     from engine.monitor.engine import MonitorEngine

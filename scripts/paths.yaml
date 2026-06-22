@@ -1,6 +1,6 @@
 # ====================================================================
 # 路径配置表 - 各环境的实际路径
-# 用 scripts/replace-paths.sh (Linux) 或 scripts/replace-paths.ps1 (Windows)
+# 用 python scripts/dev.py paths --env <linux|windows> [--dry-run]
 # 一键应用到项目文件 (scripts/ docs/ engine/ config/)
 # ====================================================================
 
@@ -40,6 +40,6 @@ placeholders:
 # --------------------------------------------------------------------
 # 当前激活环境
 #   切换时改这一行为 windows 或 linux
-#   也可用 --env 参数临时覆盖: bash scripts/replace-paths.sh --env windows
+#   也可用 --env 参数临时覆盖: python scripts/dev.py paths --env windows
 # --------------------------------------------------------------------
 active_env: linux

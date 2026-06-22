@@ -1,7 +1,7 @@
 # TdxQuant 量化系统 - 架构文档（AI 维护必读）
 
 > **本文档是 AI 维护者的第一手资料。修改任何代码前，请先完整阅读本文档。**
-> **最后更新**: P1 阶段
+> **最后更新**: R13 阶段（见末尾「R5-R13 演进补充」章节）
 > **维护原则**: 变与不变分离，配置驱动，绝不硬编码
 
 ---
@@ -607,3 +607,114 @@ theme:
 ---
 
 **本文档随项目演进持续更新。每次重大修改后，维护者需更新对应章节。**
+
+---
+
+## 十三、R5-R13 演进补充（覆盖 P1 阶段描述）
+
+> 以下章节反映 R5-R13 迭代后的最新架构，与上文 P1 描述冲突时**以下文为准**。
+
+### 13.1 新增模块（R5-R13）
+
+| 模块 | 位置 | 说明 |
+|---|---|---|
+| 回测引擎 | `engine/api/routes/backtest.py` + `src/components/quant/BacktestView.tsx` | 历史回测 + 净值曲线 + 多策略对比 |
+| 导出器框架 | `engine/exporters/` | CSV / Excel / Sector / DuckDB 4 种 |
+| 板块管理 | `engine/sector/` + `engine/api/routes/sectors.py` | 板块映射 + 个股归属 + 热力图 |
+| 全局搜索 | `src/components/quant/GlobalSearch.tsx` | Cmd+K 搜索股票/策略/板块 |
+| 信号中心 | `src/components/quant/SignalCenter.tsx` | 信号列表 + 详情抽屉 + 30s 轮询 |
+| 监控匹配 | `engine/monitor/match_registry.py` + `config/monitor.yaml` | 5 个匹配策略 + 14 个信号模板 |
+| **三层限流（R12）** | `engine/data_adapter/rate_limiter.py` + `engine/api/middleware/rate_limit.py` | 令牌桶 + 端点中间件 + 监控统计 |
+| 引擎健康卡 | `src/components/quant/EngineHealthCard.tsx` | Dashboard 大屏，15s 刷新 |
+| 竞价监控 | `src/components/quant/AuctionPanel.tsx` | 集合竞价实时面板 |
+
+### 13.2 配置文件变更
+
+**R13 合并**：`monitor_rules.yaml` + `match_strategies.yaml` → `monitor.yaml`（4 段：monitor / alert_templates / dedup / match_strategies）
+
+**当前 config/ 目录**（7 个文件，从 9 个精简）：
+- `app.yaml` — 主配置（adapter_mode / paths / tqcenter / api 限流）
+- `monitor.yaml` — 监控配置（合并自 monitor_rules + match_strategies）
+- `channels.yaml` — 4 个推送通道
+- `cleaning_rules.yaml` — V8.1 5 项数据清洗
+- `sector_mapping.yaml` — 板块映射
+- `export.yaml` — 导出配置
+- `theme.yaml` — 主题
+- `duckdb_schema.sql` — DuckDB 8 张表 schema
+
+### 13.3 脚本统一（R13）
+
+**18 个 .sh/.ps1 双版本 → 8 个文件**，主入口 `scripts/dev.py`（Python 跨平台）：
+
+```bash
+python scripts/dev.py start|stop|setup|reload|test|paths|daemon
+```
+
+保留 `start_all.sh` / `start_all.ps1` 作为 thin wrapper（兼容老用法）。
+
+### 13.4 三层限流架构（R12）
+
+```
+Layer 1: 令牌桶（tqcenter 调用守卫）
+  - engine/data_adapter/rate_limiter.py (TokenBucket 单例 + acquire_or_skip)
+  - real_adapter.py 20 个查询方法加守卫
+  - 配置: config/app.yaml → tqcenter.rate_limit (qps=10, burst=20)
+
+Layer 2: 端点中间件（API 限流）
+  - engine/api/middleware/rate_limit.py (7 条规则, fail-open)
+  - 超限返回 429 + Retry-After header
+  - 配置: config/app.yaml → api.rate_limit (rules + enabled)
+
+Layer 3: 监控统计
+  - engine/api/state.py (api_call_total/rejected/avg_latency + tqcenter_call_total/rejected)
+  - GET /api/monitor/health 透出 api_stats + rate_limit
+  - 前端 EngineHealthCard.tsx 展示
+```
+
+**设计要点**：
+- Mock 模式不限流（开发体验优先，real_adapter 不被调用）
+- fail-open：中间件异常放行，不误杀
+- 开关可控：`tqcenter.rate_limit.enabled` / `api.rate_limit.enabled` 独立
+
+### 13.5 前端 API 代理统一（R13）
+
+- 37 个 `src/app/api/*/route.ts` 统一用 `src/lib/api-proxy.ts` 的 `tryFastAPI/ok/err/fallback` 4 个 helper
+- 降级数据统一在 `api-proxy.ts` 的 `fallback(path)` 映射表（原 `mock-data.ts` 已删除）
+- Prisma 死代码已删（`src/lib/db.ts` + `prisma/` 目录），前端不直连数据库，全走 FastAPI
+
+### 13.6 数据流（R5-R13 完整版）
+
+```
+用户点"执行选股"
+  → POST /api/strategies/{id}/run (经 Layer2 限流, qpm=10)
+  → StrategyRunner.run_strategy()
+  → Pipeline 6 步: load_data → clean → factors(26个) → score(simpleeval) → filter_sort → export
+  → 结果写 DuckDB selection_results 表
+  → 自动订阅 Top 20 到 MonitorEngine
+  → MonitorEngine 后台线程:
+    - Mock 模式: subscribe_hq → MockAdapter._push_loop (3s/次)
+    - Real 模式: subscribe_hq 优先, 失败降级 10s 轮询 (Layer1 限流守卫)
+  → on_quote → RuleSet 求值 → 命中规则 → 写 signal_events
+  → 4 通道推送 (飞书/Webhook/WS/站内)
+  → 前端 SignalCenter 30s 轮询展示 + SignalToast 推送
+```
+
+### 13.7 关键约束更新
+
+- **适配器模式不支持热加载**（mock ↔ real 必须重启）
+- **api.rate_limit.rules 变更需重启**（中间件启动时加载）
+- **tqcenter.rate_limit.qps/burst 支持热加载**（reset_limiter 已接入 reload 链）
+- **DuckDB monitor_subscriptions 有 UNIQUE(stock_code, active) 约束**（R11 新增）
+- **config/monitor.yaml 的 match_strategies 段写入用"读-改-写"**（避免误删其他段）
+
+### 13.8 已尝试并回滚的方案
+
+**R13 AKShare 真实数据源**：
+- 沙箱环境验证 AKShare 不可用（东财断连 + 全量 OOM + py_mini_racer 内存大）
+- 方案已完整回滚，`adapter_mode` 回到 mock
+- 架构价值验证通过：`BaseDataAdapter` 抽象层 + `factory.get_adapter()` 插件式切换设计 OK
+- 未来切真实数据走 Windows + tqcenter（adapter_mode: real）
+
+---
+
+**R5-R13 演进结束** · 有疑问先查 `worklog.md` + `docs/CHANGELOG.md`。

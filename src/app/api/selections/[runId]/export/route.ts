@@ -3,8 +3,8 @@
  * 导出选股结果为 CSV 或 Excel
  */
 
-import { tryFastAPI, err } from '@/lib/api-proxy'
-import { genSelections } from '@/lib/mock-data'
+import { tryFastAPI, err, fallback } from '@/lib/api-proxy'
+import type { SelectionRow } from '@/lib/api-proxy'
 
 export async function GET(
   _req: Request,
@@ -29,7 +29,8 @@ export async function GET(
   // 降级 mock：根据 run_id 反查策略
   const match = runId.match(/^R([A-Z]+)/)
   const sid = match ? match[1].toLowerCase() : undefined
-  const rows = genSelections(sid, 200).filter((r) => r.run_id === runId)
+  const rows = (fallback('/api/selections', { strategy_id: sid, limit: '200' }) as SelectionRow[])
+    .filter((r) => r.run_id === runId)
 
   if (format === 'csv') {
     const headers = ['run_id', 'strategy_id', 'stock_code', 'stock_name', 'score', 'rank', 'run_at']

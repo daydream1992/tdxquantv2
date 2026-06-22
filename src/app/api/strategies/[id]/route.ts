@@ -3,8 +3,8 @@
  * POST /api/strategies/[id] — 启用/禁用（body: { enabled: boolean }）
  */
 
-import { tryFastAPI, ok, err } from '@/lib/api-proxy'
-import { STRATEGIES } from '@/lib/mock-data'
+import { tryFastAPI, ok, err, fallback, STRATEGIES } from '@/lib/api-proxy'
+import type { StrategyInfo } from '@/lib/api-proxy'
 
 export async function GET(
   _req: Request,
@@ -14,7 +14,7 @@ export async function GET(
   const r = await tryFastAPI(`/api/strategies/${id}`)
   if (r) return ok(await r.json())
 
-  const s = STRATEGIES.find((x) => x.strategy_id === id)
+  const s = fallback(`/api/strategies/${id}`) as StrategyInfo | null
   if (!s) return err('strategy not found', 404)
   return ok(s)
 }
@@ -37,6 +37,7 @@ export async function POST(
   })
   if (r) return ok(await r.json())
 
+  // 降级 mock：直接 mutate 内存中的 STRATEGIES
   const s = STRATEGIES.find((x) => x.strategy_id === id)
   if (!s) return err('strategy not found', 404)
   if (typeof body.enabled === 'boolean') s.enabled = body.enabled

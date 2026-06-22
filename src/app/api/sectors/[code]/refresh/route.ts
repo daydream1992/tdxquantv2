@@ -2,8 +2,7 @@
  * POST /api/sectors/[code]/refresh — 手动刷新板块成份股
  */
 
-import { tryFastAPI, ok, err } from '@/lib/api-proxy'
-import { genSectorStocks } from '@/lib/mock-data'
+import { tryFastAPI, ok, err, fallback } from '@/lib/api-proxy'
 
 export async function POST(
   _req: Request,
@@ -14,6 +13,5 @@ export async function POST(
   if (r) return ok(await r.json())
 
   if (!code) return err('code required', 400)
-  const stocks = genSectorStocks(code, 15)
-  return ok({ ok: true, count: stocks.length })
+  return ok(fallback(`/api/sectors/${code}/refresh`))
 }

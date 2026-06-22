@@ -1,9 +1,9 @@
 """``/api/monitor/match-strategies`` 路由 - 匹配策略 CRUD + 热加载 + 调参预览。
 
 匹配策略三层模型（PLAN §14.2）：
-    L1 alert_templates  (monitor_rules.yaml)   —— 零件库
-    L2 match_strategies (match_strategies.yaml) —— 装配单 ★ 本路由管理
-    L3 MonitorEngine                         —— 执行手
+    L1 alert_templates   (config/monitor.yaml) —— 零件库
+    L2 match_strategies  (config/monitor.yaml) —— 装配单 ★ 本路由管理
+    L3 MonitorEngine                             —— 执行手
 
 路由：
 - ``GET    /api/monitor/match-strategies``                    列出所有 match

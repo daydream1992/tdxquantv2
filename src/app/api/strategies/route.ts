@@ -3,14 +3,13 @@
  * POST /api/strategies — 批量操作 { action: 'enable_all' | 'disable_all' | 'run_all' }
  */
 
-import { tryFastAPI, ok, err } from '@/lib/api-proxy'
-import { STRATEGIES, genSelections } from '@/lib/mock-data'
+import { tryFastAPI, ok, err, fallback, STRATEGIES, genSelections } from '@/lib/api-proxy'
 
 export async function GET() {
   const r = await tryFastAPI('/api/strategies')
   if (r) return ok(await r.json())
   // 降级 mock
-  return ok(STRATEGIES)
+  return ok(fallback('/api/strategies'))
 }
 
 export async function POST(req: Request) {
@@ -28,7 +27,7 @@ export async function POST(req: Request) {
   })
   if (r) return ok(await r.json())
 
-  // 降级 mock
+  // 降级 mock：mutate 内存中的 STRATEGIES
   if (body.action === 'enable_all') {
     STRATEGIES.forEach((s) => (s.enabled = true))
     return ok({ ok: true })

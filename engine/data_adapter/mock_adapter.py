@@ -45,7 +45,7 @@ class MockAdapter(BaseDataAdapter):
 
     def __init__(self) -> None:
         cfg = ConfigLoader()
-        rel_dir = cfg.get("mock.data_dir", "./docs/v8-data/stock_selection_v8_1_standalone/data")
+        rel_dir = cfg.get("mock.data_dir", "./data/v8-samples/data")
         self._data_dir: Path = self._resolve_path(str(rel_dir))
         self._push_interval: float = float(cfg.get("mock.push_interval", 3))
 

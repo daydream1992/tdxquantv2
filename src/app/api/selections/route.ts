@@ -5,8 +5,8 @@
  * POST /api/selections — 批量操作（占位）
  */
 
-import { tryFastAPI, ok } from '@/lib/api-proxy'
-import { genSelections } from '@/lib/mock-data'
+import { tryFastAPI, ok, fallback } from '@/lib/api-proxy'
+import type { SelectionRow } from '@/lib/api-proxy'
 
 export async function GET(req: Request) {
   const url = new URL(req.url)
@@ -15,9 +15,8 @@ export async function GET(req: Request) {
   const r = await tryFastAPI(`/api/selections?${url.searchParams.toString()}`)
   if (r) return ok(await r.json())
 
-  // 降级 mock
-  const limit = params.limit ? Number(params.limit) : 200
-  let rows = genSelections(params.strategy_id, limit)
+  // 降级 mock：fallback 内部按 strategy_id/limit 生成，外层做后过滤
+  let rows = fallback('/api/selections', params) as SelectionRow[]
 
   if (params.run_id) {
     rows = rows.filter((r) => r.run_id === params.run_id)

@@ -1,0 +1,789 @@
+   500→      } else if (totalAdded > 0) {
+   501→        toast.warning('批量导入部分完成', {
+   502→          id: tid,
+   503→          description: `新增 ${totalAdded} / 跳过 ${totalSkipped}; 失败 ${errors.length} 组: ${errors[0]}`,
+   504→        })
+   505→      } else {
+   506→        toast.error('批量导入失败', {
+   507→          id: tid,
+   508→          description: errors.join('; '),
+   509→        })
+   510→      }
+   511→      if (totalAdded > 0) {
+   512→        setBatchOpen(false)
+   513→        setBatchText('')
+   514→        await load()
+   515→      }
+   516→    } finally {
+   517→      setBatchImporting(false)
+   518→    }
+   519→  }
+   520→
+   521→  // ------------------------------------------------------------------
+   522→  // R13-3b: 按板块批量加入
+   523→  // ------------------------------------------------------------------
+   524→  /** 选中板块的预览信息 (成份股数从 sectorDTO.stock_count 取, 不另发请求) */
+   525→  const selectedSector = React.useMemo(
+   526→    () => sectors.find((s) => s.code === bySectorCode) || null,
+   527→    [sectors, bySectorCode],
+   528→  )
+   529→
+   530→  const handleBySectorOpen = (open: boolean) => {
+   531→    if (bySectorLoading) return
+   532→    setBySectorOpen(open)
+   533→    if (open) {
+   534→      loadSectors()
+   535→      // 重置选项 (每次打开都恢复默认, 防止误操作)
+   536→      setBySectorCode('')
+   537→      setBySectorStrategy(MANUAL_STRATEGY)
+   538→    }
+   539→  }
+   540→
+   541→  const handleBySectorAdd = async () => {
+   542→    if (!bySectorCode) {
+   543→      toast.error('请先选择板块')
+   544→      return
+   545→    }
+   546→    setBySectorLoading(true)
+   547→    const sectorLabel = selectedSector
+   548→      ? `${selectedSector.code} · ${selectedSector.name}`
+   549→      : bySectorCode
+   550→    const tid = toast.loading(`正在加入板块 ${sectorLabel} 的成分股...`)
+   551→    try {
+   552→      const r = await watchlistAPI.addBySector(bySectorCode, bySectorStrategy)
+   553→      toast.success('按板块加入成功', {
+   554→        id: tid,
+   555→        description: `已加入 ${r.added} 只 (${sectorLabel}), 跳过 ${r.skipped} 只`,
+   556→      })
+   557→      setBySectorOpen(false)
+   558→      await load()
+   559→    } catch (e) {
+   560→      toast.error('按板块加入失败', {
+   561→        id: tid,
+   562→        description: (e as Error).message,
+   563→      })
+   564→    } finally {
+   565→      setBySectorLoading(false)
+   566→    }
+   567→  }
+   568→
+   569→  // ------------------------------------------------------------------
+   570→  // 渲染
+   571→  // ------------------------------------------------------------------
+   572→  return (
+   573→    <div className="space-y-4">
+   574→      {/* 顶部状态条 */}
+   575→      <Card className="p-3 gap-0 bg-quant-card border-quant">
+   576→        <div className="flex flex-wrap items-center justify-between gap-2">
+   577→          <div className="flex items-center gap-2 text-sm">
+   578→            <Star className="size-4 text-amber-400" />
+   579→            <span className="font-semibold">自选股管理</span>
+   580→            <Badge variant="outline" className="border-quant font-mono">
+   581→              {stats.total} 只
+   582→            </Badge>
+   583→            <Badge
+   584→              variant="outline"
+   585→              className="border-[var(--quant-up)]/30 bg-[var(--quant-up)]/10 text-[var(--quant-up)] font-mono"
+   586→            >
+   587→              <Activity className="size-2.5 mr-1" />
+   588→              {stats.active} 活跃
+   589→            </Badge>
+   590→            {stats.inactive > 0 && (
+   591→              <Badge
+   592→                variant="outline"
+   593→                className="border-quant text-muted-foreground font-mono"
+   594→              >
+   595→                {stats.inactive} 已退订
+   596→              </Badge>
+   597→            )}
+   598→          </div>
+   599→          <Button
+   600→            size="sm"
+   601→            variant="ghost"
+   602→            className="h-8"
+   603→            onClick={load}
+   604→            disabled={loading}
+   605→          >
+   606→            <RefreshCw className={cn('size-3.5', loading && 'animate-spin')} />
+   607→            <span className="hidden sm:inline">刷新</span>
+   608→          </Button>
+   609→        </div>
+   610→
+   611→        {/* 分组统计 */}
+   612→        {stats.byStrategy.size > 0 && (
+   613→          <div className="flex items-center gap-1.5 flex-wrap mt-2 text-[10px] text-muted-foreground">
+   614→            <span className="font-medium">按策略分组:</span>
+   615→            {Array.from(stats.byStrategy.entries())
+   616→              .sort((a, b) => b[1] - a[1])
+   617→              .map(([sid, cnt]) => (
+   618→                <Badge
+   619→                  key={sid}
+   620→                  variant="outline"
+   621→                  className="text-[10px] border-quant font-mono cursor-pointer hover:border-amber-500/30"
+   622→                  onClick={() => setFilterStrategy(sid)}
+   623→                >
+   624→                  {sid || '(空)'}: {cnt}
+   625→                </Badge>
+   626→              ))}
+   627→          </div>
+   628→        )}
+   629→      </Card>
+   630→
+   631→      {/* 加入表单 */}
+   632→      <Card className="p-4 bg-quant-card border-quant">
+   633→        <div className="flex flex-col gap-2">
+   634→          <div className="flex items-center justify-between gap-2">
+   635→            <div className="flex items-center gap-2">
+   636→              <Plus className="size-4 text-amber-400" />
+   637→              <span className="text-sm font-semibold">加入监控池</span>
+   638→            </div>
+   639→            <div className="flex items-center gap-2">
+   640→              <Button
+   641→                size="sm"
+   642→                variant="outline"
+   643→                className="h-8 border-quant hover:bg-amber-500/10 hover:text-amber-400 hover:border-amber-500/30"
+   644→                onClick={() => handleBySectorOpen(true)}
+   645→              >
+   646→                <Layers className="size-3.5 mr-1" />
+   647→                按板块加入
+   648→              </Button>
+   649→              <Button
+   650→                size="sm"
+   651→                variant="outline"
+   652→                className="h-8 border-quant hover:bg-amber-500/10 hover:text-amber-400 hover:border-amber-500/30"
+   653→                onClick={() => setBatchOpen(true)}
+   654→              >
+   655→                <Upload className="size-3.5 mr-1" />
+   656→                批量导入
+   657→              </Button>
+   658→            </div>
+   659→          </div>
+   660→          <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto_auto] gap-2">
+   661→            <div className="space-y-1">
+   662→              <Label className="text-[10px] text-muted-foreground">
+   663→                股票代码 (逗号 / 空格分隔)
+   664→              </Label>
+   665→              <Input
+   666→                className="h-8 font-mono text-xs"
+   667→                placeholder="如 600519.SH,000001.SZ,300750.SZ"
+   668→                value={codesInput}
+   669→                onChange={(e) => setCodesInput(e.target.value)}
+   670→                onKeyDown={(e) => {
+   671→                  if (e.key === 'Enter' && !adding) handleAdd()
+   672→                }}
+   673→              />
+   674→            </div>
+   675→            <div className="space-y-1">
+   676→              <Label className="text-[10px] text-muted-foreground">策略 strategy_id</Label>
+   677→              <Select value={strategyId} onValueChange={setStrategyId}>
+   678→                <SelectTrigger className="h-8 text-xs w-40">
+   679→                  <SelectValue />
+   680→                </SelectTrigger>
+   681→                <SelectContent>
+   682→                  <SelectItem value={MANUAL_STRATEGY} className="text-xs">
+   683→                    _manual · 临时盯盘
+   684→                  </SelectItem>
+   685→                  {strategies
+   686→                    .filter((s) => s.strategy_id !== MANUAL_STRATEGY)
+   687→                    .map((s) => (
+   688→                      <SelectItem
+   689→                        key={s.strategy_id}
+   690→                        value={s.strategy_id}
+   691→                        className="text-xs"
+   692→                      >
+   693→                        {s.strategy_id} · {s.strategy_name}
+   694→                      </SelectItem>
+   695→                    ))}
+   696→                </SelectContent>
+   697→              </Select>
+   698→            </div>
+   699→            <div className="flex items-end">
+   700→              <Button
+   701→                className="h-8 w-full sm:w-auto bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25"
+   702→                onClick={handleAdd}
+   703→                disabled={adding}
+   704→              >
+   705→                {adding ? (
+   706→                  <Loader2 className="size-3.5 animate-spin mr-1" />
+   707→                ) : (
+   708→                  <Plus className="size-3.5 mr-1" />
+   709→                )}
+   710→                加入
+   711→              </Button>
+   712→            </div>
+   713→          </div>
+   714→        </div>
+   715→      </Card>
+   716→
+   717→      {/* 筛选 + 表格 */}
+   718→      <Card className="bg-quant-card border-quant">
+   719→        <CardHeader className="p-3 pb-2">
+   720→          <div className="flex flex-wrap items-center justify-between gap-2">
+   721→            <CardTitle className="text-sm flex items-center gap-1.5">
+   722→              <Filter className="size-3.5 text-muted-foreground" />
+   723→              监控池明细
+   724→              <Badge variant="outline" className="text-[10px] border-quant font-mono ml-1">
+   725→                {filtered.length} / {items.length}
+   726→              </Badge>
+   727→            </CardTitle>
+   728→            <div className="flex items-center gap-2">
+   729→              <Select
+   730→                value={filterStrategy}
+   731→                onValueChange={setFilterStrategy}
+   732→              >
+   733→                <SelectTrigger className="h-7 text-xs w-32 sm:w-40">
+   734→                  <SelectValue placeholder="策略筛选" />
+   735→                </SelectTrigger>
+   736→                <SelectContent>
+   737→                  <SelectItem value="__all__" className="text-xs">
+   738→                    全部策略
+   739→                  </SelectItem>
+   740→                  {strategyOptions.map((sid) => (
+   741→                    <SelectItem key={sid} value={sid} className="text-xs">
+   742→                      {sid || '(空)'}
+   743→                    </SelectItem>
+   744→                  ))}
+   745→                </SelectContent>
+   746→              </Select>
+   747→              <div className="flex items-center gap-1.5 border border-quant rounded-md px-2 py-1">
+   748→                <Label className="text-[10px] text-muted-foreground">仅活跃</Label>
+   749→                <Switch
+   750→                  checked={filterActive === 'active'}
+   751→                  onCheckedChange={(v) =>
+   752→                    setFilterActive(v ? 'active' : 'all')
+   753→                  }
+   754→                />
+   755→              </div>
+   756→              {(filterStrategy !== '__all__' || filterActive !== 'all') && (
+   757→                <Button
+   758→                  size="sm"
+   759→                  variant="ghost"
+   760→                  className="h-7 px-2 text-xs"
+   761→                  onClick={() => {
+   762→                    setFilterStrategy('__all__')
+   763→                    setFilterActive('all')
+   764→                  }}
+   765→                >
+   766→                  <X className="size-3" />
+   767→                  清筛选
+   768→                </Button>
+   769→              )}
+   770→            </div>
+   771→          </div>
+   772→        </CardHeader>
+   773→        <CardContent className="p-0">
+   774→          {loading ? (
+   775→            <div className="p-3 space-y-2">
+   776→              {Array.from({ length: 6 }).map((_, i) => (
+   777→                <div key={i} className="h-7 w-full bg-muted/20 rounded" />
+   778→              ))}
+   779→            </div>
+   780→          ) : filtered.length === 0 ? (
+   781→            <div className="flex flex-col items-center justify-center py-10 text-center text-sm text-muted-foreground">
+   782→              <Star className="size-6 mb-2 opacity-40" />
+   783→              {items.length === 0
+   784→                ? '监控池为空，请在上方输入股票代码加入'
+   785→                : '当前筛选条件下无匹配项'}
+   786→            </div>
+   787→          ) : (
+   788→            <ScrollArea className="max-h-96">
+   789→              <Table>
+   790→                <TableHeader>
+   791→                  <TableRow className="border-quant hover:bg-transparent">
+   792→                    <TableHead className="text-xs h-8">股票代码</TableHead>
+   793→                    <TableHead className="text-xs h-8">策略</TableHead>
+   794→                    <TableHead className="text-xs h-8">订阅方</TableHead>
+   795→                    <TableHead className="text-xs h-8">订阅时间</TableHead>
+   796→                    <TableHead className="text-xs h-8 text-center">状态</TableHead>
+   797→                    <TableHead className="text-xs h-8 text-center">批次</TableHead>
+   798→                    <TableHead className="text-xs h-8 text-right">操作</TableHead>
+   799→                  </TableRow>
+   800→                </TableHeader>
+   801→                <TableBody>
+   802→                  {filtered.map((it) => (
+   803→                    <TableRow
+   804→                      key={`${it.stock_code}-${it.batch_no}`}
+   805→                      className="border-quant"
+   806→                    >
+   807→                      <TableCell className="text-xs font-mono py-1.5">
+   808→                        <StockSectorHover stockCode={it.stock_code} />
+   809→                      </TableCell>
+   810→                      <TableCell className="py-1.5">
+   811→                        <Badge
+   812→                          variant="outline"
+   813→                          className={cn(
+   814→                            'text-[10px] font-mono border-quant',
+   815→                            it.strategy_id === MANUAL_STRATEGY
+   816→                              ? 'text-muted-foreground'
+   817→                              : 'text-quant-primary'
+   818→                          )}
+   819→                        >
+   820→                          {it.strategy_id || '(空)'}
+   821→                        </Badge>
+   822→                      </TableCell>
+   823→                      <TableCell className="text-xs text-muted-foreground py-1.5">
+   824→                        {it.subscriber || '—'}
+   825→                      </TableCell>
+   826→                      <TableCell className="text-[11px] text-muted-foreground tabular-nums py-1.5">
+   827→                        {it.subscribed_at
+   828→                          ? new Date(it.subscribed_at).toLocaleString('zh-CN', {
+   829→                              year: '2-digit',
+   830→                              month: '2-digit',
+   831→                              day: '2-digit',
+   832→                              hour: '2-digit',
+   833→                              minute: '2-digit',
+   834→                            })
+   835→                          : '—'}
+   836→                      </TableCell>
+   837→                      <TableCell className="text-center py-1.5">
+   838→                        {it.active ? (
+   839→                          <Badge
+   840→                            variant="outline"
+   841→                            className="text-[10px] border-[var(--quant-up)]/30 bg-[var(--quant-up)]/10 text-[var(--quant-up)]"
+   842→                          >
+   843→                            活跃
+   844→                          </Badge>
+   845→                        ) : (
+   846→                          <Badge
+   847→                            variant="outline"
+   848→                            className="text-[10px] border-quant text-muted-foreground"
+   849→                          >
+   850→                            退订
+   851→                          </Badge>
+   852→                        )}
+   853→                      </TableCell>
+   854→                      <TableCell className="text-xs text-center text-muted-foreground tabular-nums py-1.5">
+   855→                        {it.batch_no ?? 0}
+   856→                      </TableCell>
+   857→                      <TableCell className="text-right py-1.5">
+   858→                        <Button
+   859→                          size="sm"
+   860→                          variant="ghost"
+   861→                          className="h-7 px-2 text-xs hover:bg-red-500/10 hover:text-red-500"
+   862→                          onClick={() => setDeleteTarget(it)}
+   863→                          disabled={removingCode === it.stock_code}
+   864→                        >
+   865→                          {removingCode === it.stock_code ? (
+   866→                            <Loader2 className="size-3 animate-spin" />
+   867→                          ) : (
+   868→                            <Trash2 className="size-3" />
+   869→                          )}
+   870→                          <span className="hidden sm:inline ml-1">移除</span>
+   871→                        </Button>
+   872→                      </TableCell>
+   873→                    </TableRow>
+   874→                  ))}
+   875→                </TableBody>
+   876→              </Table>
+   877→            </ScrollArea>
+   878→          )}
+   879→        </CardContent>
+   880→      </Card>
+   881→
+   882→      {/* 批量导入 Dialog */}
+   883→      <Dialog
+   884→        open={batchOpen}
+   885→        onOpenChange={(v) => {
+   886→          if (batchImporting) return
+   887→          setBatchOpen(v)
+   888→          if (!v) setBatchText('')
+   889→        }}
+   890→      >
+   891→        <DialogContent className="max-w-3xl max-h-[90vh] flex flex-col gap-4 bg-quant-card border-quant">
+   892→          <DialogHeader>
+   893→            <DialogTitle className="flex items-center gap-2">
+   894→              <Upload className="size-5 text-amber-400" />
+   895→              批量导入自选股
+   896→            </DialogTitle>
+   897→            <DialogDescription className="text-xs">
+   898→              每行一只, 逗号分隔。第 1 列股票代码(必填, 6 位数字),
+   899→              第 2 列名称(可空, 仅显示用), 第 3 列 strategy_id(可空, 默认用下方下拉值)。
+   900→              也支持只粘贴代码(每行一个或逗号 / 空格分隔)。
+   901→            </DialogDescription>
+   902→          </DialogHeader>
+   903→
+   904→          <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3">
+   905→            <div className="space-y-1.5">
+   906→              <Label className="text-[10px] text-muted-foreground">
+   907→                粘贴 CSV / 代码列表
+   908→              </Label>
+   909→              <Textarea
+   910→                value={batchText}
+   911→                onChange={(e) => setBatchText(e.target.value)}
+   912→                placeholder={`600519, 贵州茅台, rzq_ignite\n000858, 五粮液, rzq_ignite\n002594, 比亚迪, _manual\n\n# 也支持只粘贴代码:\n600519 000858 002594`}
+   913→                className="min-h-[150px] font-mono text-xs resize-y bg-transparent"
+   914→                spellCheck={false}
+   915→              />
+   916→            </div>
+   917→            <div className="space-y-1.5 md:w-44">
+   918→              <Label className="text-[10px] text-muted-foreground">
+   919→                默认策略 strategy_id
+   920→              </Label>
+   921→              <Select
+   922→                value={batchDefaultStrategy}
+   923→                onValueChange={setBatchDefaultStrategy}
+   924→              >
+   925→                <SelectTrigger className="h-8 text-xs">
+   926→                  <SelectValue />
+   927→                </SelectTrigger>
+   928→                <SelectContent>
+   929→                  <SelectItem value={MANUAL_STRATEGY} className="text-xs">
+   930→                    _manual · 临时盯盘
+   931→                  </SelectItem>
+   932→                  {strategies
+   933→                    .filter((s) => s.strategy_id !== MANUAL_STRATEGY)
+   934→                    .map((s) => (
+   935→                      <SelectItem
+   936→                        key={s.strategy_id}
+   937→                        value={s.strategy_id}
+   938→                        className="text-xs"
+   939→                      >
+   940→                        {s.strategy_id} · {s.strategy_name}
+   941→                      </SelectItem>
+   942→                    ))}
+   943→                </SelectContent>
+   944→              </Select>
+   945→              <p className="text-[10px] text-muted-foreground leading-relaxed pt-1">
+   946→                CSV 行未填 strategy_id 时使用此默认值。
+   947→              </p>
+   948→            </div>
+   949→          </div>
+   950→
+   951→          {/* 预览表 */}
+   952→          <div className="space-y-1.5">
+   953→            <div className="flex items-center justify-between">
+   954→              <Label className="text-[10px] text-muted-foreground flex items-center gap-1">
+   955→                <ListChecks className="size-3" />
+   956→                解析预览
+   957→              </Label>
+   958→              <div className="flex items-center gap-1.5">
+   959→                <Badge
+   960→                  variant="outline"
+   961→                  className="text-[10px] border-quant font-mono"
+   962→                >
+   963→                  共 {batchStats.total}
+   964→                </Badge>
+   965→                <Badge
+   966→                  variant="outline"
+   967→                  className="text-[10px] border-[var(--quant-up)]/30 bg-[var(--quant-up)]/10 text-[var(--quant-up)] font-mono"
+   968→                >
+   969→                  <CheckCircle2 className="size-2.5 mr-1" />
+   970→                  有效 {batchStats.valid}
+   971→                </Badge>
+   972→                {batchStats.invalid > 0 && (
+   973→                  <Badge
+   974→                    variant="outline"
+   975→                    className="text-[10px] border-red-500/30 bg-red-500/10 text-red-500 font-mono"
+   976→                  >
+   977→                    <XCircle className="size-2.5 mr-1" />
+   978→                    无效 {batchStats.invalid}
+   979→                  </Badge>
+   980→                )}
+   981→              </div>
+   982→            </div>
+   983→            <div className="rounded-md border border-quant overflow-hidden">
+   984→              <ScrollArea className="max-h-60">
+   985→                <Table>
+   986→                  <TableHeader>
+   987→                    <TableRow className="border-quant hover:bg-transparent">
+   988→                      <TableHead className="text-[10px] h-7 w-12 text-center">#</TableHead>
+   989→                      <TableHead className="text-[10px] h-7">股票代码</TableHead>
+   990→                      <TableHead className="text-[10px] h-7">名称</TableHead>
+   991→                      <TableHead className="text-[10px] h-7">策略</TableHead>
+   992→                      <TableHead className="text-[10px] h-7">状态 / 原因</TableHead>
+   993→                    </TableRow>
+   994→                  </TableHeader>
+   995→                  <TableBody>
+   996→                    {parsedRows.length === 0 ? (
+   997→                      <TableRow className="border-quant">
+   998→                        <TableCell
+   999→                          colSpan={5}
+  1000→                          className="text-xs text-muted-foreground text-center py-6"
+  1001→                        >
+  1002→                          粘贴或输入内容后会在此预览解析结果
+  1003→                        </TableCell>
+  1004→                      </TableRow>
+  1005→                    ) : (
+  1006→                      parsedRows.map((r, i) => (
+  1007→                        <TableRow
+  1008→                          key={`${i}-${r.code}`}
+  1009→                          className={cn(
+  1010→                            'border-quant',
+  1011→                            !r.valid && 'bg-red-500/10',
+  1012→                          )}
+  1013→                        >
+  1014→                          <TableCell className="text-[10px] text-muted-foreground text-center py-1 tabular-nums">
+  1015→                            {i + 1}
+  1016→                          </TableCell>
+  1017→                          <TableCell
+  1018→                            className={cn(
+  1019→                              'text-xs font-mono py-1',
+  1020→                              r.valid ? 'text-foreground' : 'text-red-500',
+  1021→                            )}
+  1022→                          >
+  1023→                            {r.code || '—'}
+  1024→                          </TableCell>
+  1025→                          <TableCell className="text-xs text-muted-foreground py-1">
+  1026→                            {r.name || '—'}
+  1027→                          </TableCell>
+  1028→                          <TableCell className="py-1">
+  1029→                            <Badge
+  1030→                              variant="outline"
+  1031→                              className={cn(
+  1032→                                'text-[10px] font-mono border-quant',
+  1033→                                r.strategy === MANUAL_STRATEGY
+  1034→                                  ? 'text-muted-foreground'
+  1035→                                  : 'text-quant-primary',
+  1036→                              )}
+  1037→                            >
+  1038→                              {r.strategy || '—'}
+  1039→                            </Badge>
+  1040→                          </TableCell>
+  1041→                          <TableCell className="text-[10px] py-1">
+  1042→                            {r.valid ? (
+  1043→                              <span className="inline-flex items-center text-[var(--quant-up)]">
+  1044→                                <CheckCircle2 className="size-3 mr-1" />
+  1045→                                有效
+  1046→                              </span>
+  1047→                            ) : (
+  1048→                              <span className="inline-flex items-center text-red-500">
+  1049→                                <XCircle className="size-3 mr-1" />
+  1050→                                {r.reason}
+  1051→                              </span>
+  1052→                            )}
+  1053→                          </TableCell>
+  1054→                        </TableRow>
+  1055→                      ))
+  1056→                    )}
+  1057→                  </TableBody>
+  1058→                </Table>
+  1059→              </ScrollArea>
+  1060→            </div>
+  1061→          </div>
+  1062→
+  1063→          <DialogFooter className="gap-2 sm:gap-2">
+  1064→            <Button
+  1065→              variant="outline"
+  1066→              className="border-quant"
+  1067→              onClick={() => setBatchText('')}
+  1068→              disabled={batchImporting || batchText.length === 0}
+  1069→            >
+  1070→              清空
+  1071→            </Button>
+  1072→            <Button
+  1073→              variant="ghost"
+  1074→              onClick={() => {
+  1075→                if (!batchImporting) setBatchOpen(false)
+  1076→              }}
+  1077→              disabled={batchImporting}
+  1078→            >
+  1079→              取消
+  1080→            </Button>
+  1081→            <Button
+  1082→              className="bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25"
+  1083→              onClick={handleBatchImport}
+  1084→              disabled={batchImporting || batchStats.valid === 0}
+  1085→            >
+  1086→              {batchImporting ? (
+  1087→                <Loader2 className="size-3.5 animate-spin mr-1" />
+  1088→              ) : (
+  1089→                <Upload className="size-3.5 mr-1" />
+  1090→              )}
+  1091→              导入 {batchStats.valid > 0 ? `(${batchStats.valid})` : ''}
+  1092→            </Button>
+  1093→          </DialogFooter>
+  1094→        </DialogContent>
+  1095→      </Dialog>
+  1096→
+  1097→      {/* R13-3b: 按板块批量加入 Dialog */}
+  1098→      <Dialog
+  1099→        open={bySectorOpen}
+  1100→        onOpenChange={handleBySectorOpen}
+  1101→      >
+  1102→        <DialogContent className="sm:max-w-lg max-w-[95vw] flex flex-col gap-4 bg-quant-card border-quant">
+  1103→          <DialogHeader>
+  1104→            <DialogTitle className="flex items-center gap-2">
+  1105→              <Layers className="size-5 text-amber-400" />
+  1106→              按板块批量加入监控
+  1107→            </DialogTitle>
+  1108→            <DialogDescription className="text-xs">
+  1109→              将整个板块的成分股一次性加入监控池, 绑定所选策略。
+  1110→              适用于"先把整个赛道纳入盯盘, 后续再逐只调优"的场景。
+  1111→            </DialogDescription>
+  1112→          </DialogHeader>
+  1113→
+  1114→          <div className="grid grid-cols-1 gap-3">
+  1115→            {/* 板块选择 */}
+  1116→            <div className="space-y-1.5">
+  1117→              <Label className="text-[10px] text-muted-foreground flex items-center gap-1">
+  1118→                <Layers className="size-3" />
+  1119→                选择板块
+  1120→              </Label>
+  1121→              <Select
+  1122→                value={bySectorCode}
+  1123→                onValueChange={setBySectorCode}
+  1124→                disabled={bySectorLoading}
+  1125→              >
+  1126→                <SelectTrigger className="h-9 text-xs">
+  1127→                  <SelectValue
+  1128→                    placeholder={
+  1129→                      sectorsLoading
+  1130→                        ? '加载板块中...'
+  1131→                        : sectors.length === 0
+  1132→                          ? '暂无板块数据'
+  1133→                          : '选择板块'
+  1134→                    }
+  1135→                  />
+  1136→                </SelectTrigger>
+  1137→                <SelectContent>
+  1138→                  {sectors.map((s) => (
+  1139→                    <SelectItem
+  1140→                      key={s.code}
+  1141→                      value={s.code}
+  1142→                      className="text-xs"
+  1143→                    >
+  1144→                      <span className="font-mono">{s.code}</span>
+  1145→                      {' · '}
+  1146→                      <span>{s.name}</span>
+  1147→                      <span className="ml-1 text-muted-foreground">
+  1148→                        ({s.stock_count})
+  1149→                      </span>
+  1150→                    </SelectItem>
+  1151→                  ))}
+  1152→                </SelectContent>
+  1153→              </Select>
+  1154→              {/* 选中板块预览 */}
+  1155→              {selectedSector && (
+  1156→                <div className="text-[11px] text-muted-foreground flex flex-wrap items-center gap-1.5 pt-0.5">
+  1157→                  <Badge
+  1158→                    variant="outline"
+  1159→                    className="text-[10px] border-quant font-mono"
+  1160→                  >
+  1161→                    {selectedSector.code}
+  1162→                  </Badge>
+  1163→                  <span className="font-medium text-foreground">
+  1164→                    {selectedSector.name}
+  1165→                  </span>
+  1166→                  <span>·</span>
+  1167→                  <span>成分股</span>
+  1168→                  <Badge
+  1169→                    variant="outline"
+  1170→                    className="text-[10px] border-[var(--quant-up)]/30 bg-[var(--quant-up)]/10 text-[var(--quant-up)] font-mono"
+  1171→                  >
+  1172→                    {selectedSector.stock_count} 只
+  1173→                  </Badge>
+  1174→                  <span>·</span>
+  1175→                  <span>当前绑定策略</span>
+  1176→                  <Badge
+  1177→                    variant="outline"
+  1178→                    className="text-[10px] border-quant font-mono text-quant-primary"
+  1179→                  >
+  1180→                    {selectedSector.strategy_id || '(空)'}
+  1181→                  </Badge>
+  1182→                </div>
+  1183→              )}
+  1184→            </div>
+  1185→
+  1186→            {/* 策略绑定 */}
+  1187→            <div className="space-y-1.5">
+  1188→              <Label className="text-[10px] text-muted-foreground">
+  1189→                绑定策略 strategy_id
+  1190→              </Label>
+  1191→              <Select
+  1192→                value={bySectorStrategy}
+  1193→                onValueChange={setBySectorStrategy}
+  1194→                disabled={bySectorLoading}
+  1195→              >
+  1196→                <SelectTrigger className="h-9 text-xs">
+  1197→                  <SelectValue />
+  1198→                </SelectTrigger>
+  1199→                <SelectContent>
+  1200→                  <SelectItem value={MANUAL_STRATEGY} className="text-xs">
+  1201→                    _manual · 临时盯盘
+  1202→                  </SelectItem>
+  1203→                  {strategies
+  1204→                    .filter((s) => s.strategy_id !== MANUAL_STRATEGY)
+  1205→                    .map((s) => (
+  1206→                      <SelectItem
+  1207→                        key={s.strategy_id}
+  1208→                        value={s.strategy_id}
+  1209→                        className="text-xs"
+  1210→                      >
+  1211→                        {s.strategy_id} · {s.strategy_name}
+  1212→                      </SelectItem>
+  1213→                    ))}
+  1214→                </SelectContent>
+  1215→              </Select>
+  1216→              <p className="text-[10px] text-muted-foreground leading-relaxed pt-0.5">
+  1217→                板块内每只股票都以此 strategy_id 写入 monitor_subscriptions,
+  1218→                决定走哪个 match 套餐。
+  1219→              </p>
+  1220→            </div>
+  1221→          </div>
+  1222→
+  1223→          <DialogFooter className="gap-2 sm:gap-2">
+  1224→            <Button
+  1225→              variant="ghost"
+  1226→              onClick={() => handleBySectorOpen(false)}
+  1227→              disabled={bySectorLoading}
+  1228→            >
+  1229→              取消
+  1230→            </Button>
+  1231→            <Button
+  1232→              className="bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25"
+  1233→              onClick={handleBySectorAdd}
+  1234→              disabled={bySectorLoading || !bySectorCode}
+  1235→            >
+  1236→              {bySectorLoading ? (
+  1237→                <Loader2 className="size-3.5 animate-spin mr-1" />
+  1238→              ) : (
+  1239→                <Layers className="size-3.5 mr-1" />
+  1240→              )}
+  1241→              确认加入
+  1242→              {selectedSector ? ` (${selectedSector.stock_count})` : ''}
+  1243→            </Button>
+  1244→          </DialogFooter>
+  1245→        </DialogContent>
+  1246→      </Dialog>
+  1247→
+  1248→      {/* 删除确认 */}
+  1249→      <AlertDialog
+  1250→        open={!!deleteTarget}
+  1251→        onOpenChange={(v) => !v && !removingCode && setDeleteTarget(null)}
+  1252→      >
+  1253→        <AlertDialogContent>
+  1254→          <AlertDialogHeader>
+  1255→            <AlertDialogTitle className="flex items-center gap-2">
+  1256→              <AlertCircle className="size-5 text-red-500" />
+  1257→              确认移出自选股
+  1258→            </AlertDialogTitle>
+  1259→            <AlertDialogDescription>
+  1260→              即将把 <span className="font-mono font-semibold">{deleteTarget?.stock_code}</span>
+  1261→              {' '}移出监控池。
+  1262→              <span className="block mt-1 text-muted-foreground">
+  1263→                后端会把对应 monitor_subscriptions 记录置为 active=false（保留归档），
+  1264→                该股票将不再触发任何预警。
+  1265→              </span>
+  1266→            </AlertDialogDescription>
+  1267→          </AlertDialogHeader>
+  1268→          <AlertDialogFooter>
+  1269→            <AlertDialogCancel disabled={!!removingCode}>取消</AlertDialogCancel>
+  1270→            <AlertDialogAction
+  1271→              className="bg-red-500/15 text-red-500 border border-red-500/30 hover:bg-red-500/25"
+  1272→              onClick={handleRemove}
+  1273→              disabled={!!removingCode}
+  1274→            >
+  1275→              {removingCode ? (
+  1276→                <Loader2 className="size-4 animate-spin mr-1" />
+  1277→              ) : (
+  1278→                <Trash2 className="size-4 mr-1" />
+  1279→              )}
+  1280→              确认移除
+  1281→            </AlertDialogAction>
+  1282→          </AlertDialogFooter>
+  1283→        </AlertDialogContent>
+  1284→      </AlertDialog>
+  1285→    </div>
+  1286→  )
+  1287→}
+  1288→

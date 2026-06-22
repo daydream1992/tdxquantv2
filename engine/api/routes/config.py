@@ -82,8 +82,8 @@ async def get_config_summary(
     - ``server``: server 段（host / port）
     - ``paths``: paths 段（duckdb / csv_output 等相对路径）
     - ``strategies_count`` / ``strategies_enabled_count``: 策略总数 / 启用数
-    - ``alert_templates_count``: ``monitor_rules.yaml`` 中 alert_templates 数量
-    - ``match_strategies_count``: ``match_strategies.yaml`` 中 match 数量
+    - ``alert_templates_count``: ``config/monitor.yaml`` 中 alert_templates 数量
+    - ``match_strategies_count``: ``config/monitor.yaml`` 中 match 数量
     - ``channels``: 各通道的 name + enabled 状态（不含 webhook_url/secret 等）
     - ``config_files``: ConfigLoader 当前加载的 yaml 文件列表
     - ``last_reload_at``: 最近一次 reload 的时间（取最新文件 mtime）
@@ -114,7 +114,7 @@ async def get_config_summary(
     )
 
     # ---- alert_templates / match_strategies ----
-    # monitor_rules.yaml 顶层有 alert_templates 和 monitor 段，被 ConfigLoader 合并到 _data 顶层
+    # monitor.yaml 顶层有 alert_templates / dedup / match_strategies / monitor 段，被 ConfigLoader 合并到 _data 顶层
     alert_templates_count = 0
     alert_templates = cfg.get("alert_templates") or {}
     if isinstance(alert_templates, dict):

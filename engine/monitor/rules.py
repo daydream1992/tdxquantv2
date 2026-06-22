@@ -1,7 +1,7 @@
 """告警规则加载与求值（RuleSet）。
 
 职责：
-1. 从 ``config/monitor_rules.yaml`` 的 ``alert_templates`` 加载所有规则模板（类级缓存）。
+1. 从 ``config/monitor.yaml`` 的 ``alert_templates`` 段加载所有规则模板（类级缓存）。
 2. 提供 :meth:`RuleSet.evaluate` —— 把一条行情快照映射成表达式变量后逐条求值。
 3. 提供 :meth:`RuleSet.render_condition` —— 把占位符 ``{pct_threshold}`` 用 params 渲染。
 4. 配置 reload 时调 :meth:`RuleSet.invalidate` 清缓存，下次 load 重新读 YAML。

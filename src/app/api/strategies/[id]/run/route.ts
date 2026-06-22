@@ -2,8 +2,7 @@
  * POST /api/strategies/[id]/run — 触发策略运行
  */
 
-import { tryFastAPI, ok, err } from '@/lib/api-proxy'
-import { STRATEGIES, genSelections } from '@/lib/mock-data'
+import { tryFastAPI, ok, err, STRATEGIES, genSelections } from '@/lib/api-proxy'
 
 export async function POST(
   _req: Request,
@@ -14,7 +13,7 @@ export async function POST(
   const r = await tryFastAPI(`/api/strategies/${id}/run`, { method: 'POST' })
   if (r) return ok(await r.json())
 
-  // 降级 mock
+  // 降级 mock：mutate 内存中的 STRATEGIES，按 genSelections 估算 count
   const s = STRATEGIES.find((x) => x.strategy_id === id)
   if (!s) return err('strategy not found', 404)
   if (!s.enabled) return err('strategy disabled', 400)

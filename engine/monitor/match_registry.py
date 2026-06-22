@@ -1,15 +1,17 @@
 """匹配策略层（MatchRegistry）。
 
 三层模型（PLAN §14.2）：
-    L1 alert_templates  → 零件库（在 ``monitor_rules.yaml``，``RuleSet`` 加载）
-    L2 match_strategies → 装配单（在 ``match_strategies.yaml``，本类加载）
+    L1 alert_templates  → 零件库（在 ``config/monitor.yaml``，``RuleSet`` 加载）
+    L2 match_strategies → 装配单（在 ``config/monitor.yaml``，本类加载）
     L3 MonitorEngine    → 执行手（``on_quote`` 按 ``snap.strategy_id`` 取 match）
 
 本类职责：
-1. 加载 ``config/match_strategies.yaml``（类级缓存，热加载时调 :meth:`invalidate`）。
+1. 加载 ``config/monitor.yaml`` 的 ``match_strategies`` 段（类级缓存，热加载时调 :meth:`invalidate`）。
 2. :meth:`get_applicable` —— 按 ``strategy_id`` 取匹配套餐列表（含 ``_default`` 兜底）。
 3. :meth:`evaluate` —— 对一条快照求值 match.alerts，返回命中列表。
 4. CRUD 持久化（``create/update/delete``）—— 写时加 ``Lock`` + 临时文件原子 rename。
+   注：monitor.yaml 含 4 段（monitor/alert_templates/dedup/match_strategies），
+   CRUD 仅替换 ``match_strategies`` 段，其他段原样保留。
 5. :meth:`invalidate` —— 配置 reload 时清缓存。
 
 scope 过滤（``_in_scope``）本轮不求高精度（PLAN §14.6）：
@@ -129,7 +131,7 @@ class MatchRegistry:
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("解析 match %s 失败: %s", item.get("match_id"), exc)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("加载 match_strategies.yaml 失败: %s", exc)
+                logger.warning("加载 monitor.yaml 的 match_strategies 段失败: %s", exc)
         cls._cache = strategies
         logger.info("MatchRegistry 已加载 %d 条 match_strategies", len(strategies))
         return strategies
@@ -141,9 +143,9 @@ class MatchRegistry:
 
     @classmethod
     def _config_path(cls) -> Path:
-        """``config/match_strategies.yaml`` 项目根绝对路径。"""
+        """``config/monitor.yaml`` 项目根绝对路径（match_strategies 段所在文件）。"""
         cfg = ConfigLoader()
-        rel = cfg.get("paths.match_strategies", "./config/match_strategies.yaml")
+        rel = cfg.get("paths.monitor", "./config/monitor.yaml")
         p = Path(str(rel))
         if not p.is_absolute():
             root = Path(__file__).resolve().parent.parent.parent
@@ -363,15 +365,30 @@ class MatchRegistry:
 
     @classmethod
     def _write_yaml(cls, matches: list[MatchStrategy]) -> tuple[bool, str]:
-        """原子写 YAML：临时文件 + rename（避免半写状态被读）。"""
+        """原子写 YAML：临时文件 + rename（避免半写状态被读）。
+
+        monitor.yaml 含 4 段（monitor/alert_templates/dedup/match_strategies），
+        本方法仅替换 ``match_strategies`` 段，其他段原样保留（避免 CRUD 误删 monitor 配置）。
+        """
         path = cls._config_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            data = {
-                "match_strategies": [m.to_dict() for m in matches],
-            }
+            # 读现有 monitor.yaml，保留 monitor/alert_templates/dedup 段
+            existing: dict[str, Any] = {}
+            if path.exists():
+                try:
+                    with path.open("r", encoding="utf-8") as f:
+                        loaded = yaml.safe_load(f) or {}
+                    if isinstance(loaded, dict):
+                        existing = loaded
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "读 monitor.yaml 现有内容失败，将仅写 match_strategies 段: %s", exc
+                    )
+                    existing = {}
+            existing["match_strategies"] = [m.to_dict() for m in matches]
             text = yaml.safe_dump(
-                data,
+                existing,
                 allow_unicode=True,
                 sort_keys=False,
                 default_flow_style=False,
@@ -381,7 +398,7 @@ class MatchRegistry:
             tmp.replace(path)  # 原子 rename
             return True, "ok"
         except Exception as exc:  # noqa: BLE001
-            logger.error("写 match_strategies.yaml 失败: %s", exc)
+            logger.error("写 monitor.yaml 失败: %s", exc)
             return False, str(exc)
 
 
