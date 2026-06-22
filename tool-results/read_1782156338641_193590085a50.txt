@@ -1,0 +1,928 @@
+     1→/**
+     2→ * TdxQuant 前端 API 客户端
+     3→ *
+     4→ * 设计要点：
+     5→ *   - 所有调用走 Next.js API routes（同源 / 相对路径），由 route 转发到 Python FastAPI
+     6→ *   - 路由内部已处理降级（FastAPI 不通时返回 mock），前端只需感知数据结构
+     7→ *   - 统一错误处理，所有方法返回 Promise<T>
+     8→ */
+     9→
+    10→// ===== 类型定义 =====
+    11→export interface StrategyDTO {
+    12→  strategy_id: string
+    13→  strategy_name: string
+    14→  strategy_emoji: string
+    15→  version: string
+    16→  enabled: boolean
+    17→  sector_code: string
+    18→  sector_name: string
+    19→  last_run_at: string | null
+    20→  last_run_stocks: number
+    21→  description: string
+    22→  factors: Array<{ factor_id: string; weight: number }>
+    23→  yaml_content?: string
+    24→}
+    25→
+    26→export interface SelectionRowDTO {
+    27→  run_id: string
+    28→  strategy_id: string
+    29→  strategy_name: string
+    30→  stock_code: string
+    31→  stock_name: string
+    32→  score: number
+    33→  rank: number
+    34→  factors: Array<{ factor_id: string; value: number; weight: number; score: number }>
+    35→  run_at: string
+    36→}
+    37→
+    38→export interface SignalDTO {
+    39→  id: string
+    40→  time: string
+    41→  type: 'limit_up' | 'drop_alert' | 'breakout' | 'selection' | 'system'
+    42→  strategy_id: string | null
+    43→  strategy_name: string | null
+    44→  stock_code: string | null
+    45→  stock_name: string | null
+    46→  content: string
+    47→  pushed_channels: string[]
+    48→  push_status: 'success' | 'partial' | 'failed' | 'pending'
+    49→  /** R7-A: 触发时行情快照 JSON */
+    50→  snapshot?: Record<string, unknown> | null
+    51→  /** R7-A: 信号严重度 (info / warn / error) */
+    52→  severity?: string
+    53→}
+    54→
+    55→export interface SectorDTO {
+    56→  code: string
+    57→  name: string
+    58→  strategy_id: string
+    59→  strategy_name: string
+    60→  stock_count: number
+    61→  auto_update: boolean
+    62→  update_mode: 'replace' | 'append'
+    63→  last_update: string | null
+    64→}
+    65→
+    66→export interface SectorStockDTO {
+    67→  stock_code: string
+    68→  stock_name: string
+    69→  added_at: string
+    70→  score: number
+    71→}
+    72→
+    73→/** R14-1: 个股所属板块 DTO */
+    74→export interface StockSectorItemDTO {
+    75→  code: string
+    76→  name: string
+    77→  type: 'concept' | 'industry' | 'region' | 'index' | 'style' | 'system' | 'custom' | string
+    78→  type_raw: string
+    79→  gp_num: string
+    80→}
+    81→
+    82→export interface StockSectorsDTO {
+    83→  stock_code: string
+    84→  concept: StockSectorItemDTO[]
+    85→  industry: StockSectorItemDTO[]
+    86→  region: StockSectorItemDTO[]
+    87→  other: StockSectorItemDTO[]
+    88→  total: number
+    89→  from_cache: boolean
+    90→  fetched_at: string
+    91→}
+    92→
+    93→/** R14-3: 监控池概念热度 DTO */
+    94→export interface HeatmapItemDTO {
+    95→  /** 板块代码 */
+    96→  code: string
+    97→  /** 板块名 */
+    98→  name: string
+    99→  /** 板块类型: concept / industry */
+   100→  type: 'concept' | 'industry' | string
+   101→  /** 监控池中属于该板块的股票数 */
+   102→  count: number
+   103→  /** 股票代码列表（最多 5 个示例） */
+   104→  stocks: string[]
+   105→}
+   106→
+   107→export interface SectorHeatmapDTO {
+   108→  enabled: boolean
+   109→  items: HeatmapItemDTO[]
+   110→  /** 监控池总数 */
+   111→  total_stocks: number
+   112→  /** 实际扫描数（失败的跳过） */
+   113→  scanned_stocks: number
+   114→  from_cache: boolean
+   115→  fetched_at: string
+   116→  duration_ms: number
+   117→}
+   118→
+   119→/** R14-3: 信号同板块联动 DTO */
+   120→export interface RelatedStockDTO {
+   121→  code: string
+   122→  name: string
+   123→  /** 当前涨跌幅（EngineState 未缓存行情时为 0） */
+   124→  pct: number
+   125→}
+   126→
+   127→export interface RelatedSectorDTO {
+   128→  sector_code: string
+   129→  sector_name: string
+   130→  sector_type: string
+   131→  stocks: RelatedStockDTO[]
+   132→}
+   133→
+   134→export interface SectorLinkageDTO {
+   135→  enabled: boolean
+   136→  signal_id: string
+   137→  stock_code: string
+   138→  stock_name: string
+   139→  items: RelatedSectorDTO[]
+   140→  from_cache: boolean
+   141→  fetched_at: string
+   142→}
+   143→
+   144→export interface MonitorStatusDTO {
+   145→  engine_status: 'running' | 'stopped' | 'error'
+   146→  adapter_mode: 'mock' | 'real'
+   147→  monitored_count: number
+   148→  today_signals: number
+   149→  today_limit_up: number
+   150→  today_alerts: number
+   151→  uptime_seconds: number
+   152→  last_hb: string
+   153→}
+   154→
+   155→export interface ThemeDTO {
+   156→  mode: 'dark' | 'light'
+   157→  primary_color: string
+   158→  up_color: string
+   159→  down_color: string
+   160→  flat_color: string
+   161→  background: string
+   162→  card_background: string
+   163→  border_color: string
+   164→  font_family: string
+   165→}
+   166→
+   167→export interface QuoteDTO {
+   168→  code: string
+   169→  name: string
+   170→  last: number
+   171→  pct: number
+   172→  change: number
+   173→  volume: number
+   174→  amount: number
+   175→  ts: number
+   176→  /** R7-A: 主力净流入 (万元) */
+   177→  main_inflow?: number
+   178→  /** R7-A: 大买占比 0~1 */
+   179→  big_buy_ratio?: number
+   180→  /** R7-A: 换手率% */
+   181→  turnover_rate?: number
+   182→}
+   183→
+   184→/** R7-A: 资金流向排行单条 */
+   185→export interface FlowRankingItemDTO {
+   186→  code: string
+   187→  name: string
+   188→  last: number
+   189→  pct: number
+   190→  main_inflow: number
+   191→  big_buy_ratio: number
+   192→  turnover_rate: number
+   193→  amount: number
+   194→}
+   195→
+   196→/** R13-2c: 竞价强弱项 (后端 /api/monitor/auction 单条) */
+   197→export interface AuctionItemDTO {
+   198→  stock_code: string
+   199→  /** 百分比形式 (5.23 = 5.23%) */
+   200→  auction_pct: number
+   201→  /** 万元 */
+   202→  auction_amount: number
+   203→  /** 万元 */
+   204→  auction_zt_buy: number
+   205→  /** 万元 */
+   206→  open_amount_pre: number
+   207→  /** 手 */
+   208→  open_vol_pre: number
+   209→  l2_order_num: number
+   210→  l2_tic_num: number
+   211→  /** 0-100 综合评分 */
+   212→  auction_score: number
+   213→  score_detail: {
+   214→    surge: number
+   215→    zt_flag: number
+   216→    vol_ratio: number
+   217→    l2: number
+   218→  }
+   219→  fetched_at: string
+   220→}
+   221→
+   222→/** R13-2c: 竞价强弱响应 */
+   223→export interface AuctionResponseDTO {
+   224→  items: AuctionItemDTO[]
+   225→  count: number
+   226→  in_auction_hours: boolean
+   227→}
+   228→
+   229→// ===== 通用请求 =====
+   230→
+   231→export class APIError extends Error {
+   232→  status: number
+   233→  constructor(message: string, status = 500) {
+   234→    super(message)
+   235→    this.status = status
+   236→  }
+   237→}
+   238→
+   239→async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
+   240→  const res = await fetch(path, {
+   241→    ...options,
+   242→    headers: {
+   243→      'Content-Type': 'application/json',
+   244→      ...(options?.headers || {}),
+   245→    },
+   246→    // 默认不缓存，确保数据新鲜
+   247→    cache: 'no-store',
+   248→  })
+   249→  if (!res.ok) {
+   250→    let msg = `请求失败 ${res.status}`
+   251→    try {
+   252→      const data = await res.json()
+   253→      msg = data.error || data.message || msg
+   254→    } catch {
+   255→      /* noop */
+   256→    }
+   257→    throw new APIError(msg, res.status)
+   258→  }
+   259→  // 部分导出接口直接返回 Blob
+   260→  const ct = res.headers.get('content-type') || ''
+   261→  if (ct.includes('application/json')) {
+   262→    return (await res.json()) as T
+   263→  }
+   264→  return (await res.text()) as unknown as T
+   265→}
+   266→
+   267→// ===== API 模块 =====
+   268→
+   269→export const strategyAPI = {
+   270→  list: () => fetchAPI<StrategyDTO[]>('/api/strategies'),
+   271→  get: (id: string) => fetchAPI<StrategyDTO>(`/api/strategies/${id}`),
+   272→  enable: (id: string) =>
+   273→    fetchAPI<{ ok: boolean }>(`/api/strategies/${id}`, {
+   274→      method: 'POST',
+   275→      body: JSON.stringify({ enabled: true }),
+   276→    }),
+   277→  disable: (id: string) =>
+   278→    fetchAPI<{ ok: boolean }>(`/api/strategies/${id}`, {
+   279→      method: 'POST',
+   280→      body: JSON.stringify({ enabled: false }),
+   281→    }),
+   282→  run: (id: string) =>
+   283→    fetchAPI<{ ok: boolean; run_id: string; count: number }>(`/api/strategies/${id}/run`, {
+   284→      method: 'POST',
+   285→    }),
+   286→  enableAll: () =>
+   287→    fetchAPI<{ ok: boolean }>('/api/strategies', {
+   288→      method: 'POST',
+   289→      body: JSON.stringify({ action: 'enable_all' }),
+   290→    }),
+   291→  disableAll: () =>
+   292→    fetchAPI<{ ok: boolean }>('/api/strategies', {
+   293→      method: 'POST',
+   294→      body: JSON.stringify({ action: 'disable_all' }),
+   295→    }),
+   296→  runAll: () =>
+   297→    fetchAPI<{ ok: boolean; results: Array<{ id: string; count: number }> }>('/api/strategies', {
+   298→      method: 'POST',
+   299→      body: JSON.stringify({ action: 'run_all' }),
+   300→    }),
+   301→  runs: (id: string) =>
+   302→    fetchAPI<Array<StrategyRunRecord>>(`/api/strategies/${id}/runs`),
+   303→}
+   304→
+   305→export interface StrategyRunRecord {
+   306→  run_id: string
+   307→  strategy_id: string
+   308→  run_date: string | null
+   309→  status: string
+   310→  started_at: string | null
+   311→  finished_at: string | null
+   312→  duration_ms: number
+   313→  universe_count: number
+   314→  result_count: number
+   315→  error_message: string
+   316→}
+   317→
+   318→export interface SelectionQuery {
+   319→  strategy_id?: string
+   320→  start_date?: string
+   321→  end_date?: string
+   322→  min_score?: number
+   323→  limit?: number
+   324→}
+   325→
+   326→export const selectionAPI = {
+   327→  list: (params: SelectionQuery = {}) => {
+   328→    const sp = new URLSearchParams()
+   329→    Object.entries(params).forEach(([k, v]) => {
+   330→      if (v !== undefined && v !== null && v !== '') sp.set(k, String(v))
+   331→    })
+   332→    return fetchAPI<SelectionRowDTO[]>(`/api/selections?${sp.toString()}`)
+   333→  },
+   334→  get: (runId: string) => fetchAPI<SelectionRowDTO[]>(`/api/selections?run_id=${runId}`),
+   335→  export: (runId: string, format: 'csv' | 'excel') =>
+   336→    fetchAPI<Blob>(`/api/selections/${runId}/export?format=${format}`).then(async (r) => {
+   337→      // fetchAPI 返回 string，需要包装为 Blob
+   338→      if (r instanceof Blob) return r
+   339→      return new Blob([r as unknown as string])
+   340→    }),
+   341→}
+   342→
+   343→export interface SignalQuery {
+   344→  type?: string
+   345→  strategy_id?: string
+   346→  start_date?: string
+   347→  end_date?: string
+   348→  limit?: number
+   349→}
+   350→
+   351→export const signalAPI = {
+   352→  list: (params: SignalQuery = {}) => {
+   353→    const sp = new URLSearchParams()
+   354→    Object.entries(params).forEach(([k, v]) => {
+   355→      if (v !== undefined && v !== null && v !== '') sp.set(k, String(v))
+   356→    })
+   357→    return fetchAPI<SignalDTO[]>(`/api/signals?${sp.toString()}`)
+   358→  },
+   359→  /** R7-A: 信号详情 (含 snapshot JSON) */
+   360→  getDetail: (id: string) =>
+   361→    fetchAPI<SignalDTO>(`/api/signals/${encodeURIComponent(id)}`),
+   362→  /** R14-3: 信号同板块联动股（方案 C，受 monitor.sector_linkage.enabled 开关控制） */
+   363→  getRelated: (id: string) =>
+   364→    fetchAPI<SectorLinkageDTO>(`/api/signals/${encodeURIComponent(id)}/related`),
+   365→}
+   366→
+   367→export const sectorAPI = {
+   368→  list: () => fetchAPI<SectorDTO[]>('/api/sectors'),
+   369→  getStocks: (code: string) => fetchAPI<SectorStockDTO[]>(`/api/sectors/${code}/stocks`),
+   370→  refresh: (code: string) =>
+   371→    fetchAPI<{ ok: boolean; count: number }>(`/api/sectors/${code}/refresh`, { method: 'POST' }),
+   372→  /** 导出全部板块成份股, 返回 Blob (供浏览器下载) */
+   373→  exportAll: async (format: 'csv' | 'excel'): Promise<Blob> => {
+   374→    const res = await fetch(`/api/sectors/export-all?format=${format}`, { cache: 'no-store' })
+   375→    if (!res.ok) {
+   376→      let msg = `导出失败 ${res.status}`
+   377→      try {
+   378→        const data = await res.json()
+   379→        msg = data.error || data.message || msg
+   380→      } catch {
+   381→        /* noop */
+   382→      }
+   383→      throw new APIError(msg, res.status)
+   384→    }
+   385→    return await res.blob()
+   386→  },
+   387→}
+   388→
+   389→export const stockAPI = {
+   390→  /** R14-1: 个股所属板块（概念/行业/地区分组） */
+   391→  getSectors: (code: string) =>
+   392→    fetchAPI<StockSectorsDTO>(`/api/stocks/${encodeURIComponent(code)}/sectors`),
+   393→}
+   394→
+   395→/** P1: 引擎健康度 DTO */
+   396→export interface EngineHealthDTO {
+   397→  subscribe_alive: boolean
+   398→  last_quote_ts: number
+   399→  quote_lag_seconds: number
+   400→  eval_count: number
+   401→  error_count: number
+   402→  last_error: string
+   403→  debounce_size: number
+   404→  queue_size: number
+   405→  uptime_seconds: number
+   406→  status: 'healthy' | 'degraded' | 'unhealthy' | 'unknown'
+   407→  /** R11-1: 后端透出的当前生效阈值 (P2-2 后端可热加载, 缺省时前端用 60/120/10 兜底) */
+   408→  thresholds?: {
+   409→    lag_healthy_seconds: number
+   410→    lag_degraded_seconds: number
+   411→    error_healthy_threshold: number
+   412→  }
+   413→  /** R14-2: API 限流监控计数（全部 optional, 向后兼容旧后端） */
+   414→  api_call_total?: number
+   415→  api_rejected_total?: number
+   416→  api_avg_latency_ms?: number
+   417→  tqcenter_call_total?: number
+   418→  tqcenter_rejected_total?: number
+   419→  /** R14-2: 限流配置状态（令牌桶 + 中间件） */
+   420→  rate_limit?: {
+   421→    tqcenter_limiter?: {
+   422→      enabled: boolean
+   423→      qps?: number
+   424→      burst?: number
+   425→      current_tokens?: number
+   426→      total_calls?: number
+   427→      rejected_calls?: number
+   428→      total_wait_ms?: number
+   429→    }
+   430→    api_middleware?: {
+   431→      enabled: boolean
+   432→      rules_count: number
+   433→    }
+   434→  }
+   435→}
+   436→
+   437→export const monitorAPI = {
+   438→  getStatus: () => fetchAPI<MonitorStatusDTO>('/api/monitor?action=status'),
+   439→  getQuotes: (count = 100) =>
+   440→    fetchAPI<QuoteDTO[]>(`/api/monitor?action=quotes&count=${count}`),
+   441→  /** R7-A: 资金流向排行 (按 main_inflow / big_buy_ratio / turnover_rate 排序, Top 5) */
+   442→  getFlowRanking: (count = 50, metric: 'main_inflow' | 'big_buy_ratio' | 'turnover_rate' = 'main_inflow') =>
+   443→    fetchAPI<FlowRankingItemDTO[]>(
+   444→      `/api/monitor/flow-ranking?count=${count}&metric=${metric}`
+   445→    ),
+   446→  /** P1: 引擎健康度 */
+   447→  getHealth: () => fetchAPI<EngineHealthDTO>('/api/monitor?action=health'),
+   448→  /** R13-1b: 列出 alert_templates (供 MatchStrategyManager 编辑 alert_type 下拉) */
+   449→  getRules: () =>
+   450→    fetchAPI<{ templates: AlertTemplateDTO[]; count: number }>(
+   451→      '/api/monitor/rules'
+   452→    ),
+   453→  /** R13-2c: 竞价强弱排行 (codes 可选, 逗号分隔; count 仅在 codes 未传时生效) */
+   454→  getAuction: (codes?: string, count = 50) =>
+   455→    fetchAPI<AuctionResponseDTO>(
+   456→      `/api/monitor/auction?count=${count}${codes ? `&codes=${encodeURIComponent(codes)}` : ''}`
+   457→    ),
+   458→  /** R14-3: 监控池概念热度 Top N (方案 B, 受 monitor.sector_heatmap.enabled 开关控制) */
+   459→  getSectorHeatmap: () =>
+   460→    fetchAPI<SectorHeatmapDTO>('/api/monitor/sector-heatmap'),
+   461→}
+   462→
+   463→/** R13-1b: alert_template 单条 DTO (对齐后端 GET /api/monitor/rules) */
+   464→export interface AlertTemplateDTO {
+   465→  alert_type: string
+   466→  label: string
+   467→  emoji: string
+   468→  description: string
+   469→  condition: string
+   470→  default_params: Record<string, number>
+   471→  priority: 'high' | 'medium' | 'low'
+   472→  channels: string[]
+   473→}
+   474→
+   475→export const themeAPI = {
+   476→  get: () => fetchAPI<ThemeDTO>('/api/theme'),
+   477→}
+   478→
+   479→/** R13-3a: GET /api/config 摘要响应 (对齐后端 ConfigSummaryResponse) */
+   480→export interface ConfigSummaryDTO {
+   481→  app: {
+   482→    name: string
+   483→    version: string
+   484→    adapter_mode: string
+   485→    log_level: string
+   486→  }
+   487→  server: {
+   488→    host: string
+   489→    port: number
+   490→  }
+   491→  paths: Record<string, string>
+   492→  strategies_count: number
+   493→  strategies_enabled_count: number
+   494→  alert_templates_count: number
+   495→  match_strategies_count: number
+   496→  channels: Array<{ name: string; enabled: boolean }>
+   497→  config_files?: string[]
+   498→  last_reload_at?: string
+   499→  /** 后端降级标记 (前端代理无法连接 FastAPI 时为 true) */
+   500→  fallback?: boolean
+   501→}
+   502→
+   503→export const configAPI = {
+   504→  /** R13-3a: 获取配置摘要 (GET /api/config) */
+   505→  getSummary: () => fetchAPI<ConfigSummaryDTO>('/api/config'),
+   506→  reload: () => fetchAPI<{ ok: boolean; reloaded: string[] }>('/api/config', { method: 'POST' }),
+   507→  listStrategyConfigs: () =>
+   508→    fetchAPI<Array<{
+   509→      strategy_id: string
+   510→      strategy_name: string
+   511→      enabled: boolean
+   512→      yaml_path: string
+   513→      yaml_content: string
+   514→    }>>('/api/config/strategies'),
+   515→  updateStrategyConfig: (id: string, yaml_content: string, enabled?: boolean) =>
+   516→    fetchAPI<{
+   517→      strategy_id: string
+   518→      strategy_name: string
+   519→      enabled: boolean
+   520→      yaml_path: string
+   521→      yaml_content: string
+   522→    }>(`/api/config/strategies/${id}`, {
+   523→      method: 'PUT',
+   524→      body: JSON.stringify({ yaml_content, enabled }),
+   525→    }),
+   526→  /** 创建/复制策略 YAML 文件 */
+   527→  createStrategy: (strategy_id: string, yaml_content: string, overwrite = false) =>
+   528→    fetchAPI<{
+   529→      strategy_id: string
+   530→      strategy_name: string
+   531→      enabled: boolean
+   532→      yaml_path: string
+   533→      yaml_content: string
+   534→    }>('/api/config/strategies', {
+   535→      method: 'POST',
+   536→      body: JSON.stringify({ strategy_id, yaml_content, overwrite }),
+   537→    }),
+   538→  /** 删除策略 YAML 文件（启用中的策略会返回 409） */
+   539→  deleteStrategy: (id: string) =>
+   540→    fetchAPI<{ ok: boolean; strategy_id: string; deleted: string; message: string }>(
+   541→      `/api/config/strategies/${id}`,
+   542→      { method: 'DELETE' }
+   543→    ),
+   544→}
+   545→
+   546→/** 创建策略请求体（前端 DTO，对齐后端 StrategyCreateRequest） */
+   547→export interface StrategyCreateRequestDTO {
+   548→  strategy_id: string
+   549→  yaml_content: string
+   550→  overwrite?: boolean
+   551→}
+   552→
+   553→// ===== 推送通道 =====
+   554→
+   555→export interface ChannelConfigDTO {
+   556→  name: string
+   557→  enabled: boolean
+   558→  config: Record<string, unknown>
+   559→  errors: string[]
+   560→}
+   561→
+   562→export interface ChannelListDTO {
+   563→  channels: ChannelConfigDTO[]
+   564→  config_path: string
+   565→}
+   566→
+   567→export interface ChannelTestResultDTO {
+   568→  ok: boolean
+   569→  message: string
+   570→  channel: string
+   571→}
+   572→
+   573→export interface SignalRepushResultDTO {
+   574→  ok: boolean
+   575→  signal_id: string
+   576→  fired: string[]
+   577→  results: Array<{ channel: string; ok: boolean; message: string }>
+   578→}
+   579→
+   580→export const channelAPI = {
+   581→  list: () => fetchAPI<ChannelListDTO>('/api/channels'),
+   582→  update: (channels: Record<string, Record<string, unknown>>) =>
+   583→    fetchAPI<{ ok: boolean; errors: string[]; channels: ChannelConfigDTO[] }>(
+   584→      '/api/channels',
+   585→      { method: 'PUT', body: JSON.stringify({ channels }) }
+   586→    ),
+   587→  test: (name: string) =>
+   588→    fetchAPI<ChannelTestResultDTO>(`/api/channels/${encodeURIComponent(name)}/test`, {
+   589→      method: 'POST',
+   590→    }),
+   591→  repush: (signalId: string) =>
+   592→    fetchAPI<SignalRepushResultDTO>(
+   593→      `/api/channels/signals/${encodeURIComponent(signalId)}/repush`,
+   594→      { method: 'POST' }
+   595→    ),
+   596→}
+   597→
+   598→// ===== 回测 =====
+   599→
+   600→export interface BacktestParamsDTO {
+   601→  strategy_id: string
+   602→  start_date: string
+   603→  end_date: string
+   604→  initial_capital?: number
+   605→  top_n?: number
+   606→  hold_days?: number
+   607→}
+   608→
+   609→export interface BacktestDailyEquityDTO {
+   610→  date: string
+   611→  equity: number
+   612→  return_pct: number
+   613→  drawdown: number
+   614→}
+   615→
+   616→export interface BacktestTradeDTO {
+   617→  stock_code: string
+   618→  stock_name: string
+   619→  entry_date: string
+   620→  exit_date: string
+   621→  entry_price: number
+   622→  exit_price: number
+   623→  pnl_pct: number
+   624→  pnl_amount: number
+   625→  hold_days: number
+   626→}
+   627→
+   628→export interface BacktestResultDTO {
+   629→  run_id: string
+   630→  strategy_id: string
+   631→  strategy_name: string
+   632→  strategy_emoji: string
+   633→  start_date: string
+   634→  end_date: string
+   635→  initial_capital: number
+   636→  final_capital: number
+   637→  total_return: number
+   638→  annual_return: number
+   639→  max_drawdown: number
+   640→  sharpe_ratio: number
+   641→  win_rate: number
+   642→  total_trades: number
+   643→  profit_trades: number
+   644→  loss_trades: number
+   645→  avg_hold_days: number
+   646→  daily_equity: BacktestDailyEquityDTO[]
+   647→  trades: BacktestTradeDTO[]
+   648→  benchmark_return: number
+   649→  alpha: number
+   650→  beta: number
+   651→  top_n: number
+   652→  hold_days: number
+   653→  created_at: string
+   654→}
+   655→
+   656→export interface BacktestHistoryItemDTO {
+   657→  run_id: string
+   658→  strategy_id: string
+   659→  strategy_name: string
+   660→  strategy_emoji: string
+   661→  start_date: string
+   662→  end_date: string
+   663→  total_return: number
+   664→  max_drawdown: number
+   665→  sharpe_ratio: number
+   666→  created_at: string
+   667→}
+   668→
+   669→export interface BacktestLeaderboardItemDTO {
+   670→  strategy_id: string
+   671→  strategy_name: string
+   672→  strategy_emoji: string
+   673→  latest_run_id: string
+   674→  latest_run_at: string
+   675→  start_date: string
+   676→  end_date: string
+   677→  total_return: number
+   678→  annual_return: number
+   679→  max_drawdown: number
+   680→  sharpe_ratio: number
+   681→  win_rate: number
+   682→  total_trades: number
+   683→  run_count: number
+   684→}
+   685→
+   686→export interface BacktestLeaderboardDTO {
+   687→  items: BacktestLeaderboardItemDTO[]
+   688→  total: number
+   689→}
+   690→
+   691→export const backtestAPI = {
+   692→  run: (params: BacktestParamsDTO) =>
+   693→    fetchAPI<BacktestResultDTO>('/api/backtest/run', {
+   694→      method: 'POST',
+   695→      body: JSON.stringify(params),
+   696→    }),
+   697→  history: () => fetchAPI<BacktestHistoryItemDTO[]>('/api/backtest/history'),
+   698→  get: (runId: string) =>
+   699→    fetchAPI<BacktestResultDTO>(`/api/backtest/${encodeURIComponent(runId)}`),
+   700→  leaderboard: () => fetchAPI<BacktestLeaderboardDTO>('/api/backtest/leaderboard'),
+   701→}
+   702→
+   703→// ===== 全局搜索 =====
+   704→
+   705→export interface SearchStrategyItemDTO {
+   706→  strategy_id: string
+   707→  strategy_name: string
+   708→  strategy_emoji: string
+   709→  description: string
+   710→  sector_code: string
+   711→  enabled: boolean
+   712→}
+   713→
+   714→export interface SearchStockItemDTO {
+   715→  stock_code: string
+   716→  stock_name: string
+   717→  strategy_id: string
+   718→  strategy_name: string
+   719→  score: number
+   720→  run_date: string
+   721→}
+   722→
+   723→export interface SearchSignalItemDTO {
+   724→  id: string
+   725→  time: string
+   726→  type: 'limit_up' | 'drop_alert' | 'breakout' | 'selection' | 'system'
+   727→  strategy_id: string | null
+   728→  strategy_name: string | null
+   729→  stock_code: string | null
+   730→  stock_name: string | null
+   731→  content: string
+   732→}
+   733→
+   734→export interface SearchResponseDTO {
+   735→  q: string
+   736→  strategies: SearchStrategyItemDTO[]
+   737→  stocks: SearchStockItemDTO[]
+   738→  signals: SearchSignalItemDTO[]
+   739→  total: number
+   740→}
+   741→
+   742→export const searchAPI = {
+   743→  search: (q: string, limit = 20) => {
+   744→    const sp = new URLSearchParams()
+   745→    sp.set('q', q)
+   746→    sp.set('limit', String(limit))
+   747→    return fetchAPI<SearchResponseDTO>(`/api/search?${sp.toString()}`)
+   748→  },
+   749→}
+   750→
+   751→// ===== 匹配策略 (match-strategies) =====
+   752→
+   753→export interface MatchScopeDTO {
+   754→  markets: string[]
+   755→  exclude_st: boolean
+   756→  exclude_suspended: boolean
+   757→  exclude_codes: string[]
+   758→  include_only: string[]
+   759→}
+   760→
+   761→export type MatchPriority = 'high' | 'medium' | 'low'
+   762→
+   763→export interface MatchAlertDTO {
+   764→  alert_type: string
+   765→  params: Record<string, number>
+   766→  channels: string[]
+   767→  priority: MatchPriority
+   768→}
+   769→
+   770→export interface MatchStrategyDTO {
+   771→  match_id: string
+   772→  name: string
+   773→  enabled: boolean
+   774→  strategy_id: string
+   775→  scope: MatchScopeDTO
+   776→  alerts: MatchAlertDTO[]
+   777→  debounce_override: number | null
+   778→  trading_hours_override: Record<string, unknown> | null
+   779→}
+   780→
+   781→export interface MatchListResponse {
+   782→  items: MatchStrategyDTO[]
+   783→  count?: number
+   784→}
+   785→
+   786→/** PUT 部分更新（与后端 MatchUpdateModel 对齐，所有字段可选） */
+   787→export interface MatchUpdateRequest {
+   788→  name?: string
+   789→  enabled?: boolean
+   790→  strategy_id?: string
+   791→  scope?: MatchScopeDTO
+   792→  alerts?: MatchAlertDTO[]
+   793→  debounce_override?: number | null
+   794→  trading_hours_override?: Record<string, unknown> | null
+   795→}
+   796→
+   797→/** POST 新建（与后端 MatchStrategyModel 对齐） */
+   798→export interface MatchCreateRequest {
+   799→  match_id: string
+   800→  name: string
+   801→  enabled: boolean
+   802→  strategy_id: string
+   803→  scope: MatchScopeDTO
+   804→  alerts: MatchAlertDTO[]
+   805→  debounce_override: number | null
+   806→  trading_hours_override: Record<string, unknown> | null
+   807→}
+   808→
+   809→export interface MatchTestHitDTO {
+   810→  alert_type: string
+   811→  condition: string
+   812→  hit: boolean
+   813→  priority?: MatchPriority
+   814→  channels?: string[]
+   815→  error?: string
+   816→}
+   817→
+   818→export interface MatchTestResponse {
+   819→  match_id: string
+   820→  hits: MatchTestHitDTO[]
+   821→}
+   822→
+   823→export interface MatchTestParams {
+   824→  code: string
+   825→  pct_change?: number
+   826→  volume_ratio?: number
+   827→  main_inflow?: number
+   828→  auction_pct?: number
+   829→  [k: string]: unknown
+   830→}
+   831→
+   832→export const matchStrategyAPI = {
+   833→  list: () => fetchAPI<MatchListResponse>('/api/monitor/match-strategies'),
+   834→  create: (body: MatchCreateRequest) =>
+   835→    fetchAPI<{ ok: boolean; match_id: string; message: string }>(
+   836→      '/api/monitor/match-strategies',
+   837→      { method: 'POST', body: JSON.stringify(body) }
+   838→    ),
+   839→  update: (id: string, body: MatchUpdateRequest) =>
+   840→    fetchAPI<{ ok: boolean; match_id: string; message: string }>(
+   841→      `/api/monitor/match-strategies/${encodeURIComponent(id)}`,
+   842→      { method: 'PUT', body: JSON.stringify(body) }
+   843→    ),
+   844→  remove: (id: string) =>
+   845→    fetchAPI<{ ok: boolean; match_id: string; message: string }>(
+   846→      `/api/monitor/match-strategies/${encodeURIComponent(id)}`,
+   847→      { method: 'DELETE' }
+   848→    ),
+   849→  reload: () =>
+   850→    fetchAPI<{ ok: boolean; count: number; message: string }>(
+   851→      '/api/monitor/match-strategies?action=reload',
+   852→      { method: 'POST' }
+   853→    ),
+   854→  test: (id: string, params: MatchTestParams) =>
+   855→    fetchAPI<MatchTestResponse>(
+   856→      `/api/monitor/match-strategies/${encodeURIComponent(id)}/test`,
+   857→      { method: 'POST', body: JSON.stringify(params) }
+   858→    ),
+   859→}
+   860→
+   861→// ===== 自选股 (watchlist) =====
+   862→
+   863→export interface WatchlistItemDTO {
+   864→  stock_code: string
+   865→  strategy_id: string
+   866→  subscriber: string
+   867→  subscribed_at: string
+   868→  active: boolean
+   869→  batch_no: number
+   870→}
+   871→
+   872→export interface WatchlistAddRequest {
+   873→  codes: string[]
+   874→  strategy_id?: string
+   875→  subscriber?: string
+   876→}
+   877→
+   878→export interface WatchlistAddResponse {
+   879→  ok: boolean
+   880→  added: number
+   881→  skipped: number
+   882→  message: string
+   883→}
+   884→
+   885→/**
+   886→ * R13-3b: 按板块批量加入响应。
+   887→ *
+   888→ * 后端实际返回 WatchlistAddResponse (ok/added/skipped/message)，
+   889→ * sector_code / sector_name 字段为前端展示用, 由 UI 端拼接, 后端不一定返回。
+   890→ */
+   891→export interface WatchlistBySectorResponse {
+   892→  ok: boolean
+   893→  added: number
+   894→  skipped: number
+   895→  message: string
+   896→  sector_code?: string
+   897→  sector_name?: string
+   898→}
+   899→
+   900→export const watchlistAPI = {
+   901→  list: () => fetchAPI<WatchlistItemDTO[]>('/api/monitor/watchlist'),
+   902→  add: (body: WatchlistAddRequest) =>
+   903→    fetchAPI<WatchlistAddResponse>('/api/monitor/watchlist', {
+   904→      method: 'POST',
+   905→      body: JSON.stringify(body),
+   906→    }),
+   907→  remove: (code: string) =>
+   908→    fetchAPI<{ ok: boolean; code: string; message: string }>(
+   909→      `/api/monitor/watchlist/${encodeURIComponent(code)}`,
+   910→      { method: 'DELETE' }
+   911→    ),
+   912→  /**
+   913→   * R13-3b: 按板块批量加入监控池。
+   914→   *
+   915→   * 后端把 strategy_id / subscriber 作为 **query 参数**接收
+   916→   * (FastAPI 默认对未注解的 str 参数走 query)，因此这里走 URL query 而非 body。
+   917→   */
+   918→  addBySector: (sector_code: string, strategy_id = '_manual') => {
+   919→    const sp = new URLSearchParams()
+   920→    if (strategy_id) sp.set('strategy_id', strategy_id)
+   921→    const q = sp.toString()
+   922→    return fetchAPI<WatchlistBySectorResponse>(
+   923→      `/api/monitor/watchlist/by-sector/${encodeURIComponent(sector_code)}${q ? `?${q}` : ''}`,
+   924→      { method: 'POST' }
+   925→    )
+   926→  },
+   927→}
+   928→

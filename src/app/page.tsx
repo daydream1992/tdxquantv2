@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { Activity, BarChart3, Cpu, Layers, Bell, Sun, Moon, RefreshCw, Settings, Play, Loader2, Search, Crosshair, Star, Gavel } from 'lucide-react'
+import { Activity, BarChart3, Cpu, Layers, Bell, Sun, Moon, RefreshCw, Settings, Play, Loader2, Search, Crosshair, Star, Gavel, Radio } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
@@ -18,6 +18,7 @@ import { SectorManager } from '@/components/quant/SectorManager'
 import { MatchStrategyManager } from '@/components/quant/MatchStrategyManager'
 import { WatchlistManager } from '@/components/quant/WatchlistManager'
 import { AuctionPanel } from '@/components/quant/AuctionPanel'
+import { RealtimeSelection } from '@/components/quant/RealtimeSelection'
 import { ConfigSummary } from '@/components/quant/ConfigSummary'
 import { ChannelSettingsDialog } from '@/components/quant/ChannelSettingsDialog'
 import { GlobalSearch, type GlobalSearchHandle } from '@/components/quant/GlobalSearch'
@@ -31,6 +32,7 @@ const TABS = [
   { value: 'sectors', label: '板块管理', icon: Layers },
   { value: 'match-strategies', label: '匹配策略', icon: Crosshair },
   { value: 'watchlist', label: '自选股', icon: Star },
+  { value: 'realtime', label: '实时选股', icon: Radio },
   { value: 'auction', label: '竞价监控', icon: Gavel },
 ] as const
 
@@ -263,7 +265,7 @@ export default function Home() {
 
           {/* Tabs */}
           <Tabs value={tab} onValueChange={setTab} className="w-full">
-            <TabsList className="bg-transparent border-0 p-0 h-11 w-full grid grid-flow-col auto-cols-min sm:grid-cols-8 sm:w-full overflow-x-auto quant-scroll rounded-none">
+            <TabsList className="bg-transparent border-0 p-0 h-11 w-full grid grid-flow-col auto-cols-min sm:grid-cols-9 sm:w-full overflow-x-auto quant-scroll rounded-none">
               {TABS.map((t) => {
                 const Icon = t.icon
                 return (
@@ -309,6 +311,7 @@ export default function Home() {
         {tab === 'sectors' && <SectorManager />}
         {tab === 'match-strategies' && <MatchStrategyManager />}
         {tab === 'watchlist' && <WatchlistManager />}
+        {tab === 'realtime' && <RealtimeSelection />}
         {tab === 'auction' && <AuctionPanel />}
       </main>
 

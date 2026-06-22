@@ -261,3 +261,59 @@ Stage Summary:
   1. 修复4个tsc错误(低优先级,不影响功能)
   2. 创建15分钟webDevReview cron(按系统规则)
   3. 如需进一步精简,可考虑DuckDB→SQLite迁移(用户之前说先不做)
+
+---
+Task ID: R14-实时选股
+Agent: Z.ai Code (Claude, 主控)
+Task: 新增"实时选股"功能 — 用户问"实时选股功能有吗",回答:此前没有,本次实现
+
+Work Log:
+- 现状盘点:
+  * useRealtimeQuotes: 10s 轮询行情/状态/信号(只刷新 Dashboard 大屏,不打分选股)
+  * 顶部"运行全部"按钮: 手动一次性触发 strategyAPI.runAll(),跑完即止
+  * 信号中心: 匹配策略实时告警(实时监控,非实时选股)
+  * 结论: 缺"盘中连续接收行情→连续打分→连续输出新入选股票"的实时选股语义
+- 设计数据流: 定时器 → runAll → 延迟1.2s → list({limit:200}) → 与 prevScoreMap 对比 → 推入 stream + 更新 board
+- 新建 5 个文件:
+  * src/components/quant/realtime/shared.ts (155 行) — 类型 + 工具 + 常量(INTERVAL_OPTIONS/THRESHOLD_OPTIONS/MAX_STREAM_ROUNDS=50/MAX_BOARD_ROWS=200/RUNALL_DELAY_MS=1200)
+  * src/components/quant/realtime/RealtimeControl.tsx (190 行) — 启停按钮 + 间隔ToggleGroup(15s/30s/60s/2min) + 阈值Select(0.02/0.05/0.10) + 清空 + 6 个 StatTile(累计轮数/累计选股/NEW/上次耗时/上次执行/下次执行) + 倒计时进度条
+  * src/components/quant/realtime/RealtimeStream.tsx (145 行) — 流式列表,每轮一个 Card(Collapsible): 轮次编号 + 时间 + 耗时 + NEW/▲/▼ 徽章 + 折叠的 30 个 StockChip
+  * src/components/quant/realtime/RealtimeStockBoard.tsx (190 行) — 去重看板: 8 列(代码/名称/状态/当前分/变化/入选轮数/入选策略/最近入选) + 搜索框 + 5 个筛选按钮(全部/NEW/涨分/跌分/已出)
+  * src/components/quant/RealtimeSelection.tsx (248 行, 容器<260) — 持有定时器+状态, tick() 零依赖靠 ref 读最新值(避免 useEffect 重跑死循环 bug)
+- 修改 1 个文件: src/app/page.tsx
+  * import Radio 图标 + RealtimeSelection 组件
+  * TABS 数组新增 { value: 'realtime', label: '实时选股', icon: Radio } (第 8 个 Tab, 竞价监控前)
+  * TabsList grid-cols-8 → grid-cols-9
+  * main 区域新增 {tab === 'realtime' && <RealtimeSelection />}
+- 关键 bug 修复:
+  * Bug1: tick 用 useCallback 依赖 roundNo/threshold/intervalSec → 每跑完一轮 roundNo 变 → tick 重建 → useEffect 重跑 → 立即又跑下一轮(1秒跑5轮)
+    修复: 用 roundNoRef/thresholdRef/intervalSecRef 同步 ref,tick 改零依赖,useEffect 只依赖 running/intervalSec
+  * Bug2: NEW 计数按 row 算(200 行就算 200 个 NEW),应按 stock_code 去重
+    修复: 加 seenCodesThisRound Set 去重(实际第 1 轮 NEW 从 200 修正为 10)
+- QA 验证(agent-browser + VLM):
+  * bun run lint exit 0
+  * Tab 切换: 实时大屏→实时选股 成功(activeTab=实时选股)
+  * 启动后 4s: 累计轮数=1, NEW=10(去重后), 下次执行=29s 后(30s 间隔)
+  * 等 35s: 累计轮数=2 自动触发, 流式记录(2) 显示 2 个 Card, 第 2 轮 3.16s/策略5/5/200只
+  * 股票看板: 10 行去重股票, 状态徽章(持平), 搜索框+5 筛选按钮, 入选轮数/入选策略列正常
+  * 暂停按钮: 成功停止定时器
+  * 切回实时大屏: 无回归, consoleErrors=[]
+  * Footer: long-page 自然 push-down(bodyHeight=1020 > viewportHeight=577, footer 在底部)
+  * VLM 截图确认: 控制栏+状态条+流式记录+股票看板全部正常渲染
+
+Stage Summary:
+- 新增"实时选股"功能,从无到有
+- 5 个新文件 + 1 个修改文件,总代码 ~930 行
+- 容器 RealtimeSelection 248 行(<500),4 个子组件/shared.ts 均<200 行
+- 后端零改动,复用 strategyAPI.runAll + selectionAPI.list
+- 关键 bug 2 个已修复(tick 依赖死循环 + NEW 计数去重)
+- agent-browser + VLM 端到端 QA 全过
+- Tab 数: 8 → 9 (新增"实时选股")
+- 未解决问题:
+  1. mock 模式下 genSelections 的 score 随机扰动小(±0.02),阈值 0.05 时涨分/跌分较少;real 模式下真实行情波动会触发更多
+  2. 流式记录上限 50 轮(MAX_STREAM_ROUNDS),超过自动丢弃最旧的;股票看板上限 200 只(MAX_BOARD_ROWS)
+  3. 当前 mock 模式每轮股票集合基本固定(因 STOCK_POOL 索引基于 strategy_id.charCodeAt),real 模式下会更动态
+- 下一阶段建议:
+  1. 可考虑加 SSE 推送(替代轮询)以降低延迟,但需后端配合
+  2. 可加"导出实时选股快照"按钮(导出当前 board 为 CSV)
+  3. 可加"自动加入自选股"规则(NEW + 涨分 ≥ 阈值 时自动加入 watchlist)
