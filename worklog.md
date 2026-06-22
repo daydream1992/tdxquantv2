@@ -396,3 +396,62 @@ Stage Summary:
   1. 加"形态预警历史命中"页(从 signal_events 查 alert_type IN 7 形态)
   2. 加"形态预警调参"UI(每个形态的 default_params 可在卡片内编辑)
   3. 考虑加多 tick 状态: 在 MonitorEngine 维护每只股票最近 N 个 tick 的快照窗口, 支持"连续下跌 N 日"类形态
+
+---
+Task ID: R15-自定义形态构建器
+Agent: Z.ai Code (Claude, 主控)
+Task: 用户问"后续还可以自由加策略,加预警" — 回答:能,本次实现"形态预警构建器",让用户可视化创建/编辑/克隆/删除自定义形态预警
+
+Work Log:
+- 现状盘点:
+  * R14 已有 7 个预设形态(alert_templates 写死在 config/monitor.yaml)
+  * matchStrategyAPI 有完整 CRUD,但只管理"套餐",不能创建新 alert_template
+  * 后端 snap_to_variables 暴露 13 个变量(pct_change/volume_ratio/main_inflow/his_high/his_low/open_pct/ma5/last_vs_high_pct/last_vs_low_pct/last_vs_open_pct)
+  * 前端无"自定义形态"入口,用户无法自由加预警
+- 设计方案: 前端构建器 + localStorage 持久化 + 本地 simpleeval 求值
+  * 自定义形态存 localStorage(key: tdxquant:custom-patterns)
+  * 启停状态存 localStorage(key: tdxquant:custom-patterns-enabled)
+  * 试跑走前端本地求值(new Function + 变量白名单 + and/or/not→&&/||/! 转换)
+  * 预设形态仍走后端套餐,自定义形态仅本地
+- 新建 3 个文件:
+  * src/components/quant/pattern/builder.ts (340 行) — CustomPattern 类型 + VARIABLE_WHITELIST(10变量+desc+example+formula) + deriveVars(与后端 snap_to_variables 对齐) + validateExpr(白名单字符+关键字校验) + evalCondition({param}替换+and/or/not转换+new Function 求值) + extractParams + loadCustomPatterns/saveCustomPatterns + genPatternId + PATTERN_EMOJIS(28个) + DEFAULT_SNAP + deriveKeyVars
+  * src/components/quant/pattern/ConditionEditor.tsx (230 行) — 变量速查面板(点击插入光标处) + 运算符快捷按钮 + {param}插入按钮 + textarea 编辑 + 实时校验求值预览(resolved表达式+派生变量+命中/未命中/错误)
+  * src/components/quant/pattern/PatternBuilderDialog.tsx (480 行) — 构建器主弹窗,3 模式(创建/编辑/克隆) + 左侧表单(基础信息+条件+参数+风险+快照) + 右侧 sticky 实时预览 + emoji选择器 + 参数自动提取 + 保存校验(alert_type正则/label/condition/求值无错)
+- 修改 4 个文件:
+  * src/components/quant/pattern/shared.ts — PatternMeta 加 custom?/id? 字段
+  * src/components/quant/pattern/PatternCard.tsx — 自定义形态加"自定义"badge(虚线边框) + 克隆/编辑/删除按钮 + banner 加 customCount + "新建自定义形态"按钮
+  * src/components/quant/pattern/PatternTestDialog.tsx — 自定义形态走前端本地 evalCondition 求值(预设仍调后端) + 标题/描述/按钮文案动态切换 + meta 查找 fallback 到 initialMeta
+  * src/components/quant/PatternAlertLibrary.tsx (重写, 320 行) — 加载 customPatterns(localStorage) + merge 预设+自定义 + 预设/自定义分区展示 + 创建/编辑/克隆/删除回调 + 自定义启停(localStorage) + 删除确认 AlertDialog
+- 关键 bug 修复(3 个):
+  * Bug1: builder.ts 注释 `/** ... +-*/() ... */` 里的 `*/` 被解析成块注释结束 → 改单行注释
+  * Bug2: PatternBuilderDialog 本地 metaToDraft 与 import 的 builder.metaToDraft 同名冲突(递归调用自己) → 重命名 presetMetaToDraft + 删未用 import
+  * Bug3: 前端 new Function 求值不认识 Python 关键字 and/or/not(simpleeval 用 and/or,JS 用 &&/||) → evalCondition 里加 .replace(/\band\b/gi,'&&').replace(/\bor\b/gi,'||').replace(/\bnot\b/gi,'!')
+- QA 验证(agent-browser + VLM):
+  * bun run lint exit 0 (0 errors 0 warnings)
+  * 形态预警 Tab 正常: 7 预设卡片 + banner "新建自定义形态"按钮
+  * 构建器弹窗正常: 标题"创建自定义形态" + 左侧表单 + 右侧实时预览
+  * 创建流程: 填表单(量价齐升/vol_price_rise/场景/condition) → 填参数(pct_threshold=0.02/vol_ratio=1.5) → 保存 → localStorage 持久化(customCount=1) → 列表展示自定义卡片(虚线边框+"自定义"badge+编辑/删除按钮)
+  * 试跑自定义形态: 标题"自定义·本地求值" + 派生变量实时计算 + 命中结果正确(默认快照未命中 0.015<0.02; 改 ZAF=3.0/Wtb=2.0 后命中 0.03>0.02 && 2.0>1.5)
+  * 编辑自定义形态: 标题"编辑自定义形态" + 字段回填正确(label/alert_type/scenario/condition)
+  * 删除自定义形态: AlertDialog 确认弹窗 → 确认后 localStorage 清空 + 列表恢复
+  * 克隆预设形态: 标题"克隆预设形态" + 字段回填("接近前高回落 (副本)")
+  * Footer: bodyHeight=877 > vh=577, footer 自然 push-down
+  * dev.log 无 error/warn
+
+Stage Summary:
+- 新增"形态预警构建器"功能,用户可自由创建/编辑/克隆/删除自定义形态预警
+- 3 个新文件 + 4 个修改文件,总代码 ~1560 行
+- 前端本地 simpleeval 等价求值(new Function + 变量白名单 + 关键字转换),与后端 snap_to_variables 完全对齐
+- localStorage 持久化: 自定义形态 + 启停状态,刷新不丢失
+- 离线友好: 不依赖后端,sandbox 里也能完整体验(预设形态试跑仍需后端,但自定义形态全本地)
+- agent-browser + VLM 端到端 QA 全过(创建/试跑/编辑/删除/克隆 6 大流程)
+- 3 个 bug 全部修复(注释解析/命名冲突/关键字转换)
+- Tab 数仍为 10(未新增 Tab,在"形态预警"Tab 内扩展)
+- 未解决问题:
+  1. 自定义形态仅本地持久化,后端 MonitorEngine 不认识自定义 alert_type,无法真正触发预警推送(需后端扩展内联 condition 支持)
+  2. 前端求值用 new Function,虽做了白名单校验,但理论上仍有 XSS 风险(用户自己写给自己,可接受)
+  3. 自定义形态的启停状态独立存 localStorage,与预设形态的套餐启停分离(设计如此,但用户可能期望统一)
+- 下一阶段建议:
+  1. 后端扩展: alert_templates 支持前端动态注册(MatchUpdateRequest 的 alert.params 里带 __condition/__label,MonitorEngine 求值时 fallback 到内联 condition)
+  2. 自定义形态导入/导出(JSON 文件),方便分享和备份
+  3. 自定义形态"模板库": 预置更多形态模板(如 MACD 金叉/KDJ 超卖反弹)供克隆

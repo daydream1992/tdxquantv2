@@ -27,6 +27,7 @@ import { Loader2, Play, CheckCircle2, XCircle, AlertCircle, RotateCcw } from 'lu
 import { cn } from '@/lib/utils'
 import { matchStrategyAPI, type MatchTestHitDTO } from '@/lib/api'
 import { PATTERN_LIST, type PatternMeta, type PatternSnap } from './shared'
+import { evalCondition } from './builder'
 
 interface Props {
   open: boolean
@@ -85,6 +86,21 @@ export function PatternTestDialog({ open, onOpenChange, initialMeta }: Props) {
     setLoading(true)
     setHits(null)
     try {
+      // 自定义形态: 前端本地求值(后端不认识自定义 alert_type)
+      if (initialMeta?.custom) {
+        const r = evalCondition(initialMeta.condition, initialMeta.defaultParams, snap)
+        setHits([
+          {
+            alert_type: initialMeta.alert_type,
+            condition: r.resolvedExpr,
+            hit: r.hit,
+            error: r.error,
+            priority: initialMeta.risk,
+          },
+        ])
+        return
+      }
+      // 预设形态: 调后端套餐试跑
       const body = { ...snap } as Record<string, unknown>
       const r = await matchStrategyAPI.test('pattern_alerts', body as never)
       setHits(r.hits || [])
@@ -128,10 +144,19 @@ export function PatternTestDialog({ open, onOpenChange, initialMeta }: Props) {
           <DialogTitle className="flex items-center gap-2">
             <Play className="size-4 text-amber-400" />
             形态预警试跑 · {initialMeta?.label || ''}
+            {initialMeta?.custom && (
+              <Badge variant="outline" className="text-[9px] font-mono border-amber-500/40 text-amber-400 bg-amber-500/10">
+                自定义 · 本地求值
+              </Badge>
+            )}
           </DialogTitle>
           <DialogDescription>
-            调整快照参数,实时查看派生变量与 7 类形态命中结果。套餐 ID:{' '}
-            <code className="font-mono text-amber-400">pattern_alerts</code>
+            {initialMeta?.custom
+              ? '自定义形态走前端本地求值(后端不认识自定义 alert_type)。调整快照参数,实时查看命中结果。'
+              : '调整快照参数,实时查看派生变量与 7 类形态命中结果。套餐 ID: '}
+            {!initialMeta?.custom && (
+              <code className="font-mono text-amber-400">pattern_alerts</code>
+            )}
           </DialogDescription>
         </DialogHeader>
 
@@ -189,7 +214,9 @@ export function PatternTestDialog({ open, onOpenChange, initialMeta }: Props) {
                   </div>
                 ) : (
                   hits.map((h, i) => {
-                    const meta = PATTERN_LIST.find((p) => p.alert_type === h.alert_type)
+                    const meta =
+                      PATTERN_LIST.find((p) => p.alert_type === h.alert_type) ||
+                      (initialMeta?.alert_type === h.alert_type ? initialMeta : undefined)
                     return (
                       <div
                         key={i}
@@ -270,7 +297,7 @@ export function PatternTestDialog({ open, onOpenChange, initialMeta }: Props) {
             className="h-8 bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25 hover:text-amber-300"
           >
             {loading ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5" />}
-            试跑 7 类形态
+            {initialMeta?.custom ? '试跑自定义形态' : '试跑 7 类形态'}
           </Button>
         </DialogFooter>
       </DialogContent>

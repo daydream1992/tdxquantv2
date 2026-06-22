@@ -31,6 +31,10 @@ export interface PatternMeta {
   risk: 'high' | 'medium'
   /** 建议操作 */
   advice: string
+  /** 是否为自定义形态(预设形态无此字段) */
+  custom?: boolean
+  /** 自定义形态唯一 ID(自定义形态才有) */
+  id?: string
 }
 
 /** 模拟快照(扁平,直接传给 /test 接口) */
