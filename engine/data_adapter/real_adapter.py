@@ -1,15 +1,19 @@
 """Real 数据适配器（封装 tqcenter API）。
 
 设计要点：
-1. **导入容错**：``import tqcenter`` 失败时仍可实例化，但调用任何方法都会抛
+1. **tqcenter 导入机制**：tqcenter 不是 PyPI 包，是通达信终端目录下的 Python 文件
+   (通常在 ``<通达信>\\PYPlugins\\user\\tqcenter.py``)。本模块通过 ``sys.path.insert``
+   动态加入路径后 ``from tqcenter import tq`` 导入。路径优先级：
+   环境变量 ``TQ_CENTER_PATH`` > config ``tqcenter.python_path`` > 通达信常见安装目录扫描。
+2. **导入容错**：``import tqcenter`` 失败时仍可实例化，但调用任何方法都会抛
    ``RuntimeError``。Linux 沙箱环境无法运行 Real 模式，但代码骨架可被加载。
-2. **subscribe_hq 分批**：batch_size 来自 ``config/app.yaml`` 的
+3. **subscribe_hq 分批**：batch_size 来自 ``config/app.yaml`` 的
    ``tqcenter.subscribe_batch_size``（默认 50）。
-3. **get_market_data 自动续传**：单次最多 24000 条（来自 ``tqcenter.kline_max_count``），
+4. **get_market_data 自动续传**：单次最多 24000 条（来自 ``tqcenter.kline_max_count``），
    超出时按 end_time 倒推分批拉取并合并。
-4. **板块管理返回真实结果**：与 Mock 不同，``create_sector`` / ``delete_sector`` 等
+5. **板块管理返回真实结果**：与 Mock 不同，``create_sector`` / ``delete_sector`` 等
    会真实调用 tqcenter。
-5. **不硬编码任何路径/阈值**：所有参数从 ``ConfigLoader`` 读取。
+6. **不硬编码任何路径/阈值**：所有参数从 ``ConfigLoader`` 读取。
 
 API 清单参考 worklog Task 2-a / 2-b / 2-h：
 - 行情类：``get_market_snapshot`` / ``get_pricevol`` / ``get_market_data`` /
@@ -30,8 +34,12 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+import platform
+import sys
 import time
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any, Callable
 
 import pandas as pd
@@ -45,16 +53,103 @@ from engine.utils.time import normalize_date
 logger = logging.getLogger(__name__)
 
 
-# tqcenter 可选导入
+# ----------------------------------------------------------------------------
+# tqcenter 动态导入（sys.path.insert 机制）
+# ----------------------------------------------------------------------------
+# tqcenter 是通达信终端目录下的 Python 文件，不在 PyPI。
+# 导入路径优先级：
+#   1. 环境变量 TQ_CENTER_PATH (绝对路径，指向含 tqcenter.py 的目录)
+#   2. config/app.yaml 的 tqcenter.python_path
+#   3. 通达信常见安装目录扫描 (Windows only)
+#   4. 直接尝试 import (用户已手动 pip install -e 或加 PYTHONPATH 的情况)
+
+# 通达信终端常见安装路径 (Windows)
+_TDX_COMMON_PATHS = [
+    r"C:\new_tdx", r"D:\new_tdx", r"E:\new_tdx", r"F:\new_tdx",
+    r"C:\通达信", r"D:\通达信", r"E:\通达信", r"F:\通达信",
+    r"C:\Program Files\通达信", r"D:\Program Files\通达信",
+    r"C:\Program Files (x86)\通达信",
+    r"K:\txdlianghua",  # 用户实际安装路径
+]
+
+# 在通达信根目录下查找 tqcenter.py 的候选子路径
+_TQCENTER_SUBPATHS = [
+    "PYPlugins\\user",           # 新版通达信: K:\txdlianghua\PYPlugins\user\tqcenter.py
+    "T0002\\hq_cache\\PythonLib",  # 旧版: T0002\hq_cache\PythonLib\tqcenter.py
+    "Python\\site-packages",    # 嵌入式 Python 环境
+    "PYPlugins",                # 简化路径
+]
+
+
+def _find_tqcenter_dir() -> str | None:
+    """扫描通达信常见安装目录，返回包含 tqcenter.py 的目录路径。Windows only。"""
+    if platform.system() != "Windows":
+        return None
+    for tdx_root in _TDX_COMMON_PATHS:
+        root = Path(tdx_root)
+        if not root.exists():
+            continue
+        for sub in _TQCENTER_SUBPATHS:
+            candidate = root / sub
+            if (candidate / "tqcenter.py").exists() or (candidate / "tqcenter" / "__init__.py").exists():
+                return str(candidate)
+    return None
+
+
+def _resolve_tqcenter_path() -> str | None:
+    """按优先级解析 tqcenter 所在目录。返回绝对路径字符串或 None。"""
+    # 1. 环境变量 TQ_CENTER_PATH
+    env_path = os.environ.get("TQ_CENTER_PATH", "").strip()
+    if env_path and Path(env_path).exists():
+        return env_path
+    # 2. config tqcenter.python_path
+    try:
+        cfg = ConfigLoader()
+        cfg_path = str(cfg.get("tqcenter.python_path", "") or "").strip()
+        if cfg_path and Path(cfg_path).exists():
+            return cfg_path
+    except Exception:  # noqa: BLE001
+        pass
+    # 3. 扫描通达信常见目录
+    return _find_tqcenter_dir()
+
+
+def _import_tqcenter() -> tuple[bool, str, Any, Any]:
+    """动态导入 tqcenter。返回 (available, err_msg, tq, tqconst)。"""
+    # 先尝试直接 import（用户可能已 pip install -e 或设 PYTHONPATH）
+    try:
+        from tqcenter import tq as tq_mod  # type: ignore[import]
+        from tqcenter import tqconst as tqconst_mod  # type: ignore[import]
+        return True, "", tq_mod, tqconst_mod
+    except ImportError:
+        pass
+
+    # 通过 sys.path.insert 导入
+    tq_dir = _resolve_tqcenter_path()
+    if tq_dir:
+        if tq_dir not in sys.path:
+            sys.path.insert(0, tq_dir)
+        try:
+            from tqcenter import tq as tq_mod  # type: ignore[import]
+            from tqcenter import tqconst as tqconst_mod  # type: ignore[import]
+            logger.info("tqcenter 已从 %s 导入", tq_dir)
+            return True, "", tq_mod, tqconst_mod
+        except Exception as exc:  # noqa: BLE001
+            return False, f"在 {tq_dir} 找到但导入失败: {exc}", None, None
+        # 不从 sys.path 移除 tq_dir：tqcenter 内部可能还需要它来加载同目录的辅助模块
+        # (如 TPythClient.dll 通过 __file__ 定位，但某些子模块可能走 sys.path)
+    return False, "未找到 tqcenter.py，请设置 TQ_CENTER_PATH 环境变量或 config.tqcenter.python_path", None, None
+
+
+# 模块加载时执行导入
 _tqcenter_available = False
+_tqcenter_err_msg = ""
 _tq = None
 _tqconst = None
 try:
-    from tqcenter import tq as _tq  # type: ignore[import]
-    from tqcenter import tqconst as _tqconst  # type: ignore[import]
-    _tqcenter_available = True
+    _tqcenter_available, _tqcenter_err_msg, _tq, _tqconst = _import_tqcenter()
 except Exception as _import_exc:  # noqa: BLE001
-    _import_exc_msg = str(_import_exc)
+    _tqcenter_err_msg = str(_import_exc)
 
 
 class RealAdapter(BaseDataAdapter):
@@ -63,6 +158,7 @@ class RealAdapter(BaseDataAdapter):
     def __init__(self) -> None:
         cfg = ConfigLoader()
         self._initialize_file: str = cfg.get("tqcenter.initialize_file", "__file__")
+        self._python_path: str = str(cfg.get("tqcenter.python_path", "") or "")
         self._subscribe_batch_size: int = int(cfg.get("tqcenter.subscribe_batch_size", 50))
         self._kline_max_count: int = int(cfg.get("tqcenter.kline_max_count", 24000))
         self._initialized: bool = False
@@ -71,8 +167,11 @@ class RealAdapter(BaseDataAdapter):
 
         if not _tqcenter_available:
             logger.warning(
-                "tqcenter 不可用（%s）。RealAdapter 可实例化但所有调用将抛 RuntimeError",
-                _import_exc_msg if not _tqcenter_available else "",
+                "tqcenter 不可用（%s）。RealAdapter 可实例化但所有调用将抛 RuntimeError。"
+                "解决方法：1) 设置环境变量 TQ_CENTER_PATH=<含 tqcenter.py 的目录>；"
+                "2) 或在 config/app.yaml 的 tqcenter.python_path 配置路径；"
+                "3) 或确保通达信终端已安装（自动扫描 K:\\txdlianghua 等常见路径）。",
+                _tqcenter_err_msg,
             )
 
     # ------------------------------------------------------------------
@@ -83,8 +182,11 @@ class RealAdapter(BaseDataAdapter):
         """校验 tqcenter 已导入并已初始化。"""
         if not _tqcenter_available:
             raise RuntimeError(
-                "tqcenter 不可用，RealAdapter 无法工作。请在 Windows + 通达信终端环境运行，"
-                "或切换 config/app.yaml 的 app.adapter_mode 为 mock"
+                f"tqcenter 不可用：{_tqcenter_err_msg}。"
+                "解决方法：1) 设置环境变量 TQ_CENTER_PATH=<含 tqcenter.py 的目录>；"
+                "2) 或在 config/app.yaml 的 tqcenter.python_path 配置路径；"
+                "3) 或确保通达信终端已安装。"
+                "若仍无法解决，请切换 config/app.yaml 的 app.adapter_mode 为 mock。"
             )
         if not self._initialized:
             if not self.initialize():
@@ -100,23 +202,38 @@ class RealAdapter(BaseDataAdapter):
     # ------------------------------------------------------------------
 
     def initialize(self) -> bool:
-        """调用 ``tq.initialize(__file__)``。"""
+        """调用 ``tq.initialize(<path>)`` 初始化通达信连接。
+
+        tq.initialize 需要一个路径作为上下文，用于定位 TPythClient.dll 和配置文件。
+        路径优先级：
+          1. config tqcenter.initialize_file (如果不是 "__file__" 占位符)
+          2. config tqcenter.python_path (含 tqcenter.py 的目录) + "/tqcenter.py"
+          3. 环境变量 TQ_CENTER_INITIALIZE
+          4. 本文件 __file__ (兜底，可能无法定位 DLL)
+        """
         if not _tqcenter_available:
             return False
         if self._initialized:
             return True
         try:
-            # tq.initialize(__file__) 需要 __file__ 上下文定位配置文件
-            # 这里用本文件的 __file__ 或配置中的 initialize_file 字符串
-            init_arg = self._initialize_file
+            init_arg: str = self._initialize_file
             if init_arg == "__file__":
-                init_arg = __file__
+                # 优先用 python_path 拼出 tqcenter.py 路径（用户示例：传 tqcenter.py 路径）
+                if self._python_path:
+                    init_arg = str(Path(self._python_path) / "tqcenter.py")
+                else:
+                    # 兜底环境变量
+                    env_init = os.environ.get("TQ_CENTER_INITIALIZE", "").strip()
+                    if env_init:
+                        init_arg = env_init
+                    else:
+                        init_arg = __file__
             _tq.initialize(init_arg)
             self._initialized = True
-            logger.info("RealAdapter tq.initialize 完成")
+            logger.info("RealAdapter tq.initialize 完成 (init_arg=%s)", init_arg)
             return True
         except Exception as exc:  # noqa: BLE001
-            logger.error("tq.initialize 失败: %s", exc)
+            logger.error("tq.initialize 失败 (init_arg=%s): %s", init_arg, exc)
             return False
 
     def close(self) -> None:

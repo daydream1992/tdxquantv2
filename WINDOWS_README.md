@@ -25,13 +25,13 @@
 
 ## 🚀 3 步开箱即用
 
-### Step 1 — 解压项目到 `D:\tdxquant`
+### Step 1 — 解压项目到 `K:\tdxquantv2`
 
-把压缩包解压到 `D:\tdxquant`（或其他不含中文/空格的路径）。
+把压缩包解压到 `K:\tdxquantv2`（或其他不含中文/空格的路径）。
 
 > ⚠️ **路径禁忌**: 不要用 `C:\Users\张三\我的文档\tdxquant` 这种含中文/空格的路径，会导致部分脚本失败。
 >
-> ✅ 推荐: `D:\tdxquant`、`C:\tdxquant`、`E:\quant\tdxquant`
+> ✅ 推荐: `K:\tdxquantv2`、`D:\tdxquant`、`C:\tdxquant`、`E:\quant\tdxquant`
 
 ### Step 2 — 双击 `install.bat`
 
@@ -42,7 +42,7 @@
 | 预检环境 | Python 版本 / pip / 通达信 / 端口可用性 | ~5 秒 |
 | 装依赖 | `pip install -r requirements.txt` + `bun install` | 1-3 分钟 |
 | 初始化数据库 | DuckDB 建表 + 示例数据 | ~10 秒 |
-| 装 tqcenter | 从通达信终端目录自动复制 | ~5 秒 |
+| 配置 tqcenter 路径 | 扫描通达信目录，把 `tqcenter.py` 路径写入 `config\app.yaml` | ~5 秒 |
 | 创建快捷方式 | 桌面 `TdxQuant 启动` / `停止` / `大屏.url` | 即时 |
 | 最终就绪度报告 | 12 项检查再次输出 | ~5 秒 |
 
@@ -87,18 +87,32 @@ curl http://127.0.0.1:8000/api/monitor/health
 要接通真实行情，按以下步骤切换到 **Real 模式**：
 
 1. **启动通达信终端并登录**（保持前台，不要最小化到托盘）
-2. **编辑 `config\app.yaml`**：
+2. **配置 tqcenter 路径**（关键！tqcenter 不是 pip 包，是通达信目录下的 Python 文件）：
+   ```cmd
+   :: 方式 A: 自动扫描 + 写入 config\app.yaml (推荐)
+   python scripts\install_tqcenter.py
+
+   :: 方式 B: 手动指定路径 (你的通达信装在 K:\txdlianghua)
+   python scripts\install_tqcenter.py --path K:\txdlianghua\PYPlugins\user
+
+   :: 方式 C: 用环境变量 (不写配置文件)
+   python scripts\install_tqcenter.py --env
+   :: 然后按提示在 cmd 里 set TQ_CENTER_PATH=K:\txdlianghua\PYPlugins\user
+   ```
+   脚本会把 `tqcenter.python_path: "K:\\txdlianghua\\PYPlugins\\user"` 写入 `config\app.yaml`。
+3. **编辑 `config\app.yaml`** 切换模式：
    ```yaml
    app:
      adapter_mode: real    # mock → real
    ```
-3. **双击 `restart.bat`** 重启服务（适配器模式不支持热加载）
-4. **验证**：
+   > 💡 或直接用 `config\app.windows.example.yaml` 复制为 `app.yaml`，已预填 `K:\txdlianghua` 路径 + Real 模式 + 保守限流。
+4. **双击 `restart.bat`** 重启服务（适配器模式不支持热加载）
+5. **验证**：
    ```cmd
    curl http://127.0.0.1:8000/api/monitor?action=status
    ```
    应返回 `"adapter":"real"` 字样
-5. **触发一次选股测试**：
+6. **触发一次选股测试**：
    ```cmd
    curl -X POST http://127.0.0.1:8000/api/strategies/dbqzt/run
    :: 等待约 30 秒（Real 模式需调 tqcenter 拉数据）
@@ -108,7 +122,7 @@ curl http://127.0.0.1:8000/api/monitor/health
 
 > ⚠️ Real 模式必须 Windows + 通达信终端已登录。Linux 不支持。
 >
-> 💡 也可直接用 `config\app.windows.example.yaml` 复制为 `app.yaml`，已按 Windows Real 场景配好（路径用反斜杠、限流更保守）。
+> 💡 **tqcenter 工作原理**: 你的项目 → RealAdapter → `sys.path.insert` 加载 `K:\txdlianghua\PYPlugins\user\tqcenter.py` → tqcenter 通过 `ctypes.CDLL` 加载 `K:\txdlianghua\TPythClient.dll` → 通达信终端。所以**不需要 pip install tqcenter**，只要路径配对就行。
 
 ### Real 模式初用建议
 
@@ -134,7 +148,7 @@ curl http://127.0.0.1:8000/api/monitor/health
 
 ### 开机自启配置
 
-1. 编辑 `windows\TdxQuantAutoStart.xml`，把所有 `%USERPROFILE%\tdxquant` 替换为你的实际路径（例如 `D:\tdxquant`）
+1. XML 已预填 `K:\tdxquantv2`（你的项目路径）。如装别处，编辑 `windows\TdxQuantAutoStart.xml` 把 `K:\tdxquantv2` 替换为你的实际路径
 2. 用管理员 cmd 运行：
    ```cmd
    schtasks /create /tn "TdxQuant" /xml windows\TdxQuantAutoStart.xml /f
@@ -169,7 +183,7 @@ python scripts\precheck.py --fix
 | `'python' 不是内部或外部命令` | Python 没装或没加 PATH | 重装 Python，勾选 "Add to PATH"；或手动把 `C:\Users\xxx\AppData\Local\Programs\Python\Python313\` 加入 PATH |
 | `'bun' 不是内部或外部命令` | bun 没装 | `powershell -c "irm bun.sh/install.ps1 \| iex"`，重开 cmd |
 | `tq.initialize() 失败` / `终端未连接` | 通达信终端没启动或没登录 | 启动通达信，登录后保持前台（不要最小化到托盘），再 `restart.bat` |
-| `ModuleNotFoundError: tqcenter` | tqcenter 没装 | `python scripts\install_tqcenter.py --list` 查候选；或 `pip install tqcenter` |
+| `ModuleNotFoundError: tqcenter` | tqcenter 路径没配 | `python scripts\install_tqcenter.py`（自动扫描写入 config）；或手动配 `config\app.yaml` 的 `tqcenter.python_path`；或 `set TQ_CENTER_PATH=K:\txdlianghua\PYPlugins\user` |
 | `database is locked` | 已有实例在跑 | `stop.bat` 后重启；或 `taskkill /F /IM python.exe` 强杀所有 Python 进程 |
 | 端口 8000 / 3000 被占用 | 旧进程没退干净 | `netstat -ano \| findstr :8000` 找 PID，`taskkill /PID <pid> /F` |
 | 飞书推送不生效 | webhook 没配 | 编辑 `config\channels.yaml`，填 `feishu_webhook`，重启 |

@@ -21,13 +21,18 @@ openpyxl>=3.1
 simpleeval>=1.0
 
 # =====================================================================
-# tqcenter (通达信官方 Python API) - Windows 生产环境必装, Linux/macOS 跳过
+# tqcenter (通达信官方 Python API) - Windows 生产环境必填, Linux/macOS 跳过
 # =====================================================================
-# tqcenter 不在 PyPI 公开仓库, 由通达信终端安装目录附带.
-# 自动安装 (推荐): python scripts/install_tqcenter.py
-# 手动安装: pip install --no-index --find-links="<通达信>\T0002\hq_cache\PythonLib" tqcenter
-# 详见: WINDOWS_README.md 第 3 步 / docs/DEPLOY.md §Windows
-# tqcenter>=1.0; sys_platform == "win32"  # 取消注释并指定路径后启用
+# tqcenter 不在 PyPI 公开仓库, 是通达信终端安装目录下的 Python 文件
+# (通常在 <通达信>\PYPlugins\user\tqcenter.py, 通过 ctypes 加载 TPythClient.dll)
+#
+# 不需要 pip install! RealAdapter 通过 sys.path.insert 动态加载:
+#   1. 自动扫描: K:\txdlianghua\PYPlugins\user 等常见路径 (无需配置)
+#   2. 环境变量: set TQ_CENTER_PATH=K:\txdlianghua\PYPlugins\user
+#   3. 配置文件: config/app.yaml 的 tqcenter.python_path 字段
+#   4. 一键配置: python scripts/install_tqcenter.py (自动扫描+写入配置)
+#
+# 详见: WINDOWS_README.md §切换 Real 模式 / docs/DEPLOY.md §Windows
 
 # 可选（生产环境才需要）
 # pydantic>=2.0  # FastAPI 已自带

@@ -75,6 +75,11 @@ class PathsConfig:
 class TqCenterConfig:
     """``config/app.yaml`` 中 ``tqcenter`` 段（Real 模式专用）。"""
 
+    # tqcenter.py 所在目录（Windows: K:\txdlianghua\PYPlugins\user）
+    # 留空则自动扫描通达信常见安装路径，或读环境变量 TQ_CENTER_PATH
+    python_path: str = ""
+    # tq.initialize(path) 入参，传 "__file__" 占位符时代码自动用 python_path/tqcenter.py
+    # 也可直接配绝对路径，如 K:\txdlianghua\PYPlugins\user\tqcenter.py
     initialize_file: str = "__file__"
     subscribe_batch_size: int = 50
     kline_max_count: int = 24000

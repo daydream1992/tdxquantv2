@@ -1,10 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   ============================================================
-  TdxQuant 开机自启任务计划模板
+  TdxQuant 开机自启任务计划模板 (已预填用户路径)
   ============================================================
   功能: Windows 开机后 30 秒自动后台启动 TdxQuant 服务
   方式: 调用 wscript.exe 执行 tdxquant-launcher.vbs (静默,无 cmd 黑窗)
+
+  用户环境预设:
+    - 项目安装目录: K:\tdxquantv2
+    - 通达信安装目录: K:\txdlianghua (需用户自行启动并登录通达信终端)
 
   导入命令 (管理员 cmd 运行):
     schtasks /create /tn "TdxQuant" /xml windows\TdxQuantAutoStart.xml /f
@@ -18,8 +22,7 @@
   删除任务:
     schtasks /delete /tn "TdxQuant" /f
 
-  使用前请把 %USERPROFILE%\tdxquant 替换为你的实际项目路径
-  例如: C:\Users\john\tdxquant
+  注意: 若你的项目装在别的路径, 请把下面 K:\tdxquantv2 替换为你的实际路径
   ============================================================
 -->
 <Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -76,8 +79,8 @@
   <Actions Context="Author">
     <Exec>
       <Command>wscript.exe</Command>
-      <Arguments>"%USERPROFILE%\tdxquant\tdxquant-launcher.vbs"</Arguments>
-      <WorkingDirectory>%USERPROFILE%\tdxquant</WorkingDirectory>
+      <Arguments>"K:\tdxquantv2\tdxquant-launcher.vbs"</Arguments>
+      <WorkingDirectory>K:\tdxquantv2</WorkingDirectory>
     </Exec>
   </Actions>
 </Task>

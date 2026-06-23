@@ -614,3 +614,102 @@ Stage Summary:
   2. 如 tqcenter 自动安装失败, 提供 --path 参数手动指定
   3. Real 模式连真机后, 跑一遍 smoke test (curl /api/monitor?action=status 看 adapter=real)
   4. 长期: 可考虑打包成 .zip 一键发行包 (含 venv 离线依赖), 当前是源码部署
+
+---
+Task ID: 4
+Agent: Z.ai Code (Claude, 主控)
+Task: 用户提供通达信真实路径 + tqcenter 导入机制后, 修正所有 Windows 部署文件 — tqcenter 不是 pip 包, 是 sys.path.insert 导入的本地 Python 文件
+
+Work Log:
+- 用户提供关键技术细节:
+  * 通达信安装目录: K:\txdlianghua
+  * tqcenter.py 路径: K:\txdlianghua\PYPlugins\user\tqcenter.py (160KB)
+  * TPythClient.dll: K:\txdlianghua\TPythClient.dll
+  * 项目安装目标: K:\tdxquantv2
+  * 导入机制: sys.path.insert(0, r"k:\txdlianghua\PYPlugins\user") + from tqcenter import tq
+  * 底层: tqcenter.py 用 ctypes.CDLL 加载 TPythClient.dll, dll.InitConnect() 建连
+  * 初始化: tq.initialize(__file__) 传路径作上下文定位 DLL
+- 诊断 subagent 之前的方向错误:
+  * Subagent A 的 install_tqcenter.py 用 pip install --find-links / -e 装 tqcenter (错! tqcenter 不是 pip 包)
+  * precheck.py 的 check_tdx_tqcenter_path 找 __init__.py (错! tqcenter.py 是单文件模块)
+  * real_adapter.py 用 from tqcenter import tq 不加 sys.path (在 Windows 上会 ImportError)
+- 修正 6 个文件:
+  1. engine/data_adapter/real_adapter.py (核心改动, +85 行):
+     * 加 _TDX_COMMON_PATHS (12 个路径, 含 K:\txdlianghua) + _TQCENTER_SUBPATHS (4 个子路径: PYPlugins\user / T0002\hq_cache\PythonLib / Python\site-packages / PYPlugins)
+     * 加 _find_tqcenter_dir() 扫描函数
+     * 加 _resolve_tqcenter_path() 优先级解析 (env TQ_CENTER_PATH > config tqcenter.python_path > 扫描)
+     * 加 _import_tqcenter() 动态导入 (先 try 直接 import, 失败则 sys.path.insert + import, 不移除 sys.path 避免破坏 tqcenter 内部依赖)
+     * __init__ 加 self._python_path 读 config
+     * _ensure_tq 错误信息改为含 3 种解决方法 (env / config / 扫描)
+     * initialize() 用 python_path/tqcenter.py 作 init_arg (用户示例: 传 tqcenter.py 路径), 兜底 env TQ_CENTER_INITIALIZE
+  2. engine/config/schema.py (+5 行): TqCenterConfig 加 python_path: str = "" 字段 (含注释说明)
+  3. config/app.yaml (+10 行): tqcenter 段加 python_path: "" 字段 + 详细注释 (留空自动扫描 / 示例 K:\txdlianghua\PYPlugins\user / 环境变量覆盖)
+  4. config/app.windows.example.yaml (改 tqcenter 段 + 头部注释): python_path 预填 "K:\\txdlianghua\\PYPlugins\\user", 头部加用户环境预设 (通达信/tqcenter/DLL/项目 4 个路径)
+  5. scripts/install_tqcenter.py (重写, 182→175 行): 从 "pip install" 改为 "路径配置器"
+     * 不再 pip install, 改为扫描通达信目录找 tqcenter.py
+     * 找到后写入 config/app.yaml 的 tqcenter.python_path 字段 (正则替换)
+     * 新增 --env 参数: 输出 set/$env 命令 (不写配置文件, 适合临时/容器场景)
+     * --list 改为列出含 tqcenter.py 的目录 (而非 pip install 目标)
+     * 验证 import 用 sys.path.insert (与 real_adapter 一致)
+  6. scripts/precheck.py (改 2 个函数 + 加 1 个常量):
+     * TDX_COMMON_PATHS 加 K:\txdlianghua (12 个路径)
+     * 加 TQCENTER_SUBPATHS 常量 (4 个子路径)
+     * check_tqcenter() 重写: 4 级尝试 (直接 import / env TQ_CENTER_PATH / 扫描通达信 / 未找到)
+     * check_tdx_tqcenter_path() 重写: 找 tqcenter.py 文件 (而非 __init__.py)
+- 新建 1 个文件: .env.example (40 行) — TQ_CENTER_PATH / TQ_CENTER_INITIALIZE / ADAPTER_MODE 3 个环境变量示例, 含 cmd/PowerShell 设置命令
+- 改 2 个 Windows 文件:
+  * windows/TdxQuantAutoStart.xml: %USERPROFILE%\tdxquant → K:\tdxquantv2 (Arguments + WorkingDirectory 2 处) + 头部注释加用户环境预设
+  * WINDOWS_README.md (4 处改动):
+    - Step 1 解压路径: D:\tdxquant → K:\tdxquantv2
+    - install.bat 步骤表: "装 tqcenter" → "配置 tqcenter 路径 (扫描+写入 config)"
+    - 切换 Real 模式: 加详细 tqcenter 配置 3 种方式 (自动扫描/手动--path/环境变量--env) + 工作原理说明 (sys.path.insert + ctypes + DLL)
+    - 开机自启: "替换 %USERPROFILE%" → "已预填 K:\tdxquantv2"
+    - FAQ: "pip install tqcenter" → "install_tqcenter.py 自动配置 / 手动配 python_path / set TQ_CENTER_PATH"
+- 改 1 个依赖文件: requirements.txt — tqcenter 注释从 "pip install" 改为 "不需要 pip install! sys.path.insert 动态加载" + 4 种配置方式
+
+Stage Summary:
+- 修正方向: tqcenter 是 sys.path.insert 导入的本地 Python 文件, 不是 pip 包
+- 6 个文件改动 + 1 个新文件 (.env.example):
+  * engine/data_adapter/real_adapter.py (+85 行) — 动态导入机制 + 12 路径扫描
+  * engine/config/schema.py (+5 行) — TqCenterConfig.python_path 字段
+  * config/app.yaml (+10 行) — python_path 字段 + 注释
+  * config/app.windows.example.yaml (tqcenter 段+头部) — 预填 K:\txdlianghua
+  * scripts/install_tqcenter.py (重写) — 路径配置器 (不再 pip install)
+  * scripts/precheck.py (2 函数+1 常量) — tqcenter.py 文件检测 + 12 路径扫描
+  * windows/TdxQuantAutoStart.xml — K:\tdxquantv2 预填
+  * WINDOWS_README.md (4 处) — tqcenter 配置 3 方式 + 工作原理
+  * requirements.txt — tqcenter 注释修正
+  * .env.example (新建) — 3 个环境变量示例
+- 沙箱验证:
+  * 6 个 .py 文件 py_compile 全过
+  * bun run lint exit 0
+  * precheck.py 跑通 12 项 (通过 7/失败 1 预期/警告 4)
+  * install_tqcenter.py --list / --env 在 Linux 正确降级提示
+  * real_adapter import OK (_tqcenter_available=False 预期, _tqcenter_err_msg 含解决方法)
+  * schema TqCenterConfig(python_path=...) validate OK
+  * FastAPI 启动 OK (/health 200, /api/config 200, adapter_mode=mock)
+  * Next.js 仍 200, dev.log 无 error
+- 用户路径全部预填:
+  * 通达信安装: K:\txdlianghua (写进 real_adapter 扫描表 + precheck 扫描表 + install_tqcenter 扫描表)
+  * tqcenter.py: K:\txdlianghua\PYPlugins\user\tqcenter.py (写进 app.windows.example.yaml)
+  * TPythClient.dll: K:\txdlianghua\TPythClient.dll (写进 WINDOWS_README 工作原理说明)
+  * 项目安装: K:\tdxquantv2 (写进 TdxQuantAutoStart.xml + WINDOWS_README)
+- tqcenter 导入 4 级优先级 (real_adapter + precheck 一致):
+  1. 直接 import (用户已 pip install -e 或配 PYTHONPATH)
+  2. 环境变量 TQ_CENTER_PATH
+  3. config tqcenter.python_path
+  4. 扫描通达信常见目录 (12 路径 × 4 子路径 = 48 候选)
+- 未解决问题:
+  1. /api/config 端点不返回 tqcenter 段 (ConfigSummaryResponse 设计如此, 非 bug; python_path 在 RealAdapter.__init__ 里通过 ConfigLoader.get() 读, 已验证可读)
+  2. Real 模式实际可用性仍依赖 Windows + tqcenter + 通达信终端登录, sandbox 无法验证
+  3. install_tqcenter.py 写 config/app.yaml 用正则替换 python_path 行, 如 YAML 格式异常 (如多行注释) 可能匹配失败, 但当前 app.yaml 格式正常
+- 给用户的下一步:
+  1. 把项目解压到 K:\tdxquantv2
+  2. 双击 install.bat (会自动扫描 K:\txdlianghua\PYPlugins\user 并写入 config)
+  3. 启动通达信终端并登录
+  4. 编辑 config\app.yaml: adapter_mode: mock → real (或复制 app.windows.example.yaml 为 app.yaml)
+  5. 双击 restart.bat
+  6. curl http://127.0.0.1:8000/api/monitor?action=status 验证 adapter=real
+- 如 install.bat 的 tqcenter 配置步骤失败, 用户可手动:
+  python scripts\install_tqcenter.py --path K:\txdlianghua\PYPlugins\user
+  或 set TQ_CENTER_PATH=K:\txdlianghua\PYPlugins\user (临时环境变量)

@@ -24,10 +24,20 @@ from typing import Any, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 IS_WINDOWS = platform.system() == "Windows"
-# 通达信终端常见安装路径 (Windows)
+# 通达信终端常见安装路径 (Windows), 含用户实际路径 K:\txdlianghua
 TDX_COMMON_PATHS = [
-    r"C:\new_tdx", r"D:\new_tdx", r"C:\通达信", r"D:\通达信",
+    r"C:\new_tdx", r"D:\new_tdx", r"E:\new_tdx", r"F:\new_tdx",
+    r"C:\通达信", r"D:\通达信", r"E:\通达信", r"F:\通达信",
     r"C:\Program Files\通达信", r"D:\Program Files\通达信",
+    r"C:\Program Files (x86)\通达信",
+    r"K:\txdlianghua",  # 用户实际安装路径
+]
+# 在通达信根目录下查找 tqcenter.py 的候选子路径
+TQCENTER_SUBPATHS = [
+    "PYPlugins\\user",            # 新版通达信: K:\txdlianghua\PYPlugins\user\tqcenter.py
+    "T0002\\hq_cache\\PythonLib",  # 旧版
+    "Python\\site-packages",      # 嵌入式 Python
+    "PYPlugins",                  # 简化路径
 ]
 _PALETTE = {"green": "\033[32m", "red": "\033[31m", "yellow": "\033[33m", "cyan": "\033[36m"}
 _RESET = "\033[0m"
@@ -108,15 +118,48 @@ def check_bun() -> dict[str, Any]:
 
 
 def check_tqcenter() -> dict[str, Any]:
+    """检查 tqcenter 能否 import。tqcenter 不在 PyPI, 通过 sys.path.insert 导入。
+    依次尝试: 直接 import / 环境变量 TQ_CENTER_PATH / config tqcenter.python_path / 扫描通达信目录。
+    """
+    # 1. 直接 import (用户已 pip install -e 或已配 PYTHONPATH)
     try:
         import tqcenter  # noqa: F401,PLC0415
-        return _r("tqcenter", "tqcenter (Real 模式)", PASS, "已安装")
+        return _r("tqcenter", "tqcenter (Real 模式)", PASS, "已可 import")
     except ImportError:
-        if _read_adapter_mode() == "real":
-            return _r("tqcenter", "tqcenter (Real 模式)", FAIL, "未安装",
-                      "python scripts/install_tqcenter.py")
-        return _r("tqcenter", "tqcenter (Real 模式)", WARN, "未安装 (mock 模式可忽略)",
-                  "Real 模式需安装: python scripts/install_tqcenter.py")
+        pass
+    # 2. 环境变量 TQ_CENTER_PATH
+    env_path = os.environ.get("TQ_CENTER_PATH", "").strip()
+    if env_path and Path(env_path).exists() and env_path not in sys.path:
+        sys.path.insert(0, env_path)
+        try:
+            import tqcenter  # noqa: F401,PLC0415
+            return _r("tqcenter", "tqcenter (Real 模式)", PASS, f"已从 TQ_CENTER_PATH 导入: {env_path}")
+        except ImportError:
+            pass
+    # 3. 扫描通达信目录 (Windows)
+    if IS_WINDOWS:
+        for tdx_root in TDX_COMMON_PATHS:
+            root = Path(tdx_root)
+            if not root.exists():
+                continue
+            for sub in TQCENTER_SUBPATHS:
+                candidate = root / sub
+                if (candidate / "tqcenter.py").exists() or (candidate / "tqcenter" / "__init__.py").exists():
+                    cand_str = str(candidate)
+                    if cand_str not in sys.path:
+                        sys.path.insert(0, cand_str)
+                    try:
+                        import tqcenter  # noqa: F401,PLC0415
+                        return _r("tqcenter", "tqcenter (Real 模式)", PASS,
+                                  f"已从通达信目录导入: {candidate}")
+                    except ImportError:
+                        pass
+    # 4. 未找到
+    if _read_adapter_mode() == "real":
+        return _r("tqcenter", "tqcenter (Real 模式)", FAIL, "未找到 tqcenter.py",
+                  "python scripts/install_tqcenter.py  (或手动配 config.tqcenter.python_path)")
+    return _r("tqcenter", "tqcenter (Real 模式)", WARN, "未找到 (mock 模式可忽略)",
+              "Real 模式需配置: python scripts/install_tqcenter.py")
 
 
 def check_python_deps() -> dict[str, Any]:
@@ -179,19 +222,24 @@ def check_tdx_terminal() -> dict[str, Any]:
 
 
 def check_tdx_tqcenter_path() -> dict[str, Any]:
+    """检查通达信目录下能否找到 tqcenter.py 文件。"""
     if not IS_WINDOWS:
-        return _r("tdx_tqcenter_path", "tqcenter 路径", WARN, "非 Windows, 跳过")
-    for path in TDX_COMMON_PATHS:
-        root = Path(path)
+        return _r("tdx_tqcenter_path", "tqcenter.py 路径", WARN, "非 Windows, 跳过")
+    for tdx_root in TDX_COMMON_PATHS:
+        root = Path(tdx_root)
         if not root.exists():
             continue
-        for c in (root / "T0002" / "hq_cache" / "PythonLib" / "tqcenter",
-                  root / "T0002" / "hq_cache" / "PythonLib",
-                  root / "Python" / "site-packages" / "tqcenter"):
-            if (c / "__init__.py").exists() or (c / "tqcenter" / "__init__.py").exists():
-                return _r("tdx_tqcenter_path", "tqcenter 路径", PASS, f"找到: {c}")
-    return _r("tdx_tqcenter_path", "tqcenter 路径", WARN, "未在通达信目录找到 tqcenter",
-              "python scripts/install_tqcenter.py")
+        for sub in TQCENTER_SUBPATHS:
+            candidate = root / sub
+            # 找 tqcenter.py (单文件模块) 或 tqcenter/__init__.py (包)
+            if (candidate / "tqcenter.py").exists():
+                return _r("tdx_tqcenter_path", "tqcenter.py 路径", PASS,
+                          f"找到: {candidate / 'tqcenter.py'}")
+            if (candidate / "tqcenter" / "__init__.py").exists():
+                return _r("tdx_tqcenter_path", "tqcenter.py 路径", PASS,
+                          f"找到: {candidate / 'tqcenter' / '__init__.py'}")
+    return _r("tdx_tqcenter_path", "tqcenter.py 路径", WARN, "未在通达信目录找到 tqcenter.py",
+              "python scripts/install_tqcenter.py --path <含 tqcenter.py 的目录>")
 
 
 def check_configs() -> dict[str, Any]:

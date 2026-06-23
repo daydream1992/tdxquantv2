@@ -2,11 +2,17 @@
 # ============================================================
 # 用途: Windows + 通达信终端 + Real 模式 的开箱即用配置
 #
+# 用户环境预设:
+#   - 通达信安装目录: K:\txdlianghua
+#   - tqcenter.py 路径: K:\txdlianghua\PYPlugins\user\tqcenter.py
+#   - TPythClient.dll : K:\txdlianghua\TPythClient.dll
+#   - 项目安装目录  : K:\tdxquantv2
+#
 # 使用方法:
 #   1. 复制本文件为 app.yaml:  copy app.windows.example.yaml app.yaml
 #   2. 按需修改:
 #      - paths 段: 路径用 Windows 反斜杠(\\ 转义)
-#      - tqcenter 段: 调整 global_qps / burst 适配你的终端响应速度
+#      - tqcenter 段: 已预填 K:\txdlianghua 路径,如你的通达信装别处请改 python_path
 #      - channels 段: 填飞书/钉钉 webhook(见 config\channels.yaml)
 #   3. 启动通达信终端并登录
 #   4. 双击 start.bat
@@ -14,6 +20,7 @@
 # 与 app.yaml(默认 mock 模式) 的差异:
 #   - adapter_mode: real
 #   - paths 全用 Windows 反斜杠
+#   - tqcenter.python_path 预填 K:\txdlianghua\PYPlugins\user
 #   - tqcenter.global_qps 调保守(8, 默认是 10),保护终端 GUI 线程
 #   - mock 段注释掉(real 模式不用)
 # ============================================================
@@ -52,7 +59,15 @@ paths:
   channels: config\\channels.yaml
 
 tqcenter:
-  # tq.initialize(__file__) 入参,传 __file__ 字符串占位(代码内自动替换)
+  # tqcenter.py 所在目录（Windows 生产环境必填）
+  # 用户的通达信安装在 K:\txdlianghua，tqcenter.py 在 K:\txdlianghua\PYPlugins\user\
+  # 留空时 RealAdapter 会自动扫描，但显式配置更可靠
+  # 也可用环境变量 TQ_CENTER_PATH 覆盖
+  python_path: "K:\\txdlianghua\\PYPlugins\\user"
+  # tq.initialize(path) 入参
+  # - 留 "__file__" 占位符：代码自动用 python_path/tqcenter.py（推荐，省心）
+  # - 或配绝对路径：K:\txdlianghua\PYPlugins\user\tqcenter.py
+  # 也可用环境变量 TQ_CENTER_INITIALIZE 覆盖
   initialize_file: __file__
   # subscribe_hq 单次最多 100 只,分批 50(可配置,默认 50 是平衡值)
   # Windows 终端响应慢时可降到 20-30

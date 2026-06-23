@@ -31,7 +31,16 @@ paths:
   channels: ./config/channels.yaml
 
 tqcenter:
-  # Real 模式下 tq.initialize(__file__) 入参，传 __file__ 字符串占位
+  # tqcenter.py 所在目录（Windows 生产环境必填，mock 模式留空即可）
+  # 示例: K:\txdlianghua\PYPlugins\user
+  # 留空时 RealAdapter 会自动扫描通达信常见安装路径：
+  #   C:\new_tdx / D:\new_tdx / K:\txdlianghua 等下的 PYPlugins\user 或 T0002\hq_cache\PythonLib
+  # 也可用环境变量 TQ_CENTER_PATH 覆盖
+  python_path: ""
+  # tq.initialize(path) 入参
+  # - 留 "__file__" 占位符：代码自动用 python_path/tqcenter.py（推荐）
+  # - 或配绝对路径：如 K:\txdlianghua\PYPlugins\user\tqcenter.py
+  # 也可用环境变量 TQ_CENTER_INITIALIZE 覆盖
   initialize_file: __file__
   # subscribe_hq 单次最多 100 只，分批 50（可配置）
   subscribe_batch_size: 50
