@@ -1,0 +1,1790 @@
+     1→ 优先级建议
+     2→高优先级 (必须立即处理):
+     3→1. 路径处理优化 (#1)
+     4→2. 启动脚本适配 (#2)
+     5→3. 依赖管理优化 (#3)
+     6→4. 通达信API对接 (#6)
+     7→中优先级
+     8→ (影响稳定性):
+     9→5. 文件编码处理 (#4)
+    10→6. 进程管理优化 (#5)
+    11→7. 配置文件路径 (#13)
+    12→8. 服务部署优化 (#14)
+    13→低优先级
+    14→ (长期优化):
+    15→9. 文件锁机制 (#8)
+    16→10. 环境变量处理 (#9)
+    17→11. Git配置优化 (#10)
+    18→这些优化确保项目能在Windows环境中稳定运行，同时保持与Linux环境的兼容性。
+    19→￼
+    20→明细和细节全部列出来
+    21→Thought for 2s
+    22→基于这个项目的完整Windows适配经验，以下是详细的优化清单：
+    23→🔧 Windows迁移完整优化清单
+    24→一、代码级别优化
+    25→1.1 路径处理系统 ⭐⭐⭐⭐⭐
+    26→问题分析:
+    27→• Windows使用\分隔符，Linux使用/
+    28→• Windows驱动器字母(C:\)，Linux根目录(/)
+    29→• 路径长度限制(Windows 260字符)
+    30→• 大小写不敏感特性
+    31→解决方案:
+    32→Copy code to clipboard
+    33→# ❌ 错误写法
+    34→path = "data/logs/fastapi.log"
+    35→file_path = "/home/user/project/config.yaml"
+    36→
+    37→# ✅ 正确写法
+    38→from pathlib import Path
+    39→import os
+    40→
+    41→# 基础路径操作
+    42→PROJECT_ROOT = Path(__file__).parent.parent
+    43→LOG_DIR = PROJECT_ROOT / "data" / "logs"
+    44→CONFIG_FILE = PROJECT_ROOT / "config" / "app.yaml"
+    45→
+    46→# 确保目录存在
+    47→LOG_DIR.mkdir(parents=True, exist_ok=True)
+    48→
+    49→# 跨平台路径拼接
+    50→data_file = LOG_DIR / "fastapi.log"
+    51→
+    52→# 路径转换(用于需要字符串的场景)
+    53→str_path = str(data_file)
+    54→posix_path = data_file.as_posix()  # 强制使用/分隔符
+    55→路径替换占位符系统:
+    56→Copy code to clipboard
+    57→# scripts/paths.yaml
+    58→placeholders:
+    59→  VENV_PYTHON:
+    60→    linux: "python"
+    61→    windows: "python"
+    62→    description: "Python解释器路径"
+    63→  
+    64→  PROJECT_ROOT:
+    65→    linux: "."
+    66→    windows: "." 
+    67→    description: "项目根目录"
+    68→    
+    69→  LOG_DIR:
+    70→    linux: "data/logs"
+    71→    windows: "data\\logs"
+    72→    description: "日志目录"
+    73→    
+    74→  TMP_DIR:
+    75→    linux: "/tmp"
+    76→    windows: "$env:TEMP"
+    77→    description: "临时文件目录"
+    78→    
+    79→  NULL_DEV:
+    80→    linux: "/dev/null"
+    81→    windows: "NUL"
+    82→    description: "空设备"
+    83→    
+    84→active_env: "linux"  # 当前激活环境
+    85→自动化替换脚本:
+    86→Copy code to clipboard
+    87→#!/bin/bash
+    88→# scripts/replace-paths.sh
+    89→# 用法: bash scripts/replace-paths.sh --env windows
+    90→
+    91→ENV=${1:-$(grep 'active_env:' scripts/paths.yaml | awk '{print $2}')}
+    92→
+    93→# 读取映射表
+    94→declare -A MAP
+    95→while IFS=': ' read -r key value; do
+    96→    if [[ "$key" =~ ^[A-Z_]+$ ]]; then
+    97→        MAP[$key]=$value
+    98→    fi
+    99→done < <(grep -A 100 "placeholders:" scripts/paths.yaml | \
+   100→        grep -E "^  [A-Z_]+:" | \
+   101→        sed 's/: /:/' | \
+   102→        awk '{print $1":"$2}')
+   103→
+   104→# 替换逻辑
+   105→replace_placeholders() {
+   106→    local file=$1
+   107→    local ext=${file##*.}
+   108→    
+   109→    # 跳过二进制文件
+   110→    if [[ "$ext" =~ ^(png|jpg|jpeg|gif|ico|svg|zip|7z|xlsx|csv|db|pyc)$ ]]; then
+   111→        return
+   112→    fi
+   113→    
+   114→    for key in "${!MAP[@]}"; do
+   115→        placeholder="{{${key}}}"
+   116→        value="${MAP[$key]}"
+   117→        sed -i "s|${placeholder}|${value}|g" "$file"
+   118→    done
+   119→}
+   120→
+   121→# 扫描替换
+   122→find . -type f \( -name "*.py" -o -name "*.sh" -o -name "*.yaml" \) \
+   123→    -not -path "./node_modules/*" \
+   124→    -not -path "./.git/*" \
+   125→    -exec bash -c 'replace_placeholders "$0"' {} \;
+   126→1.2 文件编码处理 ⭐⭐⭐⭐
+   127→问题分析:
+   128→• Windows默认GBK编码
+   129→• Linux默认UTF-8编码
+   130→• 文件读取时的编码不一致
+   131→• 控制台输出编码问题
+   132→解决方案:
+   133→Copy code to clipboard
+   134→# encoding_utils.py
+   135→import sys
+   136→import os
+   137→from pathlib import Path
+   138→
+   139→# 强制UTF-8环境
+   140→os.environ['PYTHONIOENCODING'] = 'utf-8'
+   141→
+   142→# 文件读取封装
+   143→def safe_read(file_path, encoding='utf-8'):
+   144→    """安全读取文件，自动处理编码"""
+   145→    try:
+   146→        with open(file_path, 'r', encoding=encoding) as f:
+   147→            return f.read()
+   148→    except UnicodeDecodeError:
+   149→        # 回退到系统默认编码
+   150→        with open(file_path, 'r', encoding='gbk') as f:
+   151→            return f.read()
+   152→    except Exception as e:
+   153→        raise RuntimeError(f"文件读取失败: {e}")
+   154→
+   155→def safe_write(file_path, content, encoding='utf-8'):
+   156→    """安全写入文件"""
+   157→    with open(file_path, 'w', encoding=encoding, newline='') as f:
+   158→        f.write(content)
+   159→
+   160→# 配置文件读取
+   161→def load_yaml(file_path):
+   162→    """加载YAML配置"""
+   163→    import yaml
+   164→    content = safe_read(file_path)
+   165→    return yaml.safe_load(content)
+   166→
+   167→# CSV文件处理
+   168→import pandas as pd
+   169→def safe_read_csv(file_path):
+   170→    """安全读取CSV"""
+   171→    try:
+   172→        return pd.read_csv(file_path, encoding='utf-8')
+   173→    except UnicodeDecodeError:
+   174→        return pd.read_csv(file_path, encoding='gbk')
+   175→编码检测工具:
+   176→Copy code to clipboard
+   177→import chardet
+   178→
+   179→def detect_encoding(file_path):
+   180→    """检测文件编码"""
+   181→    with open(file_path, 'rb') as f:
+   182→        raw_data = f.read(4096)  # 读取前4KB检测
+   183→    result = chardet.detect(raw_data)
+   184→    return result['encoding']
+   185→
+   186→# 使用示例
+   187→encoding = detect_encoding('data.csv')
+   188→df = pd.read_csv('data.csv', encoding=encoding)
+   189→1.3 进程管理优化 ⭐⭐⭐⭐⭐
+   190→问题分析:
+   191→• Windows使用taskkill，Linux使用pkill
+   192→• 进程启动方式不同
+   193→• 后台进程管理差异
+   194→• PID获取方式不同
+   195→解决方案:
+   196→Copy code to clipboard
+   197→# process_utils.py
+   198→import platform
+   199→import subprocess
+   200→import os
+   201→import signal
+   202→
+   203→class ProcessManager:
+   204→    """跨平台进程管理"""
+   205→    
+   206→    @staticmethod
+   207→    def is_windows():
+   208→        return platform.system() == 'Windows'
+   209→    
+   210→    @staticmethod
+   211→    def kill_process_by_name(pattern):
+   212→        """根据进程名杀死进程"""
+   213→        if ProcessManager.is_windows():
+   214→            # Windows: 使用taskkill
+   215→            try:
+   216→                subprocess.run(
+   217→                    ['taskkill', '/F', '/IM', pattern],
+   218→                    capture_output=True,
+   219→                    text=True,
+   220→                    timeout=10
+   221→                )
+   222→            except subprocess.TimeoutExpired:
+   223→                pass
+   224→        else:
+   225→            # Linux: 使用pkill
+   226→            try:
+   227→                subprocess.run(
+   228→                    ['pkill', '-f', pattern],
+   229→                    capture_output=True,
+   230→                    timeout=10
+   231→                )
+   232→            except subprocess.TimeoutExpired:
+   233→                pass
+   234→    
+   235→    @staticmethod
+   236→    def kill_process_by_pid(pid):
+   237→        """根据PID杀死进程"""
+   238→        if ProcessManager.is_windows():
+   239→            subprocess.run(['taskkill', '/F', '/PID', str(pid)], 
+   240→                          capture_output=True)
+   241→        else:
+   242→            os.kill(pid, signal.SIGKILL)
+   243→    
+   244→    @staticmethod
+   245→    def find_processes(pattern):
+   246→        """查找匹配的进程"""
+   247→        if ProcessManager.is_windows():
+   248→            # Windows: 使用tasklist
+   249→            result = subprocess.run(
+   250→                ['tasklist', '/FI', f'IMAGENAME eq {pattern}'],
+   251→                capture_output=True,
+   252→                text=True
+   253→            )
+   254→            # 解析输出获取PID
+   255→            pids = []
+   256→            for line in result.stdout.split('\n'):
+   257→                if pattern.lower() in line.lower():
+   258→                    parts = line.split()
+   259→                    if len(parts) >= 2:
+   260→                        try:
+   261→                            pids.append(int(parts[1]))
+   262→                        except ValueError:
+   263→                            continue
+   264→            return pids
+   265→        else:
+   266→            # Linux: 使用pgrep
+   267→            result = subprocess.run(['pgrep', '-f', pattern],
+   268→                                  capture_output=True, text=True)
+   269→            return [int(pid) for pid in result.stdout.strip().split('\n') if pid]
+   270→    
+   271→    @staticmethod
+   272→    def start_background_process(command, log_file=None):
+   273→        """启动后台进程"""
+   274→        if ProcessManager.is_windows():
+   275→            # Windows后台进程
+   276→            if log_file:
+   277→                subprocess.Popen(
+   278→                    command,
+   279→                    stdout=open(log_file, 'w'),
+   280→                    stderr=subprocess.STDOUT,
+   281→                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+   282→                )
+   283→            else:
+   284→                subprocess.Popen(
+   285→                    command,
+   286→                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+   287→                )
+   288→        else:
+   289→            # Linux后台进程
+   290→            if log_file:
+   291→                subprocess.Popen(
+   292→                    command,
+   293→                    stdout=open(log_file, 'w'),
+   294→                    stderr=subprocess.STDOUT,
+   295→                    start_new_session=True
+   296→                )
+   297→            else:
+   298→                subprocess.Popen(command, start_new_session=True)
+   299→    
+   300→    @staticmethod
+   301→    def get_process_info(pid):
+   302→        """获取进程信息"""
+   303→        if ProcessManager.is_windows():
+   304→            try:
+   305→                result = subprocess.run(
+   306→                    ['tasklist', '/FI', f'PID eq {pid}', '/FO', 'CSV'],
+   307→                    capture_output=True,
+   308→                    text=True,
+   309→                    check=True
+   310→                )
+   311→                # 解析CSV格式输出
+   312→                lines = result.stdout.strip().split('\n')
+   313→                if len(lines) > 1:
+   314→                    parts = lines[1].split(',')
+   315→                    return {
+   316→                        'name': parts[0].strip('"'),
+   317→                        'pid': int(parts[1].strip('"')),
+   318→                        'memory': parts[4].strip('"')
+   319→                    }
+   320→            except (subprocess.CalledProcessError, ValueError, IndexError):
+   321→                pass
+   322→        else:
+   323→            try:
+   324→                result = subprocess.run(
+   325→                    ['ps', '-p', str(pid), '-o', 'comm,rss'],
+   326→                    capture_output=True,
+   327→                    text=True,
+   328→                    check=True
+   329→                )
+   330→                lines = result.stdout.strip().split('\n')
+   331→                if len(lines) > 1:
+   332→                    parts = lines[1].split()
+   333→                    return {
+   334→                        'name': parts[0],
+   335→                        'pid': pid,
+   336→                        'memory': f"{parts[1]} KB"
+   337→                    }
+   338→            except subprocess.CalledProcessError:
+   339→                pass
+   340→        return None
+   341→使用示例:
+   342→Copy code to clipboard
+   343→# 启动脚本中的使用
+   344→from process_utils import ProcessManager
+   345→
+   346→# 停止所有相关进程
+   347→ProcessManager.kill_process_by_name('python')
+   348→ProcessManager.kill_process_by_name('node')
+   349→ProcessManager.kill_process_by_name('bun')
+   350→
+   351→# 启动新进程
+   352→ProcessManager.start_background_process(
+   353→    ['python', '-m', 'uvicorn', 'engine.api.main:app', '--port', '8000'],
+   354→    log_file='data/logs/fastapi.log'
+   355→)
+   356→
+   357→# 检查进程状态
+   358→pids = ProcessManager.find_processes('uvicorn')
+   359→for pid in pids:
+   360→    info = ProcessManager.get_process_info(pid)
+   361→    print(f"进程 {pid}: {info}")
+   362→1.4 DLL加载与通达信API ⭐⭐⭐⭐⭐
+   363→问题分析:
+   364→• 通达信TPythClient.dll只在Windows环境可用
+   365→• DLL加载路径问题
+   366→• 32/64位DLL匹配
+   367→• DLL依赖项检查
+   368→解决方案:
+   369→Copy code to clipboard
+   370→# tdx_connection.py
+   371→import sys
+   372→import os
+   373→import platform
+   374→import ctypes
+   375→from pathlib import Path
+   376→import logging
+   377→
+   378→logger = logging.getLogger(__name__)
+   379→
+   380→class TdxConnectionManager:
+   381→    """通达信连接管理器"""
+   382→    
+   383→    def __init__(self):
+   384→        self._dll = None
+   385→        self._initialized = False
+   386→        self.run_id = -1
+   387→        self._validate_environment()
+   388→    
+   389→    def _validate_environment(self):
+   390→        """验证运行环境"""
+   391→        # 1. 检查操作系统
+   392→        if platform.system() != 'Windows':
+   393→            raise RuntimeError("通达信API仅在Windows环境可用")
+   394→        
+   395→        # 2. 检查Python架构
+   396→        python_arch = platform.architecture()[0]  # '32bit' or '64bit'
+   397→        if python_arch != '64bit':
+   398→            logger.warning("推荐使用64位Python")
+   399→        
+   400→        # 3. 检查DLL文件存在
+   401→        dll_path = self._find_tdx_dll()
+   402→        if not dll_path or not dll_path.exists():
+   403→            raise RuntimeError(
+   404→                f"通达信DLL未找到: {dll_path}\n"
+   405→                "请确保通达信终端已正确安装"
+   406→            )
+   407→        
+   408→        logger.info(f"环境验证通过: {platform.system()} {python_arch}")
+   409→    
+   410→    def _find_tdx_dll(self):
+   411→        """查找通达信DLL路径"""
+   412→        # 优先级: 环境变量 > 配置文件 > 默认路径
+   413→        dll_path = os.environ.get('TDX_DLL_PATH')
+   414→        
+   415→        if dll_path:
+   416→            return Path(dll_path)
+   417→        
+   418→        # 常见通达信安装路径
+   419→        possible_paths = [
+   420→            Path(r"C:\新建文件夹\TdxW_HuaTai\TPythClient.dll"),
+   421→            Path(r"D:\新建文件夹\TdxW_HuaTai\TPythClient.dll"),
+   422→            Path(r"C:\通达信\TdxW_HuaTai\TPythClient.dll"),
+   423→            Path(r"k:\txdlianghua\TPythClient.dll"),  # 项目特定路径
+   424→        ]
+   425→        
+   426→        for path in possible_paths:
+   427→            if path.exists():
+   428→                logger.info(f"找到通达信DLL: {path}")
+   429→                return path
+   430→        
+   431→        return None
+   432→    
+   433→    def _find_tqcenter(self):
+   434→        """查找tqcenter.py路径"""
+   435→        # 优先级: 环境变量 > 配置文件 > 推算路径
+   436→        tqcenter_path = os.environ.get('TQ_CENTER_PATH')
+   437→        
+   438→        if not tqcenter_path:
+   439→            # 从DLL路径推算
+   440→            dll_path = self._find_tdx_dll()
+   441→            if dll_path:
+   442→                # DLL在TPythClient.dll，tqcenter.py在PYPlugins/user/
+   443→                tdx_root = dll_path.parent
+   444→                tqcenter_path = tdx_root / "PYPlugins" / "user"
+   445→        
+   446→        if tqcenter_path:
+   447→            tqcenter_file = Path(tqcenter_path) / "tqcenter.py"
+   448→            if tqcenter_file.exists():
+   449→                return str(tqcenter_file.parent)
+   450→        
+   451→        raise RuntimeError("无法找到tqcenter.py文件")
+   452→    
+   453→    def load_dll(self):
+   454→        """加载通达信DLL"""
+   455→        if self._dll is not None:
+   456→            return True
+   457→        
+   458→        try:
+   459→            dll_path = self._find_tdx_dll()
+   460→            
+   461→            # 设置DLL函数返回类型
+   462→            self._dll = ctypes.CDLL(str(dll_path))
+   463→            self._dll.InitConnect.restype = ctypes.c_char_p
+   464→            self._dll.GetTdxDataStr.restype = ctypes.c_char_p
+   465→            self._dll.TdxFuncMain.restype = ctypes.c_char_p
+   466→            
+   467→            logger.info("DLL加载成功")
+   468→            return True
+   469→            
+   470→        except Exception as e:
+   471→            logger.error(f"DLL加载失败: {e}")
+   472→            raise RuntimeError(f"通达信DLL加载失败: {e}")
+   473→    
+   474→    def initialize_tqcenter(self):
+   475→        """初始化tqcenter模块"""
+   476→        try:
+   477→            # 添加tqcenter路径到sys.path
+   478→            tqcenter_dir = self._find_tqcenter()
+   479→            if tqcenter_dir not in sys.path:
+   480→                sys.path.insert(0, tqcenter_dir)
+   481→            
+   482→            # 导入tqcenter
+   483→            from tqcenter import tq
+   484→            self.tq = tq
+   485→            
+   486→            # 初始化连接
+   487→            init_file = Path(tqcenter_dir) / "tqcenter.py"
+   488→            self.tq.initialize(str(init_file))
+   489→            
+   490→            self._initialized = True
+   491→            logger.info("tqcenter初始化成功")
+   492→            return True
+   493→            
+   494→        except ImportError as e:
+   495→            logger.error(f"tqcenter导入失败: {e}")
+   496→            raise RuntimeError(f"无法导入tqcenter: {e}")
+   497→        except Exception as e:
+   498→            logger.error(f"tqcenter初始化失败: {e}")
+   499→            raise RuntimeError(f"tqcenter初始化失败: {e}")
+   500→    
+   501→    def validate_connection(self):
+   502→        """验证通达信连接"""
+   503→        if not self._initialized:
+   504→            return False
+   505→        
+   506→        try:
+   507→            # 尝试获取简单数据验证连接
+   508→            test_data = self.tq.get_stock_list(market='1', list_type='0')
+   509→            return len(test_data) > 0
+   510→        except Exception as e:
+   511→            logger.warning(f"连接验证失败: {e}")
+   512→            return False
+   513→    
+   514→    def close(self):
+   515→        """关闭连接"""
+   516→        if self._initialized and hasattr(self, 'tq'):
+   517→            try:
+   518→                self.tq.close()
+   519→                logger.info("通达信连接已关闭")
+   520→            except Exception as e:
+   521→                logger.warning(f"关闭连接时出错: {e}")
+   522→            finally:
+   523→                self._initialized = False
+   524→
+   525→# 单例模式
+   526→_tdx_connection = None
+   527→
+   528→def get_tdx_connection():
+   529→    """获取通达信连接单例"""
+   530→    global _tdx_connection
+   531→    if _tdx_connection is None:
+   532→        _tdx_connection = TdxConnectionManager()
+   533→        _tdx_connection.load_dll()
+   534→        _tdx_connection.initialize_tqcenter()
+   535→    return _tdx_connection
+   536→1.5 文件锁与并发访问 ⭐⭐⭐
+   537→问题分析:
+   538→• Windows文件锁更严格
+   539→• 多进程同时访问同一文件
+   540→• SQLite文件锁定问题
+   541→• DuckDB并发访问限制
+   542→解决方案:
+   543→Copy code to clipboard
+   544→# file_lock.py
+   545→import platform
+   546→import fcntl  # Linux
+   547→import msvcrt  # Windows
+   548→import os
+   549→from contextlib import contextmanager
+   550→import logging
+   551→
+   552→logger = logging.getLogger(__name__)
+   553→
+   554→class FileLock:
+   555→    """跨平台文件锁"""
+   556→    
+   557→    def __init__(self, file_path):
+   558→        self.file_path = file_path
+   559→        self.file_obj = None
+   560→        self.is_windows = platform.system() == 'Windows'
+   561→    
+   562→    def acquire(self):
+   563→        """获取文件锁"""
+   564→        try:
+   565→            self.file_obj = open(self.file_path, 'w')
+   566→            
+   567→            if self.is_windows:
+   568→                # Windows文件锁
+   569→                import pywintypes
+   570→                import win32file
+   571→                import win32con
+   572→                
+   573→                # 使用Windows API获取更可靠的锁
+   574→                handle = win32file.CreateFile(
+   575→                    self.file_path,
+   576→                    win32file.GENERIC_WRITE,
+   577→                    0,  # 不共享
+   578→                    None,
+   579→                    win32con.OPEN_ALWAYS,
+   580→                    0,
+   581→                    None
+   582→                )
+   583→                win32file.LockFileEx(
+   584→                    handle,
+   585→                    win32con.LOCKFILE_EXCLUSIVE_LOCK,
+   586→                    0xFFFF0000,
+   587→                    0xFFFFFFFF,
+   588→                    pywintypes.OVERLAPPED()
+   589→                )
+   590→                self.lock_handle = handle
+   591→                
+   592→            else:
+   593→                # Linux文件锁
+   594→                fcntl.flock(self.file_obj.fileno(), fcntl.LOCK_EX)
+   595→            
+   596→            logger.debug(f"文件锁获取成功: {self.file_path}")
+   597→            return True
+   598→            
+   599→        except Exception as e:
+   600→            logger.error(f"文件锁获取失败: {e}")
+   601→            if self.file_obj:
+   602→                self.file_obj.close()
+   603→            return False
+   604→    
+   605→    def release(self):
+   606→        """释放文件锁"""
+   607→        try:
+   608→            if self.is_windows and hasattr(self, 'lock_handle'):
+   609→                # Windows释放锁
+   610→                import win32file
+   611→                win32file.CloseHandle(self.lock_handle)
+   612→            elif self.file_obj:
+   613→                # Linux释放锁
+   614→                fcntl.flock(self.file_obj.fileno(), fcntl.LOCK_UN)
+   615→            
+   616→            if self.file_obj:
+   617→                self.file_obj.close()
+   618→            
+   619→            logger.debug(f"文件锁释放成功: {self.file_path}")
+   620→            
+   621→        except Exception as e:
+   622→            logger.warning(f"文件锁释放失败: {e}")
+   623→    
+   624→    def __enter__(self):
+   625→        return self.acquire()
+   626→    
+   627→    def __exit__(self, exc_type, exc_val, exc_tb):
+   628→        self.release()
+   629→
+   630→@contextmanager
+   631→def safe_file_write(file_path, content):
+   632→    """安全的文件写入上下文管理器"""
+   633→    lock = FileLock(file_path)
+   634→    try:
+   635→        with lock:
+   636→            with open(file_path, 'w', encoding='utf-8') as f:
+   637→                f.write(content)
+   638→            yield True
+   639→    except Exception as e:
+   640→        logger.error(f"文件写入失败: {e}")
+   641→        yield False
+   642→数据库连接池管理:
+   643→Copy code to clipboard
+   644→# db_pool.py
+   645→import duckdb
+   646→import threading
+   647→import time
+   648→from contextlib import contextmanager
+   649→import logging
+   650→
+   651→logger = logging.getLogger(__name__)
+   652→
+   653→class DatabaseConnectionPool:
+   654→    """DuckDB连接池"""
+   655→    
+   656→    def __init__(self, db_path, max_connections=5):
+   657→        self.db_path = db_path
+   658→        self.max_connections = max_connections
+   659→        self._connections = []
+   660→        self._lock = threading.Lock()
+   661→        self._in_use = set()
+   662→    
+   663→    @contextmanager
+   664→    def get_connection(self):
+   665→        """获取数据库连接"""
+   666→        conn = None
+   667→        try:
+   668→            # 等待可用连接
+   669→            while True:
+   670→                with self._lock:
+   671→                    if self._connections:
+   672→                        conn = self._connections.pop()
+   673→                        self._in_use.add(id(conn))
+   674→                        break
+   675→                    elif len(self._in_use) < self.max_connections:
+   676→                        conn = duckdb.connect(self.db_path)
+   677→                        self._in_use.add(id(conn))
+   678→                        break
+   679→                    else:
+   680→                        pass  # 等待其他连接释放
+   681→                
+   682→                if conn:
+   683→                    break
+   684→                
+   685→                time.sleep(0.1)  # 短暂等待
+   686→            
+   687→            yield conn
+   688→            
+   689→        finally:
+   690→            # 归还连接
+   691→            if conn:
+   692→                with self._lock:
+   693→                    self._in_use.discard(id(conn))
+   694→                    self._connections.append(conn)
+   695→    
+   696→    def close_all(self):
+   697→        """关闭所有连接"""
+   698→        with self._lock:
+   699→            for conn in self._connections:
+   700→                try:
+   701→                    conn.close()
+   702→                except:
+   703→                    pass
+   704→            self._connections.clear()
+   705→            self._in_use.clear()
+   706→
+   707→# 全局连接池
+   708→_db_pool = None
+   709→
+   710→def get_db_pool():
+   711→    """获取数据库连接池"""
+   712→    global _db_pool
+   713→    if _db_pool is None:
+   714→        _db_pool = DatabaseConnectionPool('data/duckdb/quant.db')
+   715→    return _db_pool
+   716→二、配置级别优化
+   717→2.1 环境配置 ⭐⭐⭐⭐⭐
+   718→Windows专用配置:
+   719→Copy code to clipboard
+   720→# .env.windows
+   721→# 数据适配器模式
+   722→ADAPTER_MODE=real
+   723→
+   724→# 通达信路径配置
+   725→TQ_CENTER_PATH=k:\txdlianghua\PYPlugins\user
+   726→TQ_CENTER_INITIALIZE=k:\txdlianghua\PYPlugins\user\tqcenter.py
+   727→TDX_DLL_PATH=k:\txdlianghua\TPythClient.dll
+   728→
+   729→# 数据库路径  
+   730→DATABASE_URL=file:./data/duckdb/quant.db
+   731→
+   732→# 编码设置
+   733→PYTHONIOENCODING=utf-8
+   734→
+   735→# 日志配置
+   736→LOG_LEVEL=INFO
+   737→LOG_DIR=data\logs
+   738→
+   739→# 服务器配置
+   740→SERVER_HOST=0.0.0.0
+   741→SERVER_PORT=8000
+   742→
+   743→# 前端配置
+   744→NEXT_PORT=3000
+   745→NEXT_HOST=127.0.0.1
+   746→
+   747→# 进程管理
+   748→PROCESS_CHECK_INTERVAL=30
+   749→AUTO_RESTART=true
+   750→
+   751→# 文件监控
+   752→FILE_WATCHER_ENABLED=true
+   753→FILE_WATCHER_POLL_INTERVAL=2
+   754→2.2 YAML配置适配 ⭐⭐⭐⭐
+   755→Copy code to clipboard
+   756→# config/app.yaml.windows
+   757→app:
+   758→  name: TdxQuant Engine
+   759→  version: "1.0"
+   760→  adapter_mode: real  # Windows必须用real模式
+   761→  log_level: INFO
+   762→  platform: windows  # 平台标识
+   763→
+   764→server:
+   765→  host: 0.0.0.0
+   766→  port: 8000
+   767→  workers: 1  # Windows不支持多worker
+   768→  
+   769→paths:
+   770→  duckdb: .\data\duckdb\quant.db
+   771→  csv_output: .\data\csv
+   772→  excel_output: .\data\excel
+   773→  logs: .\data\logs
+   774→  temp: ${TEMP}  # Windows临时目录
+   775→  null_dev: NUL  # Windows空设备
+   776→
+   777→tqcenter:
+   778→  initialize_file: k:\txdlianghua\PYPlugins\user\tqcenter.py
+   779→  subscribe_batch_size: 50
+   780→  kline_max_count: 24000
+   781→  
+   782→  # Windows特定配置
+   783→  timeout: 60
+   784→  retry_count: 3
+   785→  connection_check_interval: 300
+   786→
+   787→# 限流配置
+   788→rate_limit:
+   789→  enabled: true
+   790→  global_qps: 10  # Windows降低QPS
+   791→  burst: 20
+   792→  acquire_timeout: 5
+   793→  
+   794→# Windows进程管理
+   795→process_management:
+   796→  kill_command: taskkill /F /PID {pid}
+   797→  find_command: tasklist /FI "PID eq {pid}"
+   798→  start_command: start /B
+   799→  
+   800→# 文件系统
+   801→filesystem:
+   802→  encoding: utf-8
+   803→  fallback_encoding: gbk
+   804→  max_path_length: 260
+   805→  case_sensitive: false
+   806→2.3 启动脚本配置 ⭐⭐⭐⭐⭐
+   807→Windows PowerShell启动脚本:
+   808→Copy code to clipboard
+   809→# scripts/start_all.ps1
+   810→#Requires -Version 5.1
+   811→
+   812→# 设置错误处理
+   813→$ErrorActionPreference = 'Stop'
+   814→$ProgressPreference = 'SilentlyContinue'
+   815→
+   816→# 获取项目根目录
+   817→$ProjectRoot = $PSScriptRoot | Split-Path -Parent | Convert-Path
+   818→Set-Location $ProjectRoot
+   819→
+   820→# 加载配置
+   821→$ConfigPath = Join-Path $ProjectRoot "config\app.yaml"
+   822→if (Test-Path $ConfigPath) {
+   823→    # 简单的YAML解析(或使用PowerShell-YAML模块)
+   824→    $Config = Get-Content $ConfigPath | ConvertFrom-Yaml
+   825→} else {
+   826→    Write-Host "配置文件不存在: $ConfigPath" -ForegroundColor Red
+   827→    exit 1
+   828→}
+   829→
+   830→# 创建必要目录
+   831→$Directories = @(
+   832→    "data\logs",
+   833→    "data\csv", 
+   834→    "data\excel",
+   835→    "data\duckdb",
+   836→    "logs"
+   837→)
+   838→
+   839→foreach ($Dir in $Directories) {
+   840→    $FullPath = Join-Path $ProjectRoot $Dir
+   841→    if (-not (Test-Path $FullPath)) {
+   842→        New-Item -ItemType Directory -Path $FullPath -Force | Out-Null
+   843→        Write-Host "创建目录: $FullPath" -ForegroundColor Green
+   844→    }
+   845→}
+   846→
+   847→# 1. 停止旧进程
+   848→Write-Host "[1/4] 停止旧进程..." -ForegroundColor Yellow
+   849→
+   850→$ProcessPatterns = @(
+   851→    "python.*uvicorn",
+   852→    "python.*engine.api.main",
+   853→    "node.*next",
+   854→    "bun.*dev",
+   855→    "next-server"
+   856→)
+   857→
+   858→foreach ($Pattern in $ProcessPatterns) {
+   859→    try {
+   860→        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | 
+   861→            Where-Object { 
+   862→                $_.CommandLine -and 
+   863→                $_.CommandLine -match $Pattern -and 
+   864→                $_.CommandLine -match [regex]::Escape($ProjectRoot)
+   865→            } | 
+   866→            ForEach-Object {
+   867→                Write-Host "  停止进程: $($_.Name) (PID: $($_.ProcessId))" -ForegroundColor Cyan
+   868→                Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+   869→            }
+   870→    } catch {
+   871→        Write-Host "  搜索进程失败: $Pattern" -ForegroundColor Yellow
+   872→    }
+   873→}
+   874→
+   875→Start-Sleep -Seconds 2
+   876→
+   877→# 2. 启动FastAPI后端
+   878→Write-Host "[2/4] 启动FastAPI后端..." -ForegroundColor Yellow
+   879→
+   880→$FastApiLog = Join-Path $ProjectRoot "data\logs\fastapi.log"
+   881→$FastApiErr = Join-Path $ProjectRoot "data\logs\fastapi.err.log"
+   882→
+   883→$FastApiArgs = @(
+   884→    "-m", "uvicorn", 
+   885→    "engine.api.main:app",
+   886→    "--host", "0.0.0.0", 
+   887→    "--port", "8000",
+   888→    "--log-level", "warning",
+   889→    "--no-access-log"  # Windows减少日志量
+   890→)
+   891→
+   892→Write-Host "  启动参数: python $($FastApiArgs -join ' ')" -ForegroundColor Cyan
+   893→Write-Host "  日志文件: $FastApiLog" -ForegroundColor Cyan
+   894→
+   895→$FastApiProcess = Start-Process -FilePath "python" `
+   896→    -ArgumentList $FastApiArgs `
+   897→    -NoNewWindow `
+   898→    -RedirectStandardOutput $FastApiLog `
+   899→    -RedirectStandardError $FastApiErr `
+   900→    -PassThru
+   901→
+   902→Write-Host "  FastAPI PID: $($FastApiProcess.Id)" -ForegroundColor Green
+   903→
+   904→# 3. 启动Next.js前端
+   905→Write-Host "[3/4] 启动Next.js前端..." -ForegroundColor Yellow
+   906→
+   907→$NextLog = Join-Path $ProjectRoot "dev.log"
+   908→$NextErr = Join-Path $ProjectRoot "dev.err.log"
+   909→
+   910→$NextArgs = @("run", "dev")
+   911→
+   912→Write-Host "  启动参数: bun $($NextArgs -join ' ')" -ForegroundColor Cyan
+   913→Write-Host "  日志文件: $NextLog" -ForegroundColor Cyan
+   914→
+   915→$NextProcess = Start-Process -FilePath "bun" `
+   916→    -ArgumentList $NextArgs `
+   917→    -NoNewWindow `
+   918→    -RedirectStandardOutput $NextLog `
+   919→    -RedirectStandardError $NextErr `
+   920→    -PassThru
+   921→
+   922→Write-Host "  Next.js PID: $($NextProcess.Id)" -ForegroundColor Green
+   923→
+   924→# 4. 等待服务就绪
+   925→Write-Host "[4/4] 等待服务就绪..." -ForegroundColor Yellow
+   926→
+   927→$MaxWait = 60  # 最多等待60秒
+   928→$Interval = 2  # 每2秒检查一次
+   929→$Attempts = 0
+   930→
+   931→$ServicesReady = $false
+   932→
+   933→while (-not $ServicesReady -and $Attempts -lt ($MaxWait / $Interval)) {
+   934→    $Attempts++
+   935→    Start-Sleep -Seconds $Interval
+   936→    
+   937→    # 检查FastAPI
+   938→    try {
+   939→        $FastApiResponse = Invoke-WebRequest -Uri "http://127.0.0.1:8000/health" `
+   940→            -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+   941→        $FastApiReady = ($FastApiResponse.StatusCode -eq 200)
+   942→    } catch {
+   943→        $FastApiReady = $false
+   944→    }
+   945→    
+   946→    # 检查Next.js
+   947→    try {
+   948→        $NextResponse = Invoke-WebRequest -Uri "http://127.0.0.1:3000/" `
+   949→            -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+   950→        $NextReady = ($NextResponse.StatusCode -eq 200)
+   951→    } catch {
+   952→        $NextReady = $false
+   953→    }
+   954→    
+   955→    $ServicesReady = $FastApiReady -and $NextReady
+   956→    
+   957→    Write-Host "  检查 $Attempts/$($MaxWait/$Interval): " -NoNewline
+   958→    Write-Host "FastAPI: " -NoNewline -ForegroundColor Cyan
+   959→    Write-Host $(if ($FastApiReady) { "✓" } else { "✗" }) -NoNewline -ForegroundColor $(if ($FastApiReady) { "Green" } else { "Red" })
+   960→    Write-Host " Next.js: " -NoNewline -ForegroundColor Cyan
+   961→    Write-Host $(if ($NextReady) { "✓" } else { "✗" }) -ForegroundColor $(if ($NextReady) { "Green" } else { "Red" })
+   962→}
+   963→
+   964→# 最终状态
+   965→Write-Host "`n========================================" -ForegroundColor Cyan
+   966→Write-Host "服务启动完成" -ForegroundColor Green
+   967→
+   968→if ($ServicesReady) {
+   969→    Write-Host "FastAPI: http://127.0.0.1:8000" -ForegroundColor Cyan
+   970→    Write-Host "Next.js: http://127.0.0.1:3000" -ForegroundColor Cyan
+   971→    Write-Host "API文档: http://127.0.0.1:8000/docs" -ForegroundColor Cyan
+   972→    Write-Host "========================================" -ForegroundColor Cyan
+   973→} else {
+   974→    Write-Host "警告: 服务可能未完全启动" -ForegroundColor Yellow
+   975→    Write-Host "请检查日志文件:" -ForegroundColor Yellow
+   976→    Write-Host "  FastAPI: $FastApiLog" -ForegroundColor Yellow
+   977→    Write-Host "  Next.js: $NextLog" -ForegroundColor Yellow
+   978→}
+   979→三、部署级别优化
+   980→3.1 Windows服务部署 ⭐⭐⭐⭐⭐
+   981→使用NSSM部署Windows服务:
+   982→Copy code to clipboard
+   983→# scripts/install_services.ps1
+   984→#Requires -RunAsAdministrator
+   985→
+   986→$ErrorActionPreference = 'Stop'
+   987→
+   988→# 配置参数
+   989→$ProjectRoot = $PSScriptRoot | Split-Path -Parent | Convert-Path
+   990→$ServiceName = "TdxQuantAPI"
+   991→$DisplayName = "TdxQuant量化交易引擎"
+   992→$Description = "通达信量化交易系统后端API服务"
+   993→
+   994→# 检查nssm是否安装
+   995→$NssmPath = "nssm"
+   996→try {
+   997→    & $NssmPath version 2>$null | Out-Null
+   998→} catch {
+   999→    Write-Host "NSSM未安装，正在下载..." -ForegroundColor Yellow
+  1000→    $NssmUrl = "https://nssm.cc/release/nssm-2.24-101-g897c7ad.zip"
+  1001→    $NssmZip = "$env:TEMP\nssm.zip"
+  1002→    $NssmExtract = "$env:TEMP\nssm"
+  1003→    
+  1004→    Invoke-WebRequest -Uri $NssmUrl -OutFile $NssmZip
+  1005→    Expand-Archive -Path $NssmZip -DestinationPath $NssmExtract -Force
+  1006→    
+  1007→    # 根据架构选择版本
+  1008→    $NssmBin = if ([Environment]::Is64BitOperatingSystem) {
+  1009→        "$NssmExtract\nssm-2.24-101-g897c7ad\win64\nssm.exe"
+  1010→    } else {
+  1011→        "$NssmExtract\nssm-2.24-101-g897c7ad\win32\nssm.exe"
+  1012→    }
+  1013→    
+  1014→    # 复制到系统路径
+  1015→    Copy-Item $NssmBin "C:\Windows\System32\nssm.exe" -Force
+  1016→    Write-Host "NSSM安装完成" -ForegroundColor Green
+  1017→}
+  1018→
+  1019→# 1. 停止并删除旧服务
+  1020→Write-Host "检查现有服务..." -ForegroundColor Yellow
+  1021→try {
+  1022→    & $NssmPath stop $ServiceName 2>$null | Out-Null
+  1023→    & $NssmPath remove $ServiceName confirm 2>$null | Out-Null
+  1024→    Write-Host "旧服务已删除" -ForegroundColor Green
+  1025→} catch {
+  1026→    Write-Host "未找到现有服务，继续创建..." -ForegroundColor Cyan
+  1027→}
+  1028→
+  1029→# 2. 创建FastAPI服务
+  1030→Write-Host "创建FastAPI服务..." -ForegroundColor Yellow
+  1031→
+  1032→$PythonExe = (Get-Command python).Source
+  1033→$WorkingDir = $ProjectRoot
+  1034→$LogFile = Join-Path $ProjectRoot "data\logs\service.log"
+  1035→$LogDir = Join-Path $ProjectRoot "data\logs"
+  1036→
+  1037→# 确保日志目录存在
+  1038→if (-not (Test-Path $LogDir)) {
+  1039→    New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+  1040→}
+  1041→
+  1042→# NSSM参数
+  1043→& $NssmPath install $ServiceName $PythonExe `
+  1044→    "-m", "uvicorn", "engine.api.main:app", "--host", "0.0.0.0", "--port", "8000"
+  1045→
+  1046→# 配置服务参数
+  1047→& $NssmPath set $ServiceName AppDirectory $WorkingDir
+  1048→& $NssmPath set $ServiceName DisplayName $DisplayName
+  1049→& $NssmPath set $ServiceName Description $Description
+  1050→& $NssmPath set $ServiceName AppStdout $LogFile
+  1051→& $NssmPath set $ServiceName AppStderr $LogFile
+  1052→& $NssmPath set $ServiceName AppRotateFiles 1
+  1053→& $NssmPath set $ServiceName AppRotateBytes 1048576
+  1054→
+  1055→# 服务恢复设置
+  1056→& $NssmPath set $ServiceName AppExit Default Restart
+  1057→& $NssmPath set $ServiceName AppRestartDelay 10000
+  1058→
+  1059→# 启动类型
+  1060→& $NssmPath set $ServiceName Start SERVICE_AUTO_START
+  1061→
+  1062→Write-Host "FastAPI服务创建完成" -ForegroundColor Green
+  1063→
+  1064→# 3. 设置服务依赖(通达信必须先启动)
+  1065→Write-Host "配置服务依赖..." -ForegroundColor Yellow
+  1066→# 假设通达信服务名为"TdxTerminal"
+  1067→# & $NssmPath set $ServiceName DependOnService TdxTerminal
+  1068→
+  1069→# 4. 启动服务
+  1070→Write-Host "启动服务..." -ForegroundColor Yellow
+  1071→try {
+  1072→    Start-Service $ServiceName
+  1073→    Write-Host "服务启动成功" -ForegroundColor Green
+  1074→} catch {
+  1075→    Write-Host "服务启动失败: $_" -ForegroundColor Red
+  1076→    Write-Host "请手动启动: nssm start $ServiceName" -ForegroundColor Yellow
+  1077→}
+  1078→
+  1079→# 5. 显示服务状态
+  1080→Write-Host "`n服务状态:" -ForegroundColor Cyan
+  1081→Get-Service $ServiceName | Format-List Name, Status, StartType
+  1082→
+  1083→Write-Host "`n管理命令:" -ForegroundColor Cyan
+  1084→Write-Host "  启动: nssm start $ServiceName" -ForegroundColor Yellow
+  1085→Write-Host "  停止: nssm stop $ServiceName" -ForegroundColor Yellow
+  1086→Write-Host "  重启: nssm restart $ServiceName" -ForegroundColor Yellow
+  1087→Write-Host "  删除: nssm remove $ServiceName confirm" -ForegroundColor Yellow
+  1088→Write-Host "  编辑: nssm edit $ServiceName" -ForegroundColor Yellow
+  1089→3.2 防火墙配置 ⭐⭐⭐⭐
+  1090→Copy code to clipboard
+  1091→# scripts/configure_firewall.ps1
+  1092→#Requires -RunAsAdministrator
+  1093→
+  1094→$ErrorActionPreference = 'Stop'
+  1095→
+  1096→# 防火墙规则名称
+  1097→$RuleName = "TdxQuant Server"
+  1098→
+  1099→# 端口配置
+  1100→$Ports = @(8000, 3000, 81)  # FastAPI, Next.js, Caddy
+  1101→
+  1102→Write-Host "配置Windows防火墙规则..." -ForegroundColor Yellow
+  1103→
+  1104→# 删除旧规则
+  1105→try {
+  1106→    Remove-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
+  1107→    Write-Host "删除旧规则" -ForegroundColor Green
+  1108→} catch {
+  1109→    Write-Host "未找到旧规则" -ForegroundColor Cyan
+  1110→}
+  1111→
+  1112→# 创建新规则
+  1113→foreach ($Port in $Ports) {
+  1114→    New-NetFirewallRule -DisplayName "$RuleName (Port $Port)" `
+  1115→        -Direction Inbound `
+  1116→        -LocalPort $Port `
+  1117→        -Protocol TCP `
+  1118→        -Action Allow `
+  1119→        -Profile Any `
+  1120→        -Description "TdxQuant量化交易系统端口 $Port"
+  1121→    
+  1122→    Write-Host "已添加端口 $Port 的防火墙规则" -ForegroundColor Green
+  1123→}
+  1124→
+  1125→# 显示防火墙规则
+  1126→Write-Host "`n当前防火墙规则:" -ForegroundColor Cyan
+  1127→Get-NetFirewallRule -DisplayName "$RuleName*" | 
+  1128→    Format-Table DisplayName, Direction, LocalPort, Action, Profile
+  1129→3.3 自动启动配置 ⭐⭐⭐⭐
+  1130→Copy code to clipboard
+  1131→# scripts/configure_autostart.ps1
+  1132→#Requires -RunAsAdministrator
+  1133→
+  1134→$ErrorActionPreference = 'Stop'
+  1135→
+  1136→# 项目路径
+  1137→$ProjectRoot = $PSScriptRoot | Split-Path -Parent | Convert-Path
+  1138→
+  1139→# 启动脚本路径
+  1140→$StartScript = Join-Path $ProjectRoot "scripts\start_all.ps1"
+  1141→$ShortcutPath = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\TdxQuant.lnk"
+  1142→
+  1143→# 创建快捷方式
+  1144→$WshShell = New-Object -ComObject WScript.Shell
+  1145→$Shortcut = $WshShell.CreateShortcut($ShortcutPath)
+  1146→$Shortcut.TargetPath = "powershell.exe"
+  1147→$Shortcut.Arguments = "-ExecutionPolicy Bypass -File `"$StartScript`""
+  1148→$Shortcut.WorkingDirectory = $ProjectRoot
+  1149→$Shortcut.Description = "启动TdxQuant量化交易系统"
+  1150→$Shortcut.Save()
+  1151→
+  1152→Write-Host "自动启动已配置: $ShortcutPath" -ForegroundColor Green
+  1153→
+  1154→# 测试启动脚本
+  1155→Write-Host "`n测试启动脚本..." -ForegroundColor Yellow
+  1156→Start-Sleep -Seconds 2
+  1157→& $StartScript
+  1158→四、监控与日志优化
+  1159→4.1 Windows日志系统 ⭐⭐⭐⭐
+  1160→Copy code to clipboard
+  1161→# windows_logger.py
+  1162→import logging
+  1163→import logging.handlers
+  1164→import os
+  1165→import platform
+  1166→from pathlib import Path
+  1167→import win32evtlog  # Windows事件日志
+  1168→import win32evtlogutil
+  1169→
+  1170→class WindowsLogger:
+  1171→    """Windows专用日志配置"""
+  1172→    
+  1173→    @staticmethod
+  1174→    def setup_logger(name, log_file, level=logging.INFO):
+  1175→        """配置Windows日志"""
+  1176→        logger = logging.getLogger(name)
+  1177→        logger.setLevel(level)
+  1178→        
+  1179→        # 文件处理器(Windows路径处理)
+  1180→        log_path = Path(log_file)
+  1181→        log_path.parent.mkdir(parents=True, exist_ok=True)
+  1182→        
+  1183→        # RotatingFileHandler
+  1184→        file_handler = logging.handlers.RotatingFileHandler(
+  1185→            log_file,
+  1186→            maxBytes=10*1024*1024,  # 10MB
+  1187→            backupCount=5,
+  1188→            encoding='utf-8'
+  1189→        )
+  1190→        file_handler.setLevel(level)
+  1191→        
+  1192→        # 格式化器
+  1193→        formatter = logging.Formatter(
+  1194→            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+  1195→            datefmt='%Y-%m-%d %H:%M:%S'
+  1196→        )
+  1197→        file_handler.setFormatter(formatter)
+  1198→        
+  1199→        logger.addHandler(file_handler)
+  1200→        
+  1201→        # Windows事件日志(可选)
+  1202→        if platform.system() == 'Windows':
+  1203→            try:
+  1204→                event_handler = win32evtlogutil.Logger(
+  1205→                    'TdxQuant',
+  1206→                    'TdxQuant量化交易系统'
+  1207→                )
+  1208→                logger.addHandler(event_handler)
+  1209→            except:
+  1210→                pass
+  1211→        
+  1212→        return logger
+  1213→
+  1214→    @staticmethod
+  1215→    def setup_console_logging(level=logging.INFO):
+  1216→        """配置控制台日志(Windows编码处理)"""
+  1217→        logger = logging.getLogger()
+  1218→        logger.setLevel(level)
+  1219→        
+  1220→        # 控制台处理器
+  1221→        console_handler = logging.StreamHandler()
+  1222→        console_handler.setLevel(level)
+  1223→        
+  1224→        # 格式化器
+  1225→        formatter = logging.Formatter(
+  1226→            '%(asctime)s - %(levelname)s - %(message)s',
+  1227→            datefmt='%H:%M:%S'
+  1228→        )
+  1229→        console_handler.setFormatter(formatter)
+  1230→        
+  1231→        logger.addHandler(console_handler)
+  1232→        
+  1233→        return logger
+  1234→4.2 性能监控 ⭐⭐⭐⭐
+  1235→Copy code to clipboard
+  1236→# windows_monitor.py
+  1237→import psutil
+  1238→import platform
+  1239→import logging
+  1240→from datetime import datetime
+  1241→import json
+  1242→
+  1243→logger = logging.getLogger(__name__)
+  1244→
+  1245→class WindowsPerformanceMonitor:
+  1246→    """Windows性能监控"""
+  1247→    
+  1248→    def __init__(self):
+  1249→        self.is_windows = platform.system() == 'Windows'
+  1250→    
+  1251→    def get_system_info(self):
+  1252→        """获取系统信息"""
+  1253→        info = {
+  1254→            'platform': platform.system(),
+  1255→            'python_version': platform.python_version(),
+  1256→            'architecture': platform.architecture(),
+  1257→            'timestamp': datetime.now().isoformat()
+  1258→        }
+  1259→        
+  1260→        if self.is_windows:
+  1261→            # Windows特定信息
+  1262→            import win32api
+  1263→            import win32con
+  1264→            
+  1265→            info['windows_version'] = platform.version()
+  1266→            info['computer_name'] = platform.node()
+  1267→            
+  1268→            # CPU信息
+  1269→            info['cpu_count'] = psutil.cpu_count()
+  1270→            info['cpu_freq'] = psutil.cpu_freq()._asdict()
+  1271→            
+  1272→            # 内存信息
+  1273→            mem = psutil.virtual_memory()
+  1274→            info['memory'] = {
+  1275→                'total': mem.total,
+  1276→                'available': mem.available,
+  1277→                'percent': mem.percent
+  1278→            }
+  1279→            
+  1280→            # 磁盘信息
+  1281→            info['disk'] = {}
+  1282→            for partition in psutil.disk_partitions():
+  1283→                try:
+  1284→                    usage = psutil.disk_usage(partition.mountpoint)
+  1285→                    info['disk'][partition.mountpoint] = {
+  1286→                        'total': usage.total,
+  1287→                        'used': usage.used,
+  1288→                        'free': usage.free,
+  1289→                        'percent': usage.percent
+  1290→                    }
+  1291→                except:
+  1292→                    pass
+  1293→        
+  1294→        return info
+  1295→    
+  1296→    def get_process_info(self, pid):
+  1297→        """获取进程信息"""
+  1298→        try:
+  1299→            process = psutil.Process(pid)
+  1300→            return {
+  1301→                'pid': pid,
+  1302→                'name': process.name(),
+  1303→                'status': process.status(),
+  1304→                'cpu_percent': process.cpu_percent(),
+  1305→                'memory_info': process.memory_info()._asdict(),
+  1306→                'num_threads': process.num_threads(),
+  1307→                'create_time': datetime.fromtimestamp(process.create_time()).isoformat()
+  1308→            }
+  1309→        except psutil.NoSuchProcess:
+  1310→            return None
+  1311→    
+  1312→    def check_healthy(self):
+  1313→        """健康检查"""
+  1314→        health = {
+  1315→            'timestamp': datetime.now().isoformat(),
+  1316→            'status': 'healthy'
+  1317→        }
+  1318→        
+  1319→        # CPU检查
+  1320→        cpu_percent = psutil.cpu_percent(interval=1)
+  1321→        if cpu_percent > 90:
+  1322→            health['status'] = 'warning'
+  1323→            health['cpu_warning'] = f'CPU使用率过高: {cpu_percent}%'
+  1324→        
+  1325→        # 内存检查
+  1326→        mem = psutil.virtual_memory()
+  1327→        if mem.percent > 90:
+  1328→            health['status'] = 'warning'
+  1329→            health['memory_warning'] = f'内存使用率过高: {mem.percent}%'
+  1330→        
+  1331→        # 磁盘检查
+  1332→        for partition in psutil.disk_partitions():
+  1333→            try:
+  1334→                usage = psutil.disk_usage(partition.mountpoint)
+  1335→                if usage.percent > 90:
+  1336→                    health['status'] = 'warning'
+  1337→                    health['disk_warning'] = f'磁盘空间不足: {partition.mountpoint} {usage.percent}%'
+  1338→            except:
+  1339→                pass
+  1340→        
+  1341→        return health
+  1342→
+  1343→# 定期监控
+  1344→def start_performance_monitoring(interval=60):
+  1345→    """启动性能监控"""
+  1346→    monitor = WindowsPerformanceMonitor()
+  1347→    
+  1348→    while True:
+  1349→        try:
+  1350→            health = monitor.check_healthy()
+  1351→            logger.info(f"系统健康状态: {health}")
+  1352→            
+  1353→            if health['status'] == 'warning':
+  1354→                # 发送告警
+  1355→                logger.warning("系统警告: " + json.dumps(health, ensure_ascii=False))
+  1356→        
+  1357→        except Exception as e:
+  1358→            logger.error(f"性能监控失败: {e}")
+  1359→        
+  1360→        import time
+  1361→        time.sleep(interval)
+  1362→五、依赖管理与构建
+  1363→5.1 requirements.txt 分离 ⭐⭐⭐⭐⭐
+  1364→Copy code to clipboard
+  1365→# requirements.txt (通用依赖)
+  1366→pandas>=2.0.0
+  1367→numpy>=1.24.0
+  1368→pyyaml>=6.0
+  1369→duckdb>=0.9.0
+  1370→fastapi>=0.100.0
+  1371→pydantic>=2.0.0
+  1372→python-multipart>=0.0.6
+  1373→
+  1374→# requirements.linux.txt (Linux专用)
+  1375→uvicorn[standard]>=0.23.0
+  1376→uvloop>=0.17.0
+  1377→watchfiles>=0.20.0
+  1378→
+  1379→# requirements.windows.txt (Windows专用)
+  1380→uvicorn>=0.23.0
+  1381→websockets>=11.0.0
+  1382→httptools>=0.6.0
+  1383→ujson>=5.8.0
+  1384→pywin32>=306  # Windows API
+  1385→psutil>=5.9.0  # 系统监控
+  1386→wmi>=1.5.1  # Windows管理接口
+  1387→5.2 package.json 跨平台配置 ⭐⭐⭐⭐⭐
+  1388→Copy code to clipboard
+  1389→{
+  1390→  "name": "tdxquant",
+  1391→  "version": "1.0.0",
+  1392→  "scripts": {
+  1393→    "dev": "next dev",
+  1394→    "build": "next build",
+  1395→    "start": "next start",
+  1396→    "lint": "next lint",
+  1397→    
+  1398→    "dev:windows": "cross-env NODE_ENV=development next dev",
+  1399→    "build:windows": "cross-env NODE_ENV=production next build", 
+  1400→    "start:windows": "cross-env NODE_ENV=production next start",
+  1401→    
+  1402→    "install:python-deps": "python -m pip install -r requirements.txt",
+  1403→    "install:python-deps:windows": "python -m pip install -r requirements.windows.txt",
+  1404→    
+  1405→    "setup:env": "bash scripts/setup-env.sh",
+  1406→    "setup:env:windows": "powershell -ExecutionPolicy Bypass -File scripts\\setup-env.ps1",
+  1407→    
+  1408→    "start:all": "bash scripts/start_all.sh",
+  1409→    "start:all:windows": "powershell -ExecutionPolicy Bypass -File scripts\\start_all.ps1",
+  1410→    
+  1411→    "daemon": "bash scripts/daemon.sh",
+  1412→    "daemon:windows": "powershell -ExecutionPolicy Bypass -File scripts\\daemon.ps1"
+  1413→  },
+  1414→  "devDependencies": {
+  1415→    "cpy-cli": "^5.1.0",
+  1416→    "cross-env": "^7.0.3",
+  1417→    "rimraf": "^5.0.0",
+  1418→    "@types/node": "^20.0.0",
+  1419→    "typescript": "^5.0.0"
+  1420→  }
+  1421→}
+  1422→5.3 .gitattributes 配置 ⭐⭐⭐⭐⭐
+  1423→Copy code to clipboard
+  1424→# .gitattributes
+  1425→# 默认所有文本文件用LF(防止Windows clone后CRLF污染)
+  1426→* text=lf eol=lf
+  1427→
+  1428→# Windows专有脚本强制CRLF
+  1429→*.ps1 text eol=crlf
+  1430→*.bat text eol=crlf
+  1431→*.cmd text eol=crlf
+  1432→
+  1433→# Linux脚本保持LF
+  1434→*.sh text eol=lf
+  1435→*.py text eol=lf
+  1436→
+  1437→# 配置文件保持LF
+  1438→*.yaml text eol=lf
+  1439→*.yml text eol=lf
+  1440→*.json text eol=lf
+  1441→*.toml text eol=lf
+  1442→*.md text eol=lf
+  1443→
+  1444→# 二进制文件
+  1445→*.png binary
+  1446→*.jpg binary
+  1447→*.jpeg binary
+  1448→*.gif binary
+  1449→*.ico binary
+  1450→*.svg binary
+  1451→*.zip binary
+  1452→*.7z binary
+  1453→*.xlsx binary
+  1454→*.csv binary
+  1455→*.db binary
+  1456→*.pyc binary
+  1457→*.lock binary
+  1458→
+  1459→# 项目特定
+  1460→node_modules/** linguist-generated=false
+  1461→data/** linguist-generated=false
+  1462→logs/** linguist-generated=false
+  1463→tool-results/** linguist-generated=false
+  1464→六、测试与验证
+  1465→6.1 Windows环境测试 ⭐⭐⭐⭐
+  1466→Copy code to clipboard
+  1467→# tests/test_windows_compatibility.py
+  1468→import unittest
+  1469→import platform
+  1470→import os
+  1471→import sys
+  1472→from pathlib import Path
+  1473→import tempfile
+  1474→import subprocess
+  1475→
+  1476→class WindowsCompatibilityTest(unittest.TestCase):
+  1477→    """Windows兼容性测试"""
+  1478→    
+  1479→    @classmethod
+  1480→    def setUpClass(cls):
+  1481→        cls.is_windows = platform.system() == 'Windows'
+  1482→        cls.project_root = Path(__file__).parent.parent
+  1483→    
+  1484→    def test_path_handling(self):
+  1485→        """测试路径处理"""
+  1486→        # 测试路径拼接
+  1487→        test_path = self.project_root / "data" / "logs"
+  1488→        self.assertTrue(test_path.exists() or test_path.as_posix())
+  1489→        
+  1490→        # 测试字符串转换
+  1491→        str_path = str(test_path)
+  1492→        if self.is_windows:
+  1493→            self.assertIn('\\', str_path)
+  1494→        else:
+  1495→            self.assertIn('/', str_path)
+  1496→    
+  1497→    def test_file_encoding(self):
+  1498→        """测试文件编码"""
+  1499→        test_file = Path(tempfile.gettempdir()) / "test_encoding.txt"
+  1500→        
+  1501→        # 写入UTF-8
+  1502→        with open(test_file, 'w', encoding='utf-8') as f:
+  1503→            f.write("测试中文")
+  1504→        
+  1505→        # 读取UTF-8
+  1506→        with open(test_file, 'r', encoding='utf-8') as f:
+  1507→            content = f.read()
+  1508→        
+  1509→        self.assertEqual(content, "测试中文")
+  1510→        
+  1511→        # 清理
+  1512→        test_file.unlink()
+  1513→    
+  1514→    def test_process_management(self):
+  1515→        """测试进程管理"""
+  1516→        if not self.is_windows:
+  1517→            self.skipTest("Windows only test")
+  1518→        
+  1519→        # 测试进程查找
+  1520→        result = subprocess.run(
+  1521→            ['tasklist', '/FI', 'IMAGENAME eq python.exe'],
+  1522→            capture_output=True,
+  1523→            text=True
+  1524→        )
+  1525→        
+  1526→        self.assertEqual(result.returncode, 0)
+  1527→    
+  1528→    def test_environment_variables(self):
+  1529→        """测试环境变量"""
+  1530→        # 设置测试变量
+  1531→        os.environ['TEST_VAR'] = 'test_value'
+  1532→        
+  1533→        # 读取测试变量
+  1534→        value = os.environ.get('TEST_VAR')
+  1535→        self.assertEqual(value, 'test_value')
+  1536→    
+  1537→    def test_file_locking(self):
+  1538→        """测试文件锁"""
+  1539→        if not self.is_windows:
+  1540→            self.skipTest("Windows only test")
+  1541→        
+  1542→        import msvcrt
+  1543→        import tempfile
+  1544→        
+  1545→        test_file = Path(tempfile.gettempdir()) / "test_lock.txt"
+  1546→        
+  1547→        try:
+  1548→            with open(test_file, 'w') as f:
+  1549→                # 尝试获取文件锁
+  1550→                try:
+  1551→                    msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+  1552→                    lock_success = True
+  1553→                except:
+  1554→                    lock_success = False
+  1555→                
+  1556→                self.assertTrue(lock_success)
+  1557→        
+  1558→        finally:
+  1559→            if test_file.exists():
+  1560→                test_file.unlink()
+  1561→    
+  1562→    def test_dll_loading(self):
+  1563→        """测试DLL加载"""
+  1564→        if not self.is_windows:
+  1565→            self.skipTest("Windows only test")
+  1566→        
+  1567→        import ctypes
+  1568→        
+  1569→        # 测试加载系统DLL
+  1570→        try:
+  1571→            kernel32 = ctypes.windll.kernel32
+  1572→            self.assertIsNotNone(kernel32)
+  1573→        except:
+  1574→            self.fail("Failed to load kernel32.dll")
+  1575→
+  1576→if __name__ == '__main__':
+  1577→    unittest.main()
+  1578→6.2 集成测试脚本 ⭐⭐⭐⭐
+  1579→Copy code to clipboard
+  1580→# scripts/test_windows_integration.ps1
+  1581→#Requires -Version 5.1
+  1582→
+  1583→$ErrorActionPreference = 'Stop'
+  1584→
+  1585→$ProjectRoot = $PSScriptRoot | Split-Path -Parent | Convert-Path
+  1586→Set-Location $ProjectRoot
+  1587→
+  1588→Write-Host "Windows集成测试开始..." -ForegroundColor Cyan
+  1589→
+  1590→# 测试计数器
+  1591→$TotalTests = 0
+  1592→$PassedTests = 0
+  1593→$FailedTests = 0
+  1594→
+  1595→function Test-Component {
+  1596→    param(
+  1597→        [string]$Name,
+  1598→        [scriptblock]$TestScript
+  1599→    )
+  1600→    
+  1601→    $script:TotalTests++
+  1602→    Write-Host "测试 $Name..." -ForegroundColor Yellow -NoNewline
+  1603→    
+  1604→    try {
+  1605→        $result = & $TestScript
+  1606→        if ($result) {
+  1607→            $script:PassedTests++
+  1608→            Write-Host " ✓" -ForegroundColor Green
+  1609→            return $true
+  1610→        } else {
+  1611→            $script:FailedTests++
+  1612→            Write-Host " ✗" -ForegroundColor Red
+  1613→            return $false
+  1614→        }
+  1615→    } catch {
+  1616→        $script:FailedTests++
+  1617→        Write-Host " ✗" -ForegroundColor Red
+  1618→        Write-Host "  错误: $_" -ForegroundColor DarkRed
+  1619→        return $false
+  1620→    }
+  1621→}
+  1622→
+  1623→# 1. Python环境测试
+  1624→Test-Component "Python环境" {
+  1625→    $pythonVersion = python --version 2>&1
+  1626→    $pythonVersion -match "Python 3\." 
+  1627→}
+  1628→
+  1629→# 2. 依赖安装测试
+  1630→Test-Component "Python依赖" {
+  1631→    $result = python -c "import fastapi, pandas, yaml, duckdb" 2>&1
+  1632→    $LASTEXITCODE -eq 0
+  1633→}
+  1634→
+  1635→# 3. Node.js环境测试
+  1636→Test-Component "Node.js环境" {
+  1637→    $nodeVersion = node --version 2>&1
+  1638→    $nodeVersion -match "v\d+"
+  1639→}
+  1640→
+  1641→# 4. 前端依赖测试
+  1642→Test-Component "前端依赖" {
+  1643→    Test-Path "node_modules\@next"
+  1644→}
+  1645→
+  1646→# 5. 配置文件测试
+  1647→Test-Component "配置文件" {
+  1648→    Test-Path "config\app.yaml" -and 
+  1649→    Test-Path ".env" -and 
+  1650→    Test-Path "data\duckdb\quant.db"
+  1651→}
+  1652→
+  1653→# 6. 数据库连接测试
+  1654→Test-Component "数据库连接" {
+  1655→    $result = python -c "import duckdb; conn = duckdb.connect('data\duckdb\quant.db'); print('OK')" 2>&1
+  1656→    $result -match "OK"
+  1657→}
+  1658→
+  1659→# 7. API测试
+  1660→Test-Component "FastAPI启动" {
+  1661→    # 启动临时测试服务器
+  1662→    $process = Start-Process -FilePath "python" `
+  1663→        -ArgumentList "-m", "uvicorn", "engine.api.main:app", "--port", "7999" `
+  1664→        -NoNewWindow -PassThru
+  1665→    
+  1666→    Start-Sleep -Seconds 5
+  1667→    
+  1668→    try {
+  1669→        $response = Invoke-WebRequest -Uri "http://127.0.0.1:7999/health" `
+  1670→            -UseBasicParsing -TimeoutSec 10
+  1671→        $response.StatusCode -eq 200
+  1672→    } finally {
+  1673→        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+  1674→    }
+  1675→}
+  1676→
+  1677→# 8. 路径测试
+  1678→Test-Component "路径处理" {
+  1679→    $testPath = Join-Path $ProjectRoot "data\logs"
+  1680→    (Test-Path $testPath) -and ($testPath -match "data\\logs")
+  1681→}
+  1682→
+  1683→# 9. 编码测试
+  1684→Test-Component "文件编码" {
+  1685→    $testFile = Join-Path $env:TEMP "test_encoding.txt"
+  1686→    "测试中文" | Out-File -FilePath $testFile -Encoding utf8
+  1687→    $content = Get-Content -Path $testFile -Encoding utf8
+  1688→    $content -eq "测试中文"
+  1689→}
+  1690→
+  1691→# 10. 进程管理测试
+  1692→Test-Component "进程管理" {
+  1693→    $process = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | 
+  1694→        Where-Object { $_.Name -eq "python.exe" }
+  1695→    $process -ne $null
+  1696→}
+  1697→
+  1698→# 输出结果
+  1699→Write-Host "`n========================================" -ForegroundColor Cyan
+  1700→Write-Host "测试结果汇总" -ForegroundColor Cyan
+  1701→Write-Host "========================================" -ForegroundColor Cyan
+  1702→Write-Host "总测试数: $TotalTests" -ForegroundColor Cyan
+  1703→Write-Host "通过: $PassedTests" -ForegroundColor Green
+  1704→Write-Host "失败: $FailedTests" -ForegroundColor $(if ($FailedTests -gt 0) { "Red" } else { "Green" })
+  1705→Write-Host "成功率: $([math]::Round($PassedTests / $TotalTests * 100, 1))%" -ForegroundColor Cyan
+  1706→Write-Host "========================================" -ForegroundColor Cyan
+  1707→
+  1708→if ($FailedTests -eq 0) {
+  1709→    Write-Host "所有测试通过!" -ForegroundColor Green
+  1710→    exit 0
+  1711→} else {
+  1712→    Write-Host "部分测试失败，请检查相关组件" -ForegroundColor Yellow
+  1713→    exit 1
+  1714→}
+  1715→七、文档与指南
+  1716→7.1 Windows部署文档 ⭐⭐⭐⭐⭐
+  1717→Copy code to clipboard
+  1718→# Windows部署完整指南
+  1719→
+  1720→## 系统要求
+  1721→- Windows 10/11 专业版或企业版
+  1722→- Python 3.13+ (64位)
+  1723→- Node.js 18+ 
+  1724→- 通达信金融终端 (最新版)
+  1725→- 至少 8GB RAM
+  1726→- 至少 20GB 可用磁盘空间
+  1727→
+  1728→## 安装步骤
+  1729→
+  1730→### 1. 前置软件安装
+  1731→```powershell
+  1732→# 检查Python版本
+  1733→python --version
+  1734→
+  1735→# 检查Node.js版本  
+  1736→node --version
+  1737→
+  1738→# 检查通达信安装
+  1739→dir "k:\txdlianghua\TPythClient.dll"
+  1740→dir "k:\txdlianghua\PYPlugins\user\tqcenter.py"
+  1741→2. 项目配置
+  1742→Copy code to clipboard
+  1743→# 1. 克隆项目
+  1744→git clone <repository-url>
+  1745→cd project
+  1746→
+  1747→# 2. 路径替换
+  1748→powershell -ExecutionPolicy Bypass -File scripts\replace-paths.ps1 -Env windows
+  1749→
+  1750→# 3. 环境初始化
+  1751→powershell -ExecutionPolicy Bypass -File scripts\setup-env.ps1
+  1752→3. 通达信配置
+  1753→Copy code to clipboard
+  1754→# .env 文件配置
+  1755→TQ_CENTER_PATH=k:\txdlianghua\PYPlugins\user
+  1756→TQ_CENTER_INITIALIZE=k:\txdlianghua\PYPlugins\user\tqcenter.py
+  1757→4. 启动服务
+  1758→Copy code to clipboard
+  1759→# 启动全部服务
+  1760→powershell -ExecutionPolicy Bypass -File scripts\start_all.ps1
+  1761→
+  1762→# 检查服务状态
+  1763→curl http://127.0.0.1:8000/health
+  1764→curl http://127.0.0.1:3000/
+  1765→5. 服务部署(可选)
+  1766→Copy code to clipboard
+  1767→# 安装Windows服务
+  1768→powershell -ExecutionPolicy Bypass -File scripts\install_services.ps1
+  1769→
+  1770→# 配置防火墙
+  1771→powershell -ExecutionPolicy Bypass -File scripts\configure_firewall.ps1
+  1772→
+  1773→# 配置自动启动
+  1774→powershell -ExecutionPolicy Bypass -File scripts\configure_autostart.ps1
+  1775→故障排除
+  1776→常见问题
+  1777→1. tqcenter导入失败
+  1778→◦ 检查通达信安装路径
+  1779→◦ 确认TPythClient.dll存在
+  1780→◦ 验证Python环境变量
+  1781→2. 端口占用
+  1782→Copy code to clipboard
+  1783→netstat -ano | findstr :8000
+  1784→taskkill /F /PID <进程ID>
+  1785→3. 编码问题
+  1786→Copy code to clipboard
+  1787→import os
+  1788→os.environ['PYTHONIOENCODING'] = 'utf-8'
+  1789→Copy code to clipboard
+  1790→这份完整的Windows优化清单涵盖了从代码级别到部署级别的所有关键优化点，确保项目能够在Windows环境中稳定运行。

@@ -900,6 +900,22 @@ class RealAdapter(BaseDataAdapter):
             logger.error("refresh_kline(%s, %s) 失败: %s", stock_code, period, exc)
             return False
 
+    def refresh_cache(self, market: str = "AG", force: bool = False) -> bool:
+        """``tq.refresh_cache(market, force)``，刷新行情缓存（snapshot + K线）。
+
+        说明书 通用函数/刷新行情缓存.md 要点：
+        - ``market``: ``AG``/``HK``/``US``/``QH``/``QQ``/``NQ``/``ZZ``/``OF``/``ZS``/``OJ``。
+        - ``force=False`` 时距上次刷新 <10 分钟不刷新（tqcenter 内部节流）。
+        - ``force=True`` 强制刷新。
+        """
+        tq = self._tq()
+        try:
+            tq.refresh_cache(market=market, force=force)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.error("refresh_cache(market=%s, force=%s) 失败: %s", market, force, exc)
+            return False
+
     def download_data(self, stock_code: str, start_date: str, end_date: str) -> bool:
         """下载特定数据文件。
 
@@ -920,6 +936,32 @@ class RealAdapter(BaseDataAdapter):
         except Exception as exc:  # noqa: BLE001
             logger.error("download_data(%s) 失败: %s", stock_code, exc)
             return False
+
+    def download_file(
+        self, stock_code: str, down_time: str = "", down_type: int = 4
+    ) -> dict:
+        """``tq.download_file(stock_code, down_time, down_type)``，原始 API 直通。
+
+        说明书 通用函数/下载特定数据文件.md 要点：
+        - ``down_type``: ``1`` 十大股东 / ``2`` ETF 申赎清单 / ``3`` 舆情 /
+          ``4`` 股票综合信息（默认）。
+        - 文件存于 ``.\\PYPlugins\\data`` 目录。
+        - 返回 ``dict`` 含 ``ErrorId`` / ``Msg`` / ``run_id``。
+
+        与 ``download_data`` 的区别：本方法暴露 ``down_type`` 全部 4 档，
+        供需要拉取十大股东 / ETF 申赎 / 舆情的高级用法直接调用。
+        """
+        tq = self._tq()
+        try:
+            ncode = normalize(stock_code)
+            return tq.download_file(
+                stock_code=ncode,
+                down_time=normalize_date(down_time) if down_time else "",
+                down_type=int(down_type),
+            ) or {}
+        except Exception as exc:  # noqa: BLE001
+            logger.error("download_file(%s, down_type=%s) 失败: %s", stock_code, down_type, exc)
+            return {}
 
 
 # ----------------------------------------------------------------------------

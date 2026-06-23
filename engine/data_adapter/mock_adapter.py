@@ -710,9 +710,27 @@ class MockAdapter(BaseDataAdapter):
         logger.info("[Mock] refresh_kline(%s, %s) -> noop True", stock_code, period)
         return True
 
+    def refresh_cache(self, market: str = "AG", force: bool = False) -> bool:
+        """[Mock] 刷新行情缓存：noop 返回 True。
+
+        Mock 模式数据来自 V8 CSV 快照，无需刷新；保留接口对齐 BaseDataAdapter。
+        """
+        logger.info("[Mock] refresh_cache(market=%s, force=%s) -> noop True", market, force)
+        return True
+
     def download_data(self, stock_code: str, start_date: str, end_date: str) -> bool:
         logger.info("[Mock] download_data(%s, %s, %s) -> noop True", stock_code, start_date, end_date)
         return True
+
+    def download_file(
+        self, stock_code: str, down_time: str = "", down_type: int = 4
+    ) -> dict:
+        """[Mock] ``tq.download_file`` 直通：noop 返回成功响应。
+
+        Mock 模式无真实文件下载；返回说明书约定的成功结构。
+        """
+        logger.info("[Mock] download_file(%s, down_time=%s, down_type=%s) -> noop", stock_code, down_time, down_type)
+        return {"ErrorId": "0", "Msg": "Mock 模式无下载", "run_id": "mock"}
 
     # ------------------------------------------------------------------
     # 推送线程

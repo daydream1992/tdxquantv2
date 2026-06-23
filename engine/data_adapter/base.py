@@ -289,8 +289,46 @@ class BaseDataAdapter(ABC):
 
     @abstractmethod
     def refresh_kline(self, stock_code: str, period: str = "1d") -> bool:
-        """刷新 K 线缓存（``tq.refresh_kline``）。"""
+        """刷新 K 线缓存（``tq.refresh_kline``）。
+
+        说明书要点：参数是 ``stock_list``（列表）不是 ``stock_code``；
+        ``period`` 仅支持 ``1d`` / ``1m`` / ``5m``。
+        """
+
+    @abstractmethod
+    def refresh_cache(self, market: str = "AG", force: bool = False) -> bool:
+        """刷新行情缓存（``tq.refresh_cache``，snapshot + K 线）。
+
+        Args:
+            market: ``AG`` A 股 / ``HK`` 港股 / ``US`` 美股 / ``QH`` 期货 /
+                ``QQ`` / ``NQ`` / ``ZZ`` / ``OF`` / ``ZS`` / ``OJ``。
+            force: ``True`` 强制刷新；``False`` 时距上次 <10 分钟不刷新。
+
+        Returns:
+            是否成功。
+        """
 
     @abstractmethod
     def download_data(self, stock_code: str, start_date: str, end_date: str) -> bool:
-        """下载特定数据文件（``tq.download_data``）。"""
+        """下载特定数据文件（适配 ``tq.download_file``）。
+
+        说明书 通用函数/下载特定数据文件.md 的真实 API 是
+        ``tq.download_file(stock_code, down_time, down_type)``，
+        tqcenter **无** ``tq.download_data`` API。本接口为兼容业务层命名
+        （``download_data``）做的适配映射：``down_time=start_date``，
+        ``down_type=4``（股票综合信息，最通用）；``end_date`` 在该 API 中
+        无对应参数，被忽略。如需十大股东 / ETF 申赎 / 舆情请直接调
+        ``tq.download_file``。
+        """
+
+    def download_file(
+        self, stock_code: str, down_time: str = "", down_type: int = 4
+    ) -> dict:
+        """``tq.download_file`` 原始 API 直通（非抽象，子类可覆盖）。
+
+        默认实现委托给 ``download_data`` 并返回占位 dict；RealAdapter
+        覆盖为真实调用。``down_type``: ``1`` 十大股东 / ``2`` ETF 申赎 /
+        ``3`` 舆情 / ``4`` 股票综合信息（默认）。
+        """
+        self.download_data(stock_code, down_time, "")
+        return {"ErrorId": "0", "Msg": "delegated to download_data", "run_id": "default"}

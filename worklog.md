@@ -1054,3 +1054,110 @@ Stage Summary:
   4. 双击 restart.bat 重启服务
   5. curl http://127.0.0.1:8000/api/monitor/status 验证 engine_status=running + adapter_mode=real
   6. 访问 http://127.0.0.1:9000 QuestDB Web 控制台查看数据
+
+---
+Task ID: R19-验收-tqcenter字段对接完整性扫描
+Agent: Z.ai Code (Claude, 主控)
+Task: 扫描项目 bug，重点核对 tqcenter 脚本字段对接是否完善，过验收
+
+Work Log:
+- 读 worklog.md 了解 R18 QuestDB 迁移已完成；读 dev.log 确认 dev server 运行中（全 200 响应，无错误）
+- 读 tqcenter_fields.py（510 行）确认 API_REGISTRY 共定义 29 个 API（7 大类：行情/财务/分类板块/客户端操作/ETF可转债/通用函数/订阅）
+- 读 real_adapter.py（967 行）+ base.py + mock_adapter.py 核对接口实现
+- 跑 `bun run lint` → 0 errors 0 warnings ✓
+- 跑 `python3 -m py_compile` 8 个核心 .py 文件全过 ✓
+- 跑 API 覆盖率核对脚本：发现 2 个对接缺口
+  * 缺口 1: `refresh_cache` API 在 API_REGISTRY 定义但 BaseDataAdapter/RealAdapter/MockAdapter 均未实现
+  * 缺口 2: `download_file` API 在 API_REGISTRY 定义但适配层用 `download_data` 包装（缺原始直通方法）
+- 修复 1: BaseDataAdapter 加 `refresh_cache(market, force)` 抽象方法 + 完整 docstring（说明书要点：market AG/HK/US/QH/QQ/NQ/ZZ/OF/ZS/OJ，force=False 时距上次<10分钟不刷新）
+- 修复 2: RealAdapter 实现 `refresh_cache` → 调 `tq.refresh_cache(market=market, force=force)`
+- 修复 3: MockAdapter 实现 `refresh_cache` → noop 返回 True（Mock 数据来自 CSV 无需刷新）
+- 修复 4: BaseDataAdapter `download_data` docstring 修正（说明书无 `tq.download_data`，真实 API 是 `tq.download_file`，本接口是适配映射 down_type=4）
+- 修复 5: RealAdapter 加 `download_file(stock_code, down_time, down_type)` 原始 API 直通方法（暴露 down_type 全部 4 档：1十大股东/2ETF申赎/3舆情/4股票综合信息）
+- 修复 6: MockAdapter 加 `download_file` noop 返回成功结构 `{ErrorId, Msg, run_id}`
+- 修复 7: BaseDataAdapter 加 `download_file` 默认实现（非抽象，委托 download_data + 占位 dict，子类可覆盖）
+- 复验: `python3 -m py_compile` 3 个文件全过 + API 覆盖率核对 RealAdapter 29/29 ✓ MockAdapter 29/29 ✓
+- 复验: `bun run lint` 0 errors 0 warnings ✓
+- 端到端验证 (agent-browser):
+  * 打开 http://127.0.0.1:3000/ → 页面正常加载，title "TdxQuant 量化交易系统"
+  * 10 个 Tab 全部可见：实时大屏/策略管理/选股结果/信号中心/板块管理/匹配策略/自选股/实时选股/形态预警/竞价监控
+  * 点击"信号中心" Tab → 切换成功，筛选控件（全部/全部策略/日期范围）正常渲染
+  * console 无错误（仅 Fast Refresh 日志和 React DevTools 提示）
+  * errors 数组为空
+  * 截图保存至 download/qa-r19-verification.png
+- API 端点验证: 8 个关键端点全 200
+  * /api/monitor?action=status → engine_status=running, adapter_mode=mock, uptime_seconds=1563
+  * /api/monitor?action=health ✓
+  * /api/signals?limit=5 ✓
+  * /api/strategies ✓
+  * /api/selections?limit=5 ✓
+  * /api/sectors ✓
+  * /api/channels ✓
+  * /api/config ✓
+- tqcenter 字段对接完整性核对:
+  * API_REGISTRY 29 个 API 全部在 RealAdapter/MockAdapter 实现 ✓
+  * 参数名对齐说明书（R17 已修正 7 处参数名错误，本次扫描确认无新增偏差）
+    - get_market_snapshot(stock_code=, field_list=) ✓
+    - get_more_info(stock_code=, field_list=) ✓
+    - get_stock_info(stock_code=, field_list=) ✓
+    - get_gb_info(stock_code=, date_list=, count=) ✓
+    - get_gb_info_by_date(stock_code=, start_date=, end_date=) ✓
+    - get_relation(stock_code=) ✓
+    - get_ipo_info(ipo_type=, ipo_date=) ✓
+    - get_financial_data(stock_list=, field_list=, start_time=, end_time=, report_type=) ✓
+    - get_gp_one_data(stock_list=, field_list=) ✓
+    - get_gpjy_value(stock_list=, field_list=, start_time=, end_time=) ✓
+    - get_stock_list(market=, list_type=) ✓
+    - get_sector_list(list_type=) ✓（无 market 参数）
+    - get_stock_list_in_sector(block_code=, block_type=, list_type=) ✓
+    - get_user_sector() ✓（无参数）
+    - create_sector(block_code=, block_name=) ✓
+    - delete_sector(block_code=) ✓
+    - rename_sector(block_code=, block_name=) ✓
+    - clear_sector(block_code=) ✓（直接 API，非 send_user_block 变通）
+    - send_user_block(block_code=, stocks=) ✓（参数名是 stocks 不是 stock_list）
+    - get_kzz_info(stock_code=, field_list=) ✓
+    - get_trackzs_etf_info(zs_code=) ✓（参数名是 zs_code 不是 etf_code）
+    - get_trading_dates(market=, start_time=, end_time=, count=) ✓
+    - send_message(msg_str=) ✓（参数名是 msg_str 不是 msg）
+    - send_warn(stock_list=, time_list=, ..., count=) ✓
+    - refresh_cache(market=, force=) ✓（R19 新增）
+    - refresh_kline(stock_list=, period=) ✓（参数是 stock_list 列表）
+    - download_file(stock_code=, down_time=, down_type=) ✓（R19 新增直通）
+  * tqcenter 动态导入机制（sys.path.insert）+ 4 级路径优先级（TQ_CENTER_PATH > config > 扫描 > 直接 import）✓
+  * tq.initialize(init_arg) 路径解析（python_path/tqcenter.py > TQ_CENTER_INITIALIZE > __file__）✓
+  * _probe_api_coverage 初始化后自动核对 tqcenter 实际暴露 API 与说明书差异 ✓
+  * get_market_data 自动分批续传（超 24000 条按 end_time 倒推）✓
+  * subscribe_hq 自动分批（batch_size 来自 config）✓
+  * 三层限流（令牌桶 + 端点中间件 + 监控统计）✓
+  * 优雅降级（沙箱无 tqcenter 时 RealAdapter 可实例化但调用抛 RuntimeError + 明确提示）✓
+
+Stage Summary:
+- 修改文件数: 3 (engine/data_adapter/base.py + real_adapter.py + mock_adapter.py)
+- 新增方法数: 5
+  * BaseDataAdapter: + refresh_cache (abstract) + download_file (concrete default)
+  * RealAdapter: + refresh_cache + download_file
+  * MockAdapter: + refresh_cache + download_file
+- API 覆盖率: 27/29 → 29/29 (RealAdapter & MockAdapter 都达到 100%)
+- 验证结果:
+  * lint: 0 errors 0 warnings ✓
+  * py_compile: 3 个文件全过 ✓
+  * API 覆盖率: 29/29 ✓
+  * 8 个关键 API 端点全 200 ✓
+  * agent-browser 端到端: 页面加载 + Tab 切换 + 无 console 错误 ✓
+  * 截图: download/qa-r19-verification.png
+- 验收结论: **tqcenter 字段对接完善，过验收** ✓
+  * 29 个 API 全部实现（行情9 + 财务3 + 板块3 + 客户端操作6 + ETF可转债2 + 通用6）
+  * 参数名 100% 对齐说明书（R17 修正 7 处 + R19 补 2 个缺失 API）
+  * 字段目录权威来源（tqcenter_fields.py 510 行，含 V8 快照 91 字段映射）
+  * 适配层优雅降级（沙箱 mock / 真机 real 切换透明）
+- 未解决问题:
+  1. Real 模式实际写入性能未在沙箱验证（需 Windows 真机 + 通达信终端 + QuestDB 服务）
+  2. engine/factors/ 下 8 个因子文件有 TODO(P1-2/P1-3) 待 STRATEGY_LOGIC.md 确认阈值（非阻断，mock 模式可用默认阈值运行）
+  3. engine/pipeline/ 下 5 个文件有 TODO(P1-3) 待 data_adapter.get_financial_data 实现（已实现，TODO 注释未清理）
+  4. 旧 DuckDB 数据文件 data/duckdb/quant.db 不会自动迁移到 QuestDB（需手动 SQL 导出/导入）
+- 给用户的下一步:
+  1. Windows 真机部署: 双击 start-questdb.bat 启动 QuestDB → 编辑 config/app.yaml 切 adapter_mode=real → restart.bat
+  2. 验证 Real 模式: curl http://127.0.0.1:8000/api/monitor?action=status 应显示 adapter_mode=real
+  3. 验证 tqcenter 连接: 日志应出现 "tqcenter API 覆盖完整：说明书 29 个 API 全部就绪"
+  4. 可选: 清理 engine/factors/ 和 engine/pipeline/ 下的 TODO 注释（P1-2/P1-3 已完成）
