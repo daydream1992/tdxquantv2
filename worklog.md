@@ -713,3 +713,73 @@ Stage Summary:
 - 如 install.bat 的 tqcenter 配置步骤失败, 用户可手动:
   python scripts\install_tqcenter.py --path K:\txdlianghua\PYPlugins\user
   或 set TQ_CENTER_PATH=K:\txdlianghua\PYPlugins\user (临时环境变量)
+
+---
+Task ID: R17-数据接口字段配置(说明书核对)
+Agent: Z.ai Code (Claude, 主控)
+Task: 用户问"数据接口的文件和字段你现在能直接配置上去了吗？里面有个说明书的，你可以查看，然后进行编码" — 找到并解压 upload/通达信量化平台说明书.7z，逐条核对 real_adapter，建权威字段目录，修 9 处 bug
+
+Work Log:
+- 在 upload/ 发现 通达信量化平台说明书.7z (69KB)，用 py7zr 解压到 /tmp/tdx-doc 并归档到 docs/tongdaxin-api-docs/
+- 说明书内容: 49 篇 markdown (7 大类) + tongdaxin_query.py (字段注册表) + 15 个 probe_scripts + CLAUDE.md
+  * a行情类信息 (8 篇): get_market_snapshot/get_market_data/get_pricevol/get_more_info/get_stock_info/get_relation/get_gb_info/get_gb_info_by_date/get_ipo_info
+  * b财务类数据 (10 篇): get_financial_data(FN1-FN584)/get_gp_one_data(GO1-GO47)/get_gpjy_value(GP01-GP46) 等
+  * c分类板块 (3 篇): get_stock_list/get_sector_list/get_stock_list_in_sector
+  * d客户端操作类 (1 篇): 板块管理 6 API
+  * e ETF/可转债 (2 篇): get_kzz_info/get_trackzs_etf_info
+  * f 调用通达信公式 (8 篇)
+  * g场景化例子 (7 篇) + 通用函数 (10 篇)
+- 关键发现: V8 盘后选股 91 字段快照 = get_more_info(code, field_list=[]) 全字段 + 3 个脚本元数据列(code/类型/查询时间)
+  * get_more_info 返回 88 字段: MainBusiness/SafeValue/fHSL/fLianB/Wtb/ZAF/FCAmo/HisHigh/MA5Value 等
+  * V8 CSV 的 OpenZAF 字段在说明书字段表里没有(可能是 API 实际返回但未文档化,或脚本派生),已标 V8_UNDOCUMENTED_FIELDS
+- 逐条核对 real_adapter.py vs 说明书,发现 9 处 bug:
+  * Bug1 get_stock_list_in_sector: 用 code= 但说明书参数名是 block_code; 且漏传 block_type
+  * Bug2 send_user_block: 用 stock_list= 但说明书参数名是 stocks
+  * Bug3 clear_sector: 用 send_user_block(code,[]) 变通,但说明书有独立的 tq.clear_sector(code) 直接 API
+  * Bug4 get_user_sector: 调用虚构的 tq.get_user_sector_by_code(说明书无此 API),改为 get_user_sector() 本地过滤
+  * Bug5 get_trackzs_etf_info: 用 etf_code= 但说明书参数名是 zs_code
+  * Bug6 send_message: 用 msg= 但说明书参数名是 msg_str
+  * Bug7 refresh_kline: 用 stock_code= 但说明书参数是 stock_list(列表),改为 stock_list=[ncode]
+  * Bug8 get_gpjy_value/get_gpjy_value_by_date: base 接口签名(code,date_list,count)与真实 API(stock_list,field_list,start_time,end_time)不符,真实 API 无 get_gpjy_value_by_date; 改为调真实 get_gpjy_value + 展平返回结构 + 注明限制
+  * Bug9 download_data: 真实 API 是 download_file(stock_code,down_time,down_type),tqcenter 无 download_data; 改为映射 download_file(down_type=4 股票综合信息)
+- 新建 1 个文件: engine/data_adapter/tqcenter_fields.py (字段权威目录)
+  * API_REGISTRY: 29 个 API 的元信息(category/description/signature/fields/returns/notes)
+  * V8_SNAPSHOT_FIELDS: 91 列 V8 快照字段清单 + V8_MORE_INFO_FIELDS(88 个来自 get_more_info)
+  * FINANCIAL_FN_FIELDS: FN 系列常用 53 字段子集
+  * 辅助函数: get_api_fields/find_field/validate_field_list/v8_field_list/list_apis
+- 修改 3 个文件:
+  * engine/data_adapter/real_adapter.py: 修 9 处 bug + 加 import tqcenter_fields + 加 _probe_api_coverage() (initialize 后核对 API 覆盖) + 更新模块 docstring 引用说明书
+  * engine/config/schema.py: TqCenterConfig 加 fields: dict 字段(支持 YAML tqcenter.fields 子段)
+  * config/app.yaml: tqcenter 段加 fields 子段(v8_snapshot_source_api/v8_snapshot_field_list/kline_field_list/snapshot_field_list/financial_fn_fields 15 个 FN)
+- 沙箱验证:
+  * py_compile 3 个文件全过
+  * 字段目录冒烟测试: API_REGISTRY=29, V8_SNAPSHOT_FIELDS=91, V8_MORE_INFO_FIELDS=88, 6 大类别齐全
+  * find_field('ZAF')→get_more_info, find_field('FN193')→get_financial_data 正确
+  * validate_field_list 正确识别非法字段(NotAField/BAD)
+  * ConfigLoader 点访问 tqcenter.fields.financial_fn_fields 返回 15 个 FN
+  * AppConfigRoot.from_dict 正确填充 tqcenter.fields, schema validate OK
+  * RealAdapter 在 mock 模式(tqcenter 不可用)优雅实例化(打印解决方法,不崩溃)
+  * bun run lint exit 0 (0 errors 0 warnings)
+  * Next.js HTTP 200, /api/monitor?action=status 返回 engine_status=running/adapter_mode=mock
+  * agent-browser 确认前端 "TdxQuant 量化交易系统" 正常加载
+
+Stage Summary:
+- 产物清单:
+  * docs/tongdaxin-api-docs/ (新建, 49 篇说明书 markdown + tongdaxin_query.py + 15 probe_scripts, 从 upload/ 解压归档)
+  * engine/data_adapter/tqcenter_fields.py (新建, 29 API 字段权威目录 + V8 快照 91 字段映射 + 辅助函数)
+  * engine/data_adapter/real_adapter.py (修改, 修 9 处参数名/签名 bug + API 覆盖诊断 + docstring 引用说明书)
+  * engine/config/schema.py (修改, TqCenterConfig 加 fields dict 字段)
+  * config/app.yaml (修改, tqcenter.fields 子段: 5 个字段配置键 + 15 个常用 FN)
+- 核心价值: 数据接口字段从"凭记忆/经验猜测"升级为"说明书逐条核对",字段名/参数名/返回结构全部有据可查
+- V8 快照数据源确认: get_more_info 是 91 字段快照的主源, Real 模式下可用 get_more_info(code, field_list=[]) 全量拉取
+- 9 处 bug 全部修复, Real 模式不会再因参数名错误抛 TypeError (此前 send_user_block/clear_sector/get_trackzs_etf_info/send_message/refresh_kline 等必崩)
+- 未解决问题:
+  1. get_gpjy_value/get_gpjy_value_by_date 的 base 接口(code,date_list,count)与真实 API(stock_list,field_list,start_time,end_time)语义不符, 当前用 field_list=[] 适配(若 tqcenter 拒绝空 list 则返回 [], 调用方可改用 get_financial_data 拉 FN); 根治需重构 base.py + mock + 调用方
+  2. download_data→download_file 映射固定 down_type=4(股票综合信息), end_date 被忽略; 如需十大股东(down_type=1)/ETF申赎(2)/舆情(3)需直接调 tq.download_file
+  3. V8 快照的 OpenZAF 字段在说明书 get_more_info 字段表里没有, 可能是 API 实际返回但未文档化或脚本派生, 已标 V8_UNDOCUMENTED_FIELDS 待真机验证
+  4. Real 模式实际可用性仍依赖 Windows + tqcenter + 通达信终端登录, sandbox 无法验证字段返回值
+- 下一阶段建议:
+  1. 用户在 Windows 真机切 Real 模式后, 跑 get_more_info('600519.SH', field_list=[]) 验证 88 字段是否全返回(含 OpenZAF)
+  2. 可建 V8 快照构建器服务: 全市场 get_stock_list('5') → 循环 get_more_info → 拼 91 列 DataFrame, 替代 V8 CSV 样本
+  3. 可加"字段面板"前端页: 调 /api/tqcenter-fields(新) 展示 29 API × 字段清单, 支持搜字段反查 API
+  4. 可重构 base.py 的 get_gpjy_value 接口为 (stock_list, field_list, start_time, end_time) 与说明书对齐

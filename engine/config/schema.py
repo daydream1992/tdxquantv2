@@ -88,6 +88,11 @@ class TqCenterConfig:
     global_qps: float = 0.0
     burst: int = 0
     acquire_timeout: float = 0.0
+    # R17: 字段配置（权威来源 engine/data_adapter/tqcenter_fields.py）
+    # 子键: v8_snapshot_source_api / v8_snapshot_field_list / kline_field_list /
+    #        snapshot_field_list / financial_fn_fields
+    # 留空 list 表示对应 API 用 field_list=[] 返回全部字段
+    fields: dict[str, Any] = field(default_factory=dict)
 
     def validate(self) -> None:
         if self.subscribe_batch_size <= 0:

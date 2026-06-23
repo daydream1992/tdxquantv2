@@ -1,0 +1,862 @@
+     1→"""Real 数据适配器（封装 tqcenter API）。
+     2→
+     3→设计要点：
+     4→1. **tqcenter 导入机制**：tqcenter 不是 PyPI 包，是通达信终端目录下的 Python 文件
+     5→   (通常在 ``<通达信>\\PYPlugins\\user\\tqcenter.py``)。本模块通过 ``sys.path.insert``
+     6→   动态加入路径后 ``from tqcenter import tq`` 导入。路径优先级：
+     7→   环境变量 ``TQ_CENTER_PATH`` > config ``tqcenter.python_path`` > 通达信常见安装目录扫描。
+     8→2. **导入容错**：``import tqcenter`` 失败时仍可实例化，但调用任何方法都会抛
+     9→   ``RuntimeError``。Linux 沙箱环境无法运行 Real 模式，但代码骨架可被加载。
+    10→3. **subscribe_hq 分批**：batch_size 来自 ``config/app.yaml`` 的
+    11→   ``tqcenter.subscribe_batch_size``（默认 50）。
+    12→4. **get_market_data 自动续传**：单次最多 24000 条（来自 ``tqcenter.kline_max_count``），
+    13→   超出时按 end_time 倒推分批拉取并合并。
+    14→5. **板块管理返回真实结果**：与 Mock 不同，``create_sector`` / ``delete_sector`` 等
+    15→   会真实调用 tqcenter。
+    16→6. **不硬编码任何路径/阈值**：所有参数从 ``ConfigLoader`` 读取。
+    17→
+    18→API 清单参考 worklog Task 2-a / 2-b / 2-h：
+    19→- 行情类：``get_market_snapshot`` / ``get_pricevol`` / ``get_market_data`` /
+    20→  ``get_more_info`` / ``get_stock_info`` / ``get_gb_info`` / ``get_gb_info_by_date`` /
+    21→  ``get_relation`` / ``get_ipo_info``
+    22→- 板块类：``get_stock_list`` / ``get_sector_list`` / ``get_stock_list_in_sector`` /
+    23→  ``get_user_sector``
+    24→- 财务类：``get_financial_data`` / ``get_gp_one_data`` / ``get_gpjy_value`` /
+    25→  ``get_gpjy_value_by_date``
+    26→- ETF/可转债：``get_kzz_info`` / ``get_trackzs_etf_info``
+    27→- 板块管理：``create_sector`` / ``delete_sector`` / ``rename_sector`` /
+    28→  ``clear_sector`` / ``send_user_block``
+    29→- 通用：``get_trading_dates`` / ``send_warn`` / ``send_message`` / ``subscribe_hq`` /
+    30→  ``unsubscribe_hq`` / ``refresh_kline`` / ``download_data``
+    31→"""
+    32→
+    33→from __future__ import annotations
+    34→
+    35→import logging
+    36→import math
+    37→import os
+    38→import platform
+    39→import sys
+    40→import time
+    41→from datetime import date, datetime, timedelta
+    42→from pathlib import Path
+    43→from typing import Any, Callable
+    44→
+    45→import pandas as pd
+    46→
+    47→from engine.config.loader import ConfigLoader
+    48→from engine.data_adapter.base import BaseDataAdapter, Callback, DateList, FieldList, StockList
+    49→from engine.data_adapter.rate_limiter import RateLimitError, acquire_or_skip
+    50→from engine.utils.stock_code import normalize
+    51→from engine.utils.time import normalize_date
+    52→
+    53→logger = logging.getLogger(__name__)
+    54→
+    55→
+    56→# ----------------------------------------------------------------------------
+    57→# tqcenter 动态导入（sys.path.insert 机制）
+    58→# ----------------------------------------------------------------------------
+    59→# tqcenter 是通达信终端目录下的 Python 文件，不在 PyPI。
+    60→# 导入路径优先级：
+    61→#   1. 环境变量 TQ_CENTER_PATH (绝对路径，指向含 tqcenter.py 的目录)
+    62→#   2. config/app.yaml 的 tqcenter.python_path
+    63→#   3. 通达信常见安装目录扫描 (Windows only)
+    64→#   4. 直接尝试 import (用户已手动 pip install -e 或加 PYTHONPATH 的情况)
+    65→
+    66→# 通达信终端常见安装路径 (Windows)
+    67→_TDX_COMMON_PATHS = [
+    68→    r"C:\new_tdx", r"D:\new_tdx", r"E:\new_tdx", r"F:\new_tdx",
+    69→    r"C:\通达信", r"D:\通达信", r"E:\通达信", r"F:\通达信",
+    70→    r"C:\Program Files\通达信", r"D:\Program Files\通达信",
+    71→    r"C:\Program Files (x86)\通达信",
+    72→    r"K:\txdlianghua",  # 用户实际安装路径
+    73→]
+    74→
+    75→# 在通达信根目录下查找 tqcenter.py 的候选子路径
+    76→_TQCENTER_SUBPATHS = [
+    77→    "PYPlugins\\user",           # 新版通达信: K:\txdlianghua\PYPlugins\user\tqcenter.py
+    78→    "T0002\\hq_cache\\PythonLib",  # 旧版: T0002\hq_cache\PythonLib\tqcenter.py
+    79→    "Python\\site-packages",    # 嵌入式 Python 环境
+    80→    "PYPlugins",                # 简化路径
+    81→]
+    82→
+    83→
+    84→def _find_tqcenter_dir() -> str | None:
+    85→    """扫描通达信常见安装目录，返回包含 tqcenter.py 的目录路径。Windows only。"""
+    86→    if platform.system() != "Windows":
+    87→        return None
+    88→    for tdx_root in _TDX_COMMON_PATHS:
+    89→        root = Path(tdx_root)
+    90→        if not root.exists():
+    91→            continue
+    92→        for sub in _TQCENTER_SUBPATHS:
+    93→            candidate = root / sub
+    94→            if (candidate / "tqcenter.py").exists() or (candidate / "tqcenter" / "__init__.py").exists():
+    95→                return str(candidate)
+    96→    return None
+    97→
+    98→
+    99→def _resolve_tqcenter_path() -> str | None:
+   100→    """按优先级解析 tqcenter 所在目录。返回绝对路径字符串或 None。"""
+   101→    # 1. 环境变量 TQ_CENTER_PATH
+   102→    env_path = os.environ.get("TQ_CENTER_PATH", "").strip()
+   103→    if env_path and Path(env_path).exists():
+   104→        return env_path
+   105→    # 2. config tqcenter.python_path
+   106→    try:
+   107→        cfg = ConfigLoader()
+   108→        cfg_path = str(cfg.get("tqcenter.python_path", "") or "").strip()
+   109→        if cfg_path and Path(cfg_path).exists():
+   110→            return cfg_path
+   111→    except Exception:  # noqa: BLE001
+   112→        pass
+   113→    # 3. 扫描通达信常见目录
+   114→    return _find_tqcenter_dir()
+   115→
+   116→
+   117→def _import_tqcenter() -> tuple[bool, str, Any, Any]:
+   118→    """动态导入 tqcenter。返回 (available, err_msg, tq, tqconst)。"""
+   119→    # 先尝试直接 import（用户可能已 pip install -e 或设 PYTHONPATH）
+   120→    try:
+   121→        from tqcenter import tq as tq_mod  # type: ignore[import]
+   122→        from tqcenter import tqconst as tqconst_mod  # type: ignore[import]
+   123→        return True, "", tq_mod, tqconst_mod
+   124→    except ImportError:
+   125→        pass
+   126→
+   127→    # 通过 sys.path.insert 导入
+   128→    tq_dir = _resolve_tqcenter_path()
+   129→    if tq_dir:
+   130→        if tq_dir not in sys.path:
+   131→            sys.path.insert(0, tq_dir)
+   132→        try:
+   133→            from tqcenter import tq as tq_mod  # type: ignore[import]
+   134→            from tqcenter import tqconst as tqconst_mod  # type: ignore[import]
+   135→            logger.info("tqcenter 已从 %s 导入", tq_dir)
+   136→            return True, "", tq_mod, tqconst_mod
+   137→        except Exception as exc:  # noqa: BLE001
+   138→            return False, f"在 {tq_dir} 找到但导入失败: {exc}", None, None
+   139→        # 不从 sys.path 移除 tq_dir：tqcenter 内部可能还需要它来加载同目录的辅助模块
+   140→        # (如 TPythClient.dll 通过 __file__ 定位，但某些子模块可能走 sys.path)
+   141→    return False, "未找到 tqcenter.py，请设置 TQ_CENTER_PATH 环境变量或 config.tqcenter.python_path", None, None
+   142→
+   143→
+   144→# 模块加载时执行导入
+   145→_tqcenter_available = False
+   146→_tqcenter_err_msg = ""
+   147→_tq = None
+   148→_tqconst = None
+   149→try:
+   150→    _tqcenter_available, _tqcenter_err_msg, _tq, _tqconst = _import_tqcenter()
+   151→except Exception as _import_exc:  # noqa: BLE001
+   152→    _tqcenter_err_msg = str(_import_exc)
+   153→
+   154→
+   155→class RealAdapter(BaseDataAdapter):
+   156→    """Real 数据适配器（生产用，必须 Windows + 通达信终端环境）。"""
+   157→
+   158→    def __init__(self) -> None:
+   159→        cfg = ConfigLoader()
+   160→        self._initialize_file: str = cfg.get("tqcenter.initialize_file", "__file__")
+   161→        self._python_path: str = str(cfg.get("tqcenter.python_path", "") or "")
+   162→        self._subscribe_batch_size: int = int(cfg.get("tqcenter.subscribe_batch_size", 50))
+   163→        self._kline_max_count: int = int(cfg.get("tqcenter.kline_max_count", 24000))
+   164→        self._initialized: bool = False
+   165→        # 已订阅 code -> callback 列表
+   166→        self._subscribers: dict[str, list[Callback]] = {}
+   167→
+   168→        if not _tqcenter_available:
+   169→            logger.warning(
+   170→                "tqcenter 不可用（%s）。RealAdapter 可实例化但所有调用将抛 RuntimeError。"
+   171→                "解决方法：1) 设置环境变量 TQ_CENTER_PATH=<含 tqcenter.py 的目录>；"
+   172→                "2) 或在 config/app.yaml 的 tqcenter.python_path 配置路径；"
+   173→                "3) 或确保通达信终端已安装（自动扫描 K:\\txdlianghua 等常见路径）。",
+   174→                _tqcenter_err_msg,
+   175→            )
+   176→
+   177→    # ------------------------------------------------------------------
+   178→    # 内部辅助
+   179→    # ------------------------------------------------------------------
+   180→
+   181→    def _ensure_tq(self) -> None:
+   182→        """校验 tqcenter 已导入并已初始化。"""
+   183→        if not _tqcenter_available:
+   184→            raise RuntimeError(
+   185→                f"tqcenter 不可用：{_tqcenter_err_msg}。"
+   186→                "解决方法：1) 设置环境变量 TQ_CENTER_PATH=<含 tqcenter.py 的目录>；"
+   187→                "2) 或在 config/app.yaml 的 tqcenter.python_path 配置路径；"
+   188→                "3) 或确保通达信终端已安装。"
+   189→                "若仍无法解决，请切换 config/app.yaml 的 app.adapter_mode 为 mock。"
+   190→            )
+   191→        if not self._initialized:
+   192→            if not self.initialize():
+   193→                raise RuntimeError("tq.initialize 失败")
+   194→
+   195→    def _tq(self):
+   196→        """返回 tq 单例。"""
+   197→        self._ensure_tq()
+   198→        return _tq
+   199→
+   200→    # ------------------------------------------------------------------
+   201→    # 生命周期
+   202→    # ------------------------------------------------------------------
+   203→
+   204→    def initialize(self) -> bool:
+   205→        """调用 ``tq.initialize(<path>)`` 初始化通达信连接。
+   206→
+   207→        tq.initialize 需要一个路径作为上下文，用于定位 TPythClient.dll 和配置文件。
+   208→        路径优先级：
+   209→          1. config tqcenter.initialize_file (如果不是 "__file__" 占位符)
+   210→          2. config tqcenter.python_path (含 tqcenter.py 的目录) + "/tqcenter.py"
+   211→          3. 环境变量 TQ_CENTER_INITIALIZE
+   212→          4. 本文件 __file__ (兜底，可能无法定位 DLL)
+   213→        """
+   214→        if not _tqcenter_available:
+   215→            return False
+   216→        if self._initialized:
+   217→            return True
+   218→        try:
+   219→            init_arg: str = self._initialize_file
+   220→            if init_arg == "__file__":
+   221→                # 优先用 python_path 拼出 tqcenter.py 路径（用户示例：传 tqcenter.py 路径）
+   222→                if self._python_path:
+   223→                    init_arg = str(Path(self._python_path) / "tqcenter.py")
+   224→                else:
+   225→                    # 兜底环境变量
+   226→                    env_init = os.environ.get("TQ_CENTER_INITIALIZE", "").strip()
+   227→                    if env_init:
+   228→                        init_arg = env_init
+   229→                    else:
+   230→                        init_arg = __file__
+   231→            _tq.initialize(init_arg)
+   232→            self._initialized = True
+   233→            logger.info("RealAdapter tq.initialize 完成 (init_arg=%s)", init_arg)
+   234→            return True
+   235→        except Exception as exc:  # noqa: BLE001
+   236→            logger.error("tq.initialize 失败 (init_arg=%s): %s", init_arg, exc)
+   237→            return False
+   238→
+   239→    def close(self) -> None:
+   240→        """取消所有订阅并关闭。"""
+   241→        if self._subscribers:
+   242→            codes = list(self._subscribers.keys())
+   243→            self.unsubscribe_hq(codes)
+   244→        logger.info("RealAdapter 已关闭")
+   245→
+   246→    # ------------------------------------------------------------------
+   247→    # 行情类
+   248→    # ------------------------------------------------------------------
+   249→
+   250→    def get_market_snapshot(self, code: str, field_list: FieldList | None = None) -> dict:
+   251→        """``tq.get_market_snapshot(stock_code, field_list)``。"""
+   252→        if not acquire_or_skip():
+   253→            raise RateLimitError(f"tqcenter 限流: get_market_snapshot({code}) 被拒绝")
+   254→        tq = self._tq()
+   255→        try:
+   256→            ncode = normalize(code)
+   257→            result = tq.get_market_snapshot(stock_code=ncode, field_list=field_list or [])
+   258→            return result or {}
+   259→        except Exception as exc:  # noqa: BLE001
+   260→            logger.error("get_market_snapshot(%s) 失败: %s", code, exc)
+   261→            return {}
+   262→
+   263→    def get_pricevol(self, stock_list: StockList) -> dict:
+   264→        """``tq.get_pricevol(stock_list)``。"""
+   265→        if not acquire_or_skip():
+   266→            raise RateLimitError(f"tqcenter 限流: get_pricevol({len(stock_list)} codes) 被拒绝")
+   267→        tq = self._tq()
+   268→        try:
+   269→            codes = [normalize(c) for c in stock_list]
+   270→            return tq.get_pricevol(stock_list=codes) or {}
+   271→        except Exception as exc:  # noqa: BLE001
+   272→            logger.error("get_pricevol(%d codes) 失败: %s", len(stock_list), exc)
+   273→            return {}
+   274→
+   275→    def get_market_data(
+   276→        self,
+   277→        stock_list: StockList,
+   278→        period: str = "1d",
+   279→        start_time: str = "",
+   280→        end_time: str = "",
+   281→        count: int = -1,
+   282→        dividend_type: str | None = "none",
+   283→        field_list: FieldList | None = None,
+   284→        fill_data: bool = True,
+   285→    ) -> dict:
+   286→        """``tq.get_market_data(...)``，超 24000 条自动分批续传。
+   287→
+   288→        分批策略：
+   289→        1. 若 ``count`` ≤ 0 或 ``count * len(stock_list) ≤ kline_max_count`` → 单次调用
+   290→        2. 否则按 ``count // N`` 折算单次 count，多次调用并合并
+   291→        """
+   292→        if not acquire_or_skip():
+   293→            raise RateLimitError(
+   294→                f"tqcenter 限流: get_market_data({len(stock_list)} codes) 被拒绝"
+   295→            )
+   296→        tq = self._tq()
+   297→        try:
+   298→            codes = [normalize(c) for c in stock_list]
+   299→            n_codes = len(codes)
+   300→            single_call_max = max(self._kline_max_count // max(n_codes, 1), 1)
+   301→
+   302→            # 不需要分批
+   303→            if count is None or count <= 0 or count <= single_call_max:
+   304→                return self._call_market_data(
+   305→                    tq, codes, period, start_time, end_time, count, dividend_type, field_list, fill_data
+   306→                )
+   307→
+   308→            # 需要分批：按 end_time 倒推分批
+   309→            merged: dict[str, pd.DataFrame] = {}
+   310→            remaining = count
+   311→            current_end = end_time
+   312→            while remaining > 0:
+   313→                batch_count = min(remaining, single_call_max)
+   314→                batch_data = self._call_market_data(
+   315→                    tq, codes, period, start_time, current_end, batch_count, dividend_type, field_list, fill_data
+   316→                )
+   317→                if not batch_data:
+   318→                    break
+   319→                # 合并到已收集数据
+   320→                for field, df in batch_data.items():
+   321→                    if field not in merged:
+   322→                        merged[field] = df
+   323→                    else:
+   324→                        # 横向合并（columns=date），去重
+   325→                        merged[field] = merged[field].join(df, how="outer")
+   326→                remaining -= batch_count
+   327→                if remaining <= 0:
+   328→                    break
+   329→                # 推算下一批 end_time（取本批最早日期往前推一天）
+   330→                # 仅当能拿到日期列时才推算，否则退出避免无限循环
+   331→                try:
+   332→                    any_df = next(iter(batch_data.values()))
+   333→                    if not any_df.empty and len(any_df.columns) > 0:
+   334→                        dates = sorted([str(c) for c in any_df.columns])
+   335→                        earliest = dates[0].replace("-", "")
+   336→                        prev_day = (
+   337→                            datetime.strptime(earliest, "%Y%m%d") - timedelta(days=1)
+   338→                        ).strftime("%Y%m%d")
+   339→                        current_end = prev_day
+   340→                        # 也限制下界
+   341→                        if start_time and current_end < start_time:
+   342→                            break
+   343→                    else:
+   344→                        break
+   345→                except Exception:  # noqa: BLE001
+   346→                    break
+   347→            return merged
+   348→        except Exception as exc:  # noqa: BLE001
+   349→            logger.error("get_market_data 失败: %s", exc)
+   350→            return {}
+   351→
+   352→    def _call_market_data(
+   353→        self,
+   354→        tq,
+   355→        codes: list[str],
+   356→        period: str,
+   357→        start_time: str,
+   358→        end_time: str,
+   359→        count: int,
+   360→        dividend_type: str | None,
+   361→        field_list: FieldList | None,
+   362→        fill_data: bool,
+   363→    ) -> dict:
+   364→        """单次调用 ``tq.get_market_data``。"""
+   365→        kwargs: dict[str, Any] = {
+   366→            "stock_list": codes,
+   367→            "period": period,
+   368→            "count": count if count is not None else -1,
+   369→            "fill_data": fill_data,
+   370→        }
+   371→        if start_time:
+   372→            kwargs["start_time"] = normalize_date(start_time)
+   373→        if end_time:
+   374→            kwargs["end_time"] = normalize_date(end_time)
+   375→        if dividend_type is not None:
+   376→            kwargs["dividend_type"] = dividend_type
+   377→        if field_list is not None:
+   378→            kwargs["field_list"] = field_list
+   379→        return tq.get_market_data(**kwargs) or {}
+   380→
+   381→    def get_more_info(self, code: str, field_list: FieldList | None = None) -> dict:
+   382→        """``tq.get_more_info(stock_code, field_list)``。"""
+   383→        if not acquire_or_skip():
+   384→            raise RateLimitError(f"tqcenter 限流: get_more_info({code}) 被拒绝")
+   385→        tq = self._tq()
+   386→        try:
+   387→            ncode = normalize(code)
+   388→            return tq.get_more_info(stock_code=ncode, field_list=field_list or []) or {}
+   389→        except Exception as exc:  # noqa: BLE001
+   390→            logger.error("get_more_info(%s) 失败: %s", code, exc)
+   391→            return {}
+   392→
+   393→    def get_stock_info(self, code: str, field_list: FieldList | None = None) -> dict:
+   394→        """``tq.get_stock_info(stock_code, field_list)``。"""
+   395→        if not acquire_or_skip():
+   396→            raise RateLimitError(f"tqcenter 限流: get_stock_info({code}) 被拒绝")
+   397→        tq = self._tq()
+   398→        try:
+   399→            ncode = normalize(code)
+   400→            return tq.get_stock_info(stock_code=ncode, field_list=field_list or []) or {}
+   401→        except Exception as exc:  # noqa: BLE001
+   402→            logger.error("get_stock_info(%s) 失败: %s", code, exc)
+   403→            return {}
+   404→
+   405→    def get_gb_info(self, code: str, date_list: DateList, count: int = 1) -> list:
+   406→        """``tq.get_gb_info(stock_code, date_list, count)``。"""
+   407→        if not acquire_or_skip():
+   408→            raise RateLimitError(f"tqcenter 限流: get_gb_info({code}) 被拒绝")
+   409→        tq = self._tq()
+   410→        try:
+   411→            ncode = normalize(code)
+   412→            return tq.get_gb_info(stock_code=ncode, date_list=date_list, count=count) or []
+   413→        except Exception as exc:  # noqa: BLE001
+   414→            logger.error("get_gb_info(%s) 失败: %s", code, exc)
+   415→            return []
+   416→
+   417→    def get_gb_info_by_date(self, code: str, start_date: str, end_date: str = "") -> list:
+   418→        """``tq.get_gb_info_by_date(stock_code, start_date, end_date)``。"""
+   419→        if not acquire_or_skip():
+   420→            raise RateLimitError(f"tqcenter 限流: get_gb_info_by_date({code}) 被拒绝")
+   421→        tq = self._tq()
+   422→        try:
+   423→            ncode = normalize(code)
+   424→            return (
+   425→                tq.get_gb_info_by_date(
+   426→                    stock_code=ncode,
+   427→                    start_date=normalize_date(start_date),
+   428→                    end_date=normalize_date(end_date) if end_date else "",
+   429→                )
+   430→                or []
+   431→            )
+   432→        except Exception as exc:  # noqa: BLE001
+   433→            logger.error("get_gb_info_by_date(%s) 失败: %s", code, exc)
+   434→            return []
+   435→
+   436→    def get_relation(self, code: str) -> list:
+   437→        """``tq.get_relation(stock_code)``。"""
+   438→        if not acquire_or_skip():
+   439→            raise RateLimitError(f"tqcenter 限流: get_relation({code}) 被拒绝")
+   440→        tq = self._tq()
+   441→        try:
+   442→            ncode = normalize(code)
+   443→            return tq.get_relation(stock_code=ncode) or []
+   444→        except Exception as exc:  # noqa: BLE001
+   445→            logger.error("get_relation(%s) 失败: %s", code, exc)
+   446→            return []
+   447→
+   448→    def get_ipo_info(self, ipo_type: int = 0, ipo_date: int = 0) -> list:
+   449→        """``tq.get_ipo_info(ipo_type, ipo_date)``。"""
+   450→        if not acquire_or_skip():
+   451→            raise RateLimitError("tqcenter 限流: get_ipo_info 被拒绝")
+   452→        tq = self._tq()
+   453→        try:
+   454→            return tq.get_ipo_info(ipo_type=ipo_type, ipo_date=ipo_date) or []
+   455→        except Exception as exc:  # noqa: BLE001
+   456→            logger.error("get_ipo_info 失败: %s", exc)
+   457→            return []
+   458→
+   459→    # ------------------------------------------------------------------
+   460→    # 板块/成份股
+   461→    # ------------------------------------------------------------------
+   462→
+   463→    def get_stock_list(self, list_type: str = "0", market: str = "") -> list:
+   464→        """``tq.get_stock_list(market, list_type)``。"""
+   465→        if not acquire_or_skip():
+   466→            raise RateLimitError("tqcenter 限流: get_stock_list 被拒绝")
+   467→        tq = self._tq()
+   468→        try:
+   469→            kwargs: dict[str, Any] = {"list_type": int(list_type) if list_type.isdigit() else 0}
+   470→            if market:
+   471→                kwargs["market"] = market
+   472→            return tq.get_stock_list(**kwargs) or []
+   473→        except Exception as exc:  # noqa: BLE001
+   474→            logger.error("get_stock_list 失败: %s", exc)
+   475→            return []
+   476→
+   477→    def get_sector_list(self, list_type: str = "0", market: str = "") -> list:
+   478→        """``tq.get_sector_list(list_type)``。"""
+   479→        if not acquire_or_skip():
+   480→            raise RateLimitError("tqcenter 限流: get_sector_list 被拒绝")
+   481→        tq = self._tq()
+   482→        try:
+   483→            kwargs: dict[str, Any] = {"list_type": int(list_type) if list_type.isdigit() else 0}
+   484→            return tq.get_sector_list(**kwargs) or []
+   485→        except Exception as exc:  # noqa: BLE001
+   486→            logger.error("get_sector_list 失败: %s", exc)
+   487→            return []
+   488→
+   489→    def get_stock_list_in_sector(
+   490→        self, block_code: str, block_type: int = 0, list_type: str = "0"
+   491→    ) -> list:
+   492→        """``tq.get_stock_list_in_sector(code, list_type)``。"""
+   493→        if not acquire_or_skip():
+   494→            raise RateLimitError(
+   495→                f"tqcenter 限流: get_stock_list_in_sector({block_code}) 被拒绝"
+   496→            )
+   497→        tq = self._tq()
+   498→        try:
+   499→            kwargs: dict[str, Any] = {
+   500→                "code": block_code,
+   501→                "list_type": int(list_type) if list_type.isdigit() else 0,
+   502→            }
+   503→            return tq.get_stock_list_in_sector(**kwargs) or []
+   504→        except Exception as exc:  # noqa: BLE001
+   505→            logger.error("get_stock_list_in_sector(%s) 失败: %s", block_code, exc)
+   506→            return []
+   507→
+   508→    # ------------------------------------------------------------------
+   509→    # 财务类
+   510→    # ------------------------------------------------------------------
+   511→
+   512→    def get_gpjy_value(
+   513→        self, code: str, date_list: DateList, count: int = 1
+   514→    ) -> list:
+   515→        """``tq.get_gpjy_value(stock_code, date_list, count)``。"""
+   516→        if not acquire_or_skip():
+   517→            raise RateLimitError(f"tqcenter 限流: get_gpjy_value({code}) 被拒绝")
+   518→        tq = self._tq()
+   519→        try:
+   520→            ncode = normalize(code)
+   521→            return (
+   522→                tq.get_gpjy_value(stock_code=ncode, date_list=date_list, count=count)
+   523→                or []
+   524→            )
+   525→        except Exception as exc:  # noqa: BLE001
+   526→            logger.error("get_gpjy_value(%s) 失败: %s", code, exc)
+   527→            return []
+   528→
+   529→    def get_gpjy_value_by_date(
+   530→        self, code: str, start_date: str, end_date: str = ""
+   531→    ) -> list:
+   532→        """``tq.get_gpjy_value_by_date(stock_code, start_date, end_date)``。"""
+   533→        if not acquire_or_skip():
+   534→            raise RateLimitError(f"tqcenter 限流: get_gpjy_value_by_date({code}) 被拒绝")
+   535→        tq = self._tq()
+   536→        try:
+   537→            ncode = normalize(code)
+   538→            return (
+   539→                tq.get_gpjy_value_by_date(
+   540→                    stock_code=ncode,
+   541→                    start_date=normalize_date(start_date),
+   542→                    end_date=normalize_date(end_date) if end_date else "",
+   543→                )
+   544→                or []
+   545→            )
+   546→        except Exception as exc:  # noqa: BLE001
+   547→            logger.error("get_gpjy_value_by_date(%s) 失败: %s", code, exc)
+   548→            return []
+   549→
+   550→    def get_financial_data(
+   551→        self,
+   552→        stock_list: StockList,
+   553→        field_list: FieldList,
+   554→        start_time: str = "",
+   555→        end_time: str = "",
+   556→        report_type: str = "announce_time",
+   557→    ) -> pd.DataFrame:
+   558→        """``tq.get_financial_data(stock_list, field_list, start_time, end_time, report_type)``。
+   559→
+   560→        Real 返回可能是 ``dict[code -> list[dict]]`` 或 DataFrame，本方法统一转
+   561→        DataFrame 输出（列：``stock_code`` + 各 field）。
+   562→        """
+   563→        if not acquire_or_skip():
+   564→            raise RateLimitError(
+   565→                f"tqcenter 限流: get_financial_data({len(stock_list)} codes) 被拒绝"
+   566→            )
+   567→        tq = self._tq()
+   568→        try:
+   569→            codes = [normalize(c) for c in stock_list]
+   570→            kwargs: dict[str, Any] = {
+   571→                "stock_list": codes,
+   572→                "field_list": field_list,
+   573→                "report_type": report_type,
+   574→            }
+   575→            if start_time:
+   576→                kwargs["start_time"] = normalize_date(start_time)
+   577→            if end_time:
+   578→                kwargs["end_time"] = normalize_date(end_time)
+   579→            result = tq.get_financial_data(**kwargs)
+   580→            return _financial_result_to_df(result, codes, field_list)
+   581→        except Exception as exc:  # noqa: BLE001
+   582→            logger.error("get_financial_data 失败: %s", exc)
+   583→            return pd.DataFrame(columns=["stock_code"] + list(field_list))
+   584→
+   585→    def get_gp_one_data(
+   586→        self, stock_list: StockList, field_list: FieldList
+   587→    ) -> dict:
+   588→        """``tq.get_gp_one_data(stock_list, field_list)``。"""
+   589→        if not acquire_or_skip():
+   590→            raise RateLimitError(
+   591→                f"tqcenter 限流: get_gp_one_data({len(stock_list)} codes) 被拒绝"
+   592→            )
+   593→        tq = self._tq()
+   594→        try:
+   595→            codes = [normalize(c) for c in stock_list]
+   596→            return tq.get_gp_one_data(stock_list=codes, field_list=field_list) or {}
+   597→        except Exception as exc:  # noqa: BLE001
+   598→            logger.error("get_gp_one_data 失败: %s", exc)
+   599→            return {}
+   600→
+   601→    # ------------------------------------------------------------------
+   602→    # ETF / 可转债
+   603→    # ------------------------------------------------------------------
+   604→
+   605→    def get_kzz_info(self, code: str, field_list: FieldList | None = None) -> dict:
+   606→        """``tq.get_kzz_info(stock_code, field_list)``。"""
+   607→        if not acquire_or_skip():
+   608→            raise RateLimitError(f"tqcenter 限流: get_kzz_info({code}) 被拒绝")
+   609→        tq = self._tq()
+   610→        try:
+   611→            ncode = normalize(code)
+   612→            return tq.get_kzz_info(stock_code=ncode, field_list=field_list or []) or {}
+   613→        except Exception as exc:  # noqa: BLE001
+   614→            logger.error("get_kzz_info(%s) 失败: %s", code, exc)
+   615→            return {}
+   616→
+   617→    def get_trackzs_etf_info(self, index_code: str) -> list:
+   618→        """``tq.get_trackzs_etf_info(etf_code)``。"""
+   619→        if not acquire_or_skip():
+   620→            raise RateLimitError(f"tqcenter 限流: get_trackzs_etf_info({index_code}) 被拒绝")
+   621→        tq = self._tq()
+   622→        try:
+   623→            return tq.get_trackzs_etf_info(etf_code=index_code) or []
+   624→        except Exception as exc:  # noqa: BLE001
+   625→            logger.error("get_trackzs_etf_info(%s) 失败: %s", index_code, exc)
+   626→            return []
+   627→
+   628→    # ------------------------------------------------------------------
+   629→    # 板块管理（真实调用 tqcenter）
+   630→    # ------------------------------------------------------------------
+   631→
+   632→    def create_sector(self, block_code: str, block_name: str) -> bool:
+   633→        tq = self._tq()
+   634→        try:
+   635→            tq.create_sector(block_code=block_code, block_name=block_name)
+   636→            return True
+   637→        except Exception as exc:  # noqa: BLE001
+   638→            logger.error("create_sector(%s, %s) 失败: %s", block_code, block_name, exc)
+   639→            return False
+   640→
+   641→    def delete_sector(self, block_code: str) -> bool:
+   642→        tq = self._tq()
+   643→        try:
+   644→            tq.delete_sector(block_code=block_code)
+   645→            return True
+   646→        except Exception as exc:  # noqa: BLE001
+   647→            logger.error("delete_sector(%s) 失败: %s", block_code, exc)
+   648→            return False
+   649→
+   650→    def rename_sector(self, block_code: str, new_name: str) -> bool:
+   651→        tq = self._tq()
+   652→        try:
+   653→            tq.rename_sector(block_code=block_code, block_name=new_name)
+   654→            return True
+   655→        except Exception as exc:  # noqa: BLE001
+   656→            logger.error("rename_sector(%s, %s) 失败: %s", block_code, new_name, exc)
+   657→            return False
+   658→
+   659→    def clear_sector(self, block_code: str) -> bool:
+   660→        """清空板块成份股。
+   661→
+   662→        tqcenter 无直接 clear_sector API，惯用 ``send_user_block(block_code, [])``
+   663→        推空列表达到清空效果。注意：必须配合 ``SectorManager.update_stocks`` 使用。
+   664→        """
+   665→        tq = self._tq()
+   666→        try:
+   667→            tq.send_user_block(block_code=block_code, stock_list=[])
+   668→            return True
+   669→        except Exception as exc:  # noqa: BLE001
+   670→            logger.error("clear_sector(%s) 失败: %s", block_code, exc)
+   671→            return False
+   672→
+   673→    def send_user_block(self, block_code: str, stock_list: StockList) -> bool:
+   674→        tq = self._tq()
+   675→        try:
+   676→            codes = [normalize(c) for c in stock_list]
+   677→            tq.send_user_block(block_code=block_code, stock_list=codes)
+   678→            return True
+   679→        except Exception as exc:  # noqa: BLE001
+   680→            logger.error("send_user_block(%s, %d stocks) 失败: %s", block_code, len(stock_list), exc)
+   681→            return False
+   682→
+   683→    def get_user_sector(self, block_code: str = "") -> list:
+   684→        if not acquire_or_skip():
+   685→            raise RateLimitError(f"tqcenter 限流: get_user_sector({block_code}) 被拒绝")
+   686→        tq = self._tq()
+   687→        try:
+   688→            if block_code:
+   689→                return tq.get_user_sector_by_code(sector_code=block_code) or []
+   690→            return tq.get_user_sector() or []
+   691→        except Exception as exc:  # noqa: BLE001
+   692→            logger.error("get_user_sector(%s) 失败: %s", block_code, exc)
+   693→            return []
+   694→
+   695→    # ------------------------------------------------------------------
+   696→    # 通用函数
+   697→    # ------------------------------------------------------------------
+   698→
+   699→    def get_trading_dates(
+   700→        self, market: str = "", start: str = "", end: str = ""
+   701→    ) -> list:
+   702→        """``tq.get_trading_dates(market, start_time, end_time)``。"""
+   703→        tq = self._tq()
+   704→        try:
+   705→            kwargs: dict[str, Any] = {}
+   706→            if market:
+   707→                kwargs["market"] = market
+   708→            if start:
+   709→                kwargs["start_time"] = normalize_date(start)
+   710→            if end:
+   711→                kwargs["end_time"] = normalize_date(end)
+   712→            return tq.get_trading_dates(**kwargs) or []
+   713→        except Exception as exc:  # noqa: BLE001
+   714→            logger.error("get_trading_dates 失败: %s", exc)
+   715→            return []
+   716→
+   717→    def send_warn(self, stock_list: StockList, **kwargs: Any) -> bool:
+   718→        tq = self._tq()
+   719→        try:
+   720→            codes = [normalize(c) for c in stock_list]
+   721→            tq.send_warn(stock_list=codes, **kwargs)
+   722→            return True
+   723→        except Exception as exc:  # noqa: BLE001
+   724→            logger.error("send_warn 失败: %s", exc)
+   725→            return False
+   726→
+   727→    def send_message(self, msg: str) -> bool:
+   728→        tq = self._tq()
+   729→        try:
+   730→            tq.send_message(msg=msg)
+   731→            return True
+   732→        except Exception as exc:  # noqa: BLE001
+   733→            logger.error("send_message 失败: %s", exc)
+   734→            return False
+   735→
+   736→    def subscribe_hq(
+   737→        self,
+   738→        stock_list: StockList,
+   739→        callback: Callback,
+   740→        batch_size: int | None = None,
+   741→    ) -> bool:
+   742→        """订阅行情，**自动分批**（batch_size 来自配置）。
+   743→
+   744→        单次最多 100 只（tqcenter 限制），默认 batch_size=50。
+   745→        """
+   746→        tq = self._tq()
+   747→        bs = batch_size or self._subscribe_batch_size
+   748→        try:
+   749→            codes: list[str] = []
+   750→            for c in stock_list:
+   751→                try:
+   752→                    codes.append(normalize(c))
+   753→                except ValueError:
+   754→                    continue
+   755→            all_ok = True
+   756→            for i in range(0, len(codes), bs):
+   757→                batch = codes[i : i + bs]
+   758→                try:
+   759→                    tq.subscribe_hq(stock_list=batch, callback=callback)
+   760→                    for c in batch:
+   761→                        self._subscribers.setdefault(c, []).append(callback)
+   762→                except Exception as exc:  # noqa: BLE001
+   763→                    logger.error("subscribe_hq 批次 %d-%d 失败: %s", i, i + len(batch), exc)
+   764→                    all_ok = False
+   765→            logger.info("subscribe_hq: %d 个代码，分批大小 %d，成功=%s", len(codes), bs, all_ok)
+   766→            return all_ok
+   767→        except Exception as exc:  # noqa: BLE001
+   768→            logger.error("subscribe_hq 失败: %s", exc)
+   769→            return False
+   770→
+   771→    def unsubscribe_hq(self, stock_list: StockList) -> bool:
+   772→        tq = self._tq()
+   773→        try:
+   774→            if not stock_list:
+   775→                # 取消所有
+   776→                codes = list(self._subscribers.keys())
+   777→            else:
+   778→                codes = [normalize(c) for c in stock_list]
+   779→            bs = self._subscribe_batch_size
+   780→            all_ok = True
+   781→            for i in range(0, len(codes), bs):
+   782→                batch = codes[i : i + bs]
+   783→                try:
+   784→                    tq.unsubscribe_hq(stock_list=batch)
+   785→                    for c in batch:
+   786→                        self._subscribers.pop(c, None)
+   787→                except Exception as exc:  # noqa: BLE001
+   788→                    logger.error("unsubscribe_hq 批次失败: %s", exc)
+   789→                    all_ok = False
+   790→            return all_ok
+   791→        except Exception as exc:  # noqa: BLE001
+   792→            logger.error("unsubscribe_hq 失败: %s", exc)
+   793→            return False
+   794→
+   795→    def refresh_kline(self, stock_code: str, period: str = "1d") -> bool:
+   796→        tq = self._tq()
+   797→        try:
+   798→            ncode = normalize(stock_code)
+   799→            tq.refresh_kline(stock_code=ncode, period=period)
+   800→            return True
+   801→        except Exception as exc:  # noqa: BLE001
+   802→            logger.error("refresh_kline(%s, %s) 失败: %s", stock_code, period, exc)
+   803→            return False
+   804→
+   805→    def download_data(self, stock_code: str, start_date: str, end_date: str) -> bool:
+   806→        tq = self._tq()
+   807→        try:
+   808→            ncode = normalize(stock_code)
+   809→            tq.download_data(
+   810→                stock_code=ncode,
+   811→                start_date=normalize_date(start_date),
+   812→                end_date=normalize_date(end_date),
+   813→            )
+   814→            return True
+   815→        except Exception as exc:  # noqa: BLE001
+   816→            logger.error("download_data(%s) 失败: %s", stock_code, exc)
+   817→            return False
+   818→
+   819→
+   820→# ----------------------------------------------------------------------------
+   821→# 辅助
+   822→# ----------------------------------------------------------------------------
+   823→
+   824→
+   825→def _financial_result_to_df(
+   826→    result: Any, codes: list[str], field_list: FieldList
+   827→) -> pd.DataFrame:
+   828→    """把 ``tq.get_financial_data`` 的多种返回格式统一转 DataFrame。
+   829→
+   830→    可能返回：
+   831→    - ``dict[code -> list[dict]]``：每只股票多期数据
+   832→    - ``dict[code -> DataFrame]``：直接是 DataFrame
+   833→    - ``DataFrame``：已经整理好的 long-form
+   834→
+   835→    输出列：``stock_code, date`` + field_list
+   836→    """
+   837→    if isinstance(result, pd.DataFrame):
+   838→        return result
+   839→    if not isinstance(result, dict):
+   840→        return pd.DataFrame(columns=["stock_code"] + list(field_list))
+   841→
+   842→    rows: list[dict] = []
+   843→    for code, val in result.items():
+   844→        if val is None:
+   845→            continue
+   846→        if isinstance(val, pd.DataFrame):
+   847→            for _, r in val.iterrows():
+   848→                row = {"stock_code": code}
+   849→                row.update(r.to_dict())
+   850→                rows.append(row)
+   851→        elif isinstance(val, list):
+   852→            for item in val:
+   853→                if isinstance(item, dict):
+   854→                    row = {"stock_code": code}
+   855→                    row.update(item)
+   856→                    rows.append(row)
+   857→        elif isinstance(val, dict):
+   858→            row = {"stock_code": code}
+   859→            row.update(val)
+   860→            rows.append(row)
+   861→    return pd.DataFrame(rows)
+   862→

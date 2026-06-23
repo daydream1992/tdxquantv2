@@ -15,19 +15,24 @@
    会真实调用 tqcenter。
 6. **不硬编码任何路径/阈值**：所有参数从 ``ConfigLoader`` 读取。
 
-API 清单参考 worklog Task 2-a / 2-b / 2-h：
+API 清单与字段定义的**权威来源**：``docs/tongdaxin-api-docs/通达信量化平台说明书/``
+（49 篇 markdown + ``tongdaxin_query.py`` 字段注册表），已提取到
+``engine/data_adapter/tqcenter_fields.py`` 的 ``API_REGISTRY``。本模块所有
+API 调用的参数名 / 字段名均与该说明书逐条核对（R17 修正了 7 处参数名错误）。
+
+API 分类（详见 ``tqcenter_fields.API_REGISTRY``）：
 - 行情类：``get_market_snapshot`` / ``get_pricevol`` / ``get_market_data`` /
-  ``get_more_info`` / ``get_stock_info`` / ``get_gb_info`` / ``get_gb_info_by_date`` /
-  ``get_relation`` / ``get_ipo_info``
-- 板块类：``get_stock_list`` / ``get_sector_list`` / ``get_stock_list_in_sector`` /
-  ``get_user_sector``
-- 财务类：``get_financial_data`` / ``get_gp_one_data`` / ``get_gpjy_value`` /
-  ``get_gpjy_value_by_date``
-- ETF/可转债：``get_kzz_info`` / ``get_trackzs_etf_info``
-- 板块管理：``create_sector`` / ``delete_sector`` / ``rename_sector`` /
-  ``clear_sector`` / ``send_user_block``
-- 通用：``get_trading_dates`` / ``send_warn`` / ``send_message`` / ``subscribe_hq`` /
-  ``unsubscribe_hq`` / ``refresh_kline`` / ``download_data``
+  ``get_more_info``（V8 快照 88 字段主源）/ ``get_stock_info`` / ``get_gb_info`` /
+  ``get_gb_info_by_date`` / ``get_relation`` / ``get_ipo_info``
+- 财务类：``get_financial_data``（FN 系列）/ ``get_gp_one_data``（GO 系列）/
+  ``get_gpjy_value``（GP 系列）
+- 分类板块：``get_stock_list`` / ``get_sector_list`` / ``get_stock_list_in_sector``
+- 板块管理：``get_user_sector`` / ``create_sector`` / ``delete_sector`` /
+  ``rename_sector`` / ``clear_sector``（直接 API）/ ``send_user_block``（stocks=）
+- ETF/可转债：``get_kzz_info`` / ``get_trackzs_etf_info``（zs_code=）
+- 通用：``get_trading_dates`` / ``send_warn`` / ``send_message``（msg_str=）/
+  ``refresh_cache`` / ``refresh_kline``（stock_list=）/ ``download_file``
+- 订阅：``subscribe_hq`` / ``unsubscribe_hq``
 """
 
 from __future__ import annotations
@@ -46,6 +51,7 @@ import pandas as pd
 
 from engine.config.loader import ConfigLoader
 from engine.data_adapter.base import BaseDataAdapter, Callback, DateList, FieldList, StockList
+from engine.data_adapter import tqcenter_fields
 from engine.data_adapter.rate_limiter import RateLimitError, acquire_or_skip
 from engine.utils.stock_code import normalize
 from engine.utils.time import normalize_date
@@ -231,10 +237,33 @@ class RealAdapter(BaseDataAdapter):
             _tq.initialize(init_arg)
             self._initialized = True
             logger.info("RealAdapter tq.initialize 完成 (init_arg=%s)", init_arg)
+            # 诊断：核对 tqcenter 实际暴露的 API 与说明书字段目录的差异
+            self._probe_api_coverage()
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error("tq.initialize 失败 (init_arg=%s): %s", init_arg, exc)
             return False
+
+    def _probe_api_coverage(self) -> None:
+        """核对 tqcenter 模块实际暴露的 API 与 ``tqcenter_fields.API_REGISTRY`` 的差异。
+
+        说明书定义的 API 可能在不同通达信版本里缺失或多出；本方法仅记录 WARNING/INFO，
+        不阻断初始化（缺的 API 调用时会自然抛错并被各方法兜底）。
+        """
+        if _tq is None:
+            return
+        documented = set(tqcenter_fields.API_REGISTRY.keys())
+        available = {name for name in documented if hasattr(_tq, name)}
+        missing = documented - available
+        if missing:
+            logger.warning(
+                "tqcenter 缺少说明书定义的 %d 个 API: %s（相关调用将返回空值）",
+                len(missing), sorted(missing),
+            )
+        else:
+            logger.info(
+                "tqcenter API 覆盖完整：说明书 %d 个 API 全部就绪", len(documented)
+            )
 
     def close(self) -> None:
         """取消所有订阅并关闭。"""
@@ -489,7 +518,11 @@ class RealAdapter(BaseDataAdapter):
     def get_stock_list_in_sector(
         self, block_code: str, block_type: int = 0, list_type: str = "0"
     ) -> list:
-        """``tq.get_stock_list_in_sector(code, list_type)``。"""
+        """``tq.get_stock_list_in_sector(block_code, block_type, list_type)``。
+
+        说明书要点：参数名是 ``block_code``（不是 ``code``）；``block_type`` 0=板块
+        指数 / 1=自定义板块；仅支持板块指数或自定义板块，不支持系统全部 A 股。
+        """
         if not acquire_or_skip():
             raise RateLimitError(
                 f"tqcenter 限流: get_stock_list_in_sector({block_code}) 被拒绝"
@@ -497,7 +530,8 @@ class RealAdapter(BaseDataAdapter):
         tq = self._tq()
         try:
             kwargs: dict[str, Any] = {
-                "code": block_code,
+                "block_code": block_code,
+                "block_type": int(block_type),
                 "list_type": int(list_type) if list_type.isdigit() else 0,
             }
             return tq.get_stock_list_in_sector(**kwargs) or []
@@ -512,16 +546,39 @@ class RealAdapter(BaseDataAdapter):
     def get_gpjy_value(
         self, code: str, date_list: DateList, count: int = 1
     ) -> list:
-        """``tq.get_gpjy_value(stock_code, date_list, count)``。"""
+        """个股交易数据（GP 系列）。
+
+        说明书 b财务类数据/获取股票交易数据.md 的真实签名是
+        ``get_gpjy_value(stock_list, field_list, start_time, end_time)``，
+        与本接口 ``(code, date_list, count)`` 不同。此处做适配：
+        ``stock_list=[code]``、``start_time/end_time`` 取自 ``date_list`` 首尾，
+        ``field_list`` 传空（若 tqcenter 拒绝空 list 则返回 []，调用方可改用
+        ``get_financial_data`` 拉 FN 系列）。
+        """
         if not acquire_or_skip():
             raise RateLimitError(f"tqcenter 限流: get_gpjy_value({code}) 被拒绝")
         tq = self._tq()
         try:
             ncode = normalize(code)
-            return (
-                tq.get_gpjy_value(stock_code=ncode, date_list=date_list, count=count)
-                or []
+            start_t = normalize_date(date_list[0]) if date_list else ""
+            end_t = normalize_date(date_list[-1]) if len(date_list) > 1 else start_t
+            result = tq.get_gpjy_value(
+                stock_list=[ncode], field_list=[], start_time=start_t, end_time=end_t
             )
+            if not result:
+                return []
+            # result: dict[code -> {GPxx: [{Date, Value}]}]，展平为 list[dict]
+            item = result.get(ncode) or next(iter(result.values()), None)
+            if isinstance(item, dict):
+                rows: list[dict] = []
+                for gp_key, gp_val in item.items():
+                    if isinstance(gp_val, list):
+                        for rec in gp_val:
+                            rows.append({"Field": gp_key, **(rec if isinstance(rec, dict) else {})})
+                    else:
+                        rows.append({"Field": gp_key, "Value": gp_val})
+                return rows
+            return item if isinstance(item, list) else []
         except Exception as exc:  # noqa: BLE001
             logger.error("get_gpjy_value(%s) 失败: %s", code, exc)
             return []
@@ -529,20 +586,35 @@ class RealAdapter(BaseDataAdapter):
     def get_gpjy_value_by_date(
         self, code: str, start_date: str, end_date: str = ""
     ) -> list:
-        """``tq.get_gpjy_value_by_date(stock_code, start_date, end_date)``。"""
+        """个股交易数据（时间段）。
+
+        说明书无独立的 ``get_gpjy_value_by_date`` API，实际复用
+        ``get_gpjy_value(stock_list, field_list, start_time, end_time)``，
+        以 ``start_date``/``end_date`` 作为时间区间。
+        """
         if not acquire_or_skip():
             raise RateLimitError(f"tqcenter 限流: get_gpjy_value_by_date({code}) 被拒绝")
         tq = self._tq()
         try:
             ncode = normalize(code)
-            return (
-                tq.get_gpjy_value_by_date(
-                    stock_code=ncode,
-                    start_date=normalize_date(start_date),
-                    end_date=normalize_date(end_date) if end_date else "",
-                )
-                or []
+            start_t = normalize_date(start_date) if start_date else ""
+            end_t = normalize_date(end_date) if end_date else ""
+            result = tq.get_gpjy_value(
+                stock_list=[ncode], field_list=[], start_time=start_t, end_time=end_t
             )
+            if not result:
+                return []
+            item = result.get(ncode) or next(iter(result.values()), None)
+            if isinstance(item, dict):
+                rows: list[dict] = []
+                for gp_key, gp_val in item.items():
+                    if isinstance(gp_val, list):
+                        for rec in gp_val:
+                            rows.append({"Field": gp_key, **(rec if isinstance(rec, dict) else {})})
+                    else:
+                        rows.append({"Field": gp_key, "Value": gp_val})
+                return rows
+            return item if isinstance(item, list) else []
         except Exception as exc:  # noqa: BLE001
             logger.error("get_gpjy_value_by_date(%s) 失败: %s", code, exc)
             return []
@@ -615,12 +687,15 @@ class RealAdapter(BaseDataAdapter):
             return {}
 
     def get_trackzs_etf_info(self, index_code: str) -> list:
-        """``tq.get_trackzs_etf_info(etf_code)``。"""
+        """``tq.get_trackzs_etf_info(zs_code)``。
+
+        说明书要点：参数名是 ``zs_code``（不是 ``etf_code``），如 ``'950162.CSI'``。
+        """
         if not acquire_or_skip():
             raise RateLimitError(f"tqcenter 限流: get_trackzs_etf_info({index_code}) 被拒绝")
         tq = self._tq()
         try:
-            return tq.get_trackzs_etf_info(etf_code=index_code) or []
+            return tq.get_trackzs_etf_info(zs_code=index_code) or []
         except Exception as exc:  # noqa: BLE001
             logger.error("get_trackzs_etf_info(%s) 失败: %s", index_code, exc)
             return []
@@ -657,37 +732,50 @@ class RealAdapter(BaseDataAdapter):
             return False
 
     def clear_sector(self, block_code: str) -> bool:
-        """清空板块成份股。
+        """清空自定义板块成份股（``tq.clear_sector``，直接 API）。
 
-        tqcenter 无直接 clear_sector API，惯用 ``send_user_block(block_code, [])``
-        推空列表达到清空效果。注意：必须配合 ``SectorManager.update_stocks`` 使用。
+        说明书 d客户端操作类/自定义板块管理.md 确认 ``clear_sector(block_code)``
+        是 tqcenter 独立 API，无需用 ``send_user_block(code, [])`` 变通。
+        更新板块前必须先 clear（send_user_block 是追加语义）。
         """
         tq = self._tq()
         try:
-            tq.send_user_block(block_code=block_code, stock_list=[])
+            tq.clear_sector(block_code=block_code)
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error("clear_sector(%s) 失败: %s", block_code, exc)
             return False
 
     def send_user_block(self, block_code: str, stock_list: StockList) -> bool:
+        """``tq.send_user_block(block_code, stocks, show)``，追加语义。
+
+        说明书要点：参数名是 ``stocks``（不是 ``stock_list``）；空列表=清空该板块；
+        ZXG=自选股；更新板块前必须先 ``clear_sector``。
+        """
         tq = self._tq()
         try:
             codes = [normalize(c) for c in stock_list]
-            tq.send_user_block(block_code=block_code, stock_list=codes)
+            tq.send_user_block(block_code=block_code, stocks=codes)
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error("send_user_block(%s, %d stocks) 失败: %s", block_code, len(stock_list), exc)
             return False
 
     def get_user_sector(self, block_code: str = "") -> list:
+        """获取自定义板块列表（``tq.get_user_sector()``，无参数）。
+
+        说明书确认 ``get_user_sector`` 无参数，返回 ``list[{Code, Name}]``。
+        如传入 ``block_code`` 则在本地过滤（tqcenter 无 ``get_user_sector_by_code``
+        API）；查指定板块成份股应改用 ``get_stock_list_in_sector(block_code, block_type=1)``。
+        """
         if not acquire_or_skip():
             raise RateLimitError(f"tqcenter 限流: get_user_sector({block_code}) 被拒绝")
         tq = self._tq()
         try:
+            sectors = tq.get_user_sector() or []
             if block_code:
-                return tq.get_user_sector_by_code(sector_code=block_code) or []
-            return tq.get_user_sector() or []
+                sectors = [s for s in sectors if s.get("Code") == block_code]
+            return sectors
         except Exception as exc:  # noqa: BLE001
             logger.error("get_user_sector(%s) 失败: %s", block_code, exc)
             return []
@@ -725,9 +813,14 @@ class RealAdapter(BaseDataAdapter):
             return False
 
     def send_message(self, msg: str) -> bool:
+        """``tq.send_message(msg_str)``，向 TQ 策略界面推送消息。
+
+        说明书要点：参数名是 ``msg_str``（不是 ``msg``）；用 ``|`` 分两条，
+        ``\n`` 分行。
+        """
         tq = self._tq()
         try:
-            tq.send_message(msg=msg)
+            tq.send_message(msg_str=msg)
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error("send_message 失败: %s", exc)
@@ -793,23 +886,35 @@ class RealAdapter(BaseDataAdapter):
             return False
 
     def refresh_kline(self, stock_code: str, period: str = "1d") -> bool:
+        """``tq.refresh_kline(stock_list, period)``，定向刷新历史K线缓存。
+
+        说明书要点：参数是 ``stock_list``（列表）不是 ``stock_code``；
+        ``period`` 仅支持 ``1d`` / ``1m`` / ``5m``。
+        """
         tq = self._tq()
         try:
             ncode = normalize(stock_code)
-            tq.refresh_kline(stock_code=ncode, period=period)
+            tq.refresh_kline(stock_list=[ncode], period=period)
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error("refresh_kline(%s, %s) 失败: %s", stock_code, period, exc)
             return False
 
     def download_data(self, stock_code: str, start_date: str, end_date: str) -> bool:
+        """下载特定数据文件。
+
+        说明书 通用函数/下载特定数据文件.md 的真实 API 是 ``download_file(stock_code, down_time, down_type)``，
+        tqcenter 无 ``download_data`` API。本方法适配映射：``down_time=start_date``，
+        ``down_type=4``（股票综合信息文件，最通用）；``end_date`` 在该 API 中无对应
+        参数，被忽略（如需十大股东/ETF申赎请直接调 ``tq.download_file``）。
+        """
         tq = self._tq()
         try:
             ncode = normalize(stock_code)
-            tq.download_data(
+            tq.download_file(
                 stock_code=ncode,
-                start_date=normalize_date(start_date),
-                end_date=normalize_date(end_date),
+                down_time=normalize_date(start_date),
+                down_type=4,
             )
             return True
         except Exception as exc:  # noqa: BLE001
