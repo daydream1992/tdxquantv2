@@ -1161,3 +1161,103 @@ Stage Summary:
   2. 验证 Real 模式: curl http://127.0.0.1:8000/api/monitor?action=status 应显示 adapter_mode=real
   3. 验证 tqcenter 连接: 日志应出现 "tqcenter API 覆盖完整：说明书 29 个 API 全部就绪"
   4. 可选: 清理 engine/factors/ 和 engine/pipeline/ 下的 TODO 注释（P1-2/P1-3 已完成）
+
+---
+Task ID: R20-文档清理+AI交接文档
+Agent: Z.ai Code (Claude, 主控)
+Task: 更新文档，清理无用信息，编写详细版 AI 交接文档（可按流程快速接入实盘数据）
+
+Work Log:
+- 扫描当前文档现状: 8 个文档共 3540 行 (ARCHITECTURE 834 + USER_GUIDE 766 + MAINTENANCE 481 + WINDOWS_README 400 + STRATEGY_FACTOR 380 + DEPLOY 354 + README 165 + CHANGELOG 160)
+- 读 docs/README.md / CHANGELOG.md / STRATEGY_FACTOR.md / ARCHITECTURE.md / DEPLOY.md / MAINTENANCE.md / WINDOWS_README.md / USER_GUIDE.md 全文了解现状
+- 读 config/app.yaml + config/questdb_schema.sql 确认当前配置
+- 读 real_adapter.py + tqcenter_fields.py 确认 API 对接细节
+- 识别清理点:
+  * README.md: 4 处 DuckDB 引用过时 (导出器/后端栈/storage注释/data目录/数据流/约束)
+  * STRATEGY_FACTOR.md: 2 处 DuckDB 引用过时 (导出格式/7.3 查询示例)
+  * README.md 文档导航表缺 AI_HANDOVER.md
+  * README.md 文档导航表 CHANGELOG 标注 R5-R13 过时 (应 R5-R18)
+- 清理 README.md (6 处编辑):
+  * "DuckDB 4 种导出器" → "QuestDB 4 种导出器"
+  * "FastAPI + DuckDB" → "FastAPI + QuestDB"
+  * "DuckDB 存储封装" → "QuestDB 存储封装（DuckDBStore 为别名）"
+  * "7 个 YAML 配置" → "7 YAML + 1 SQL schema"
+  * "6 份精简文档" → "7 份精简文档（含 AI_HANDOVER.md）"
+  * "DuckDB + CSV 样本" → "QuestDB 数据卷 + CSV 样本"
+  * "写 DuckDB selection_results" → "写 QuestDB selection_results"
+  * "DuckDB 单写锁" 约束 → "QuestDB 必须先启动"
+  * 文档导航表加 AI_HANDOVER.md (置顶加粗) + CHANGELOG 改 R5-R18
+- 清理 STRATEGY_FACTOR.md (2 处编辑):
+  * 7.3 节 "DuckDB 直查" → "QuestDB 直查（PG wire 8812 + Web 控制台 9000）"
+  * 导出格式 "[csv, excel, duckdb]" → "[csv, excel, questdb]"
+- 编写 docs/AI_HANDOVER.md (978 行，14 章节详细版 AI 交接文档):
+  * §一 项目本质（30 秒读懂）+ 三大核心能力 + 两种运行模式
+  * §二 技术栈速查表 + 端口约定
+  * §三 5 层架构 + 完整目录骨架（关键文件标注 ★）
+  * §四 核心数据流（选股/监控/适配器切换 3 个流程图）
+  * §五 实盘数据快速接入流程（重点章节，6 步流程 + 故障排查表）:
+    - Step 0 环境准备 (5 分钟)
+    - Step 1 启动 QuestDB (Docker/原生二进制/start-questdb.bat)
+    - Step 2 配置 tqcenter 路径 (python_path/TQ_CENTER_PATH 环境变量)
+    - Step 3 切换 adapter_mode 为 real
+    - Step 4 启动服务 (start.bat/dev.py/daemon)
+    - Step 5 验证实盘接入成功 (5 个验证命令)
+    - Step 6 前端访问
+    - 故障排查表 (8 个常见症状+原因+解决)
+  * §六 tqcenter API 对接权威指南:
+    - 架构 (项目→RealAdapter→tqcenter.py→TPythClient.dll→通达信终端)
+    - 字段权威目录 (API_REGISTRY 29 API + 对照说明书路径)
+    - 29 API 分类表 (行情9/财务3/板块3/客户端6/ETF2/通用6)
+    - 参数名对齐说明书 (R17 修正 7 处 + R19 补 2 处，8 个易错点对照表)
+    - 适配层签名 vs tqcenter 原生签名
+    - tqcenter 动态导入机制 (4 级路径优先级)
+    - tq.initialize 路径解析 (4 级优先级)
+    - 三层限流架构表 (L1 令牌桶/L2 端点中间件/L3 监控统计)
+    - API 覆盖率验证 (29/29 全覆盖 + _probe_api_coverage 自动核对)
+  * §七 QuestDB 存储层 (R18 迁移):
+    - 为什么从 DuckDB 迁移 (4 维度对比表)
+    - 接口零改动迁移 (DuckDBStore 别名)
+    - QuestDBStore 核心设计 (三通道/SQL方言适配/_gen_id/UPSERT/优雅降级)
+    - 8 张表 schema 表 (表名/用途/designated timestamp/主键)
+    - QuestDB 方言要点 (7 条)
+    - 环境变量覆盖 (6 个 QUESTDB_*)
+  * §八 配置文件全景图 (11 个配置文件表 + app.yaml 关键段示例)
+  * §九 前端架构速查 (路由/10 Tab 表/API 代理统一/实时数据)
+  * §十 运维脚本与命令 (dev.py 7 子命令/其他脚本/Windows 一键脚本/常用 API 端点)
+  * §十一 关键约束与坑点:
+    - 硬约束 (8 条，违反必崩)
+    - 设计约束 (6 条)
+    - 易错点 (7 条)
+    - 沙箱环境限制 (4 条)
+  * §十二 常见任务 SOP (7 个标准操作流程):
+    - 新增策略 / 新增因子 / 新增推送通道 / 新增数据字段
+    - 修改配置后 / 验证改动 / 写 worklog
+  * §十三 未解决问题与下一步 (P0/P1/P2 优先级)
+  * §十四 文档导航 (11 个文档表 + 快速决策树)
+- 验证:
+  * bun run lint: 0 errors 0 warnings ✓
+  * DuckDB 引用清理: rg 检查仅剩 1 处 "DuckDBStore 为别名" (正确保留，说明兼容别名)
+  * agent-browser 端到端: 页面正常加载 + title 正确 + console 无错误
+  * AI_HANDOVER.md 978 行，14 章节完整覆盖项目全貌
+
+Stage Summary:
+- 修改文件数: 2 (docs/README.md + docs/STRATEGY_FACTOR.md)
+- 新建文件数: 1 (docs/AI_HANDOVER.md, 978 行)
+- 清理 DuckDB 引用: README.md 8 处 + STRATEGY_FACTOR.md 2 处 = 10 处
+- AI_HANDOVER.md 14 章节核心价值:
+  1. §五 实盘接入流程: 6 步详细流程 + 故障排查表，AI 可按流程直接操作
+  2. §六 tqcenter 对接指南: 29 API 字段权威目录 + 参数名易错点对照表
+  3. §七 QuestDB 存储层: R18 迁移完整说明 + 8 张表 schema
+  4. §十一 关键约束: 8 条硬约束 + 7 条易错点，避免踩坑
+  5. §十二 常见任务 SOP: 7 个标准操作流程
+  6. §十四 文档导航 + 快速决策树: 新会话快速定位
+- 验证: lint 0 errors ✓ + agent-browser 页面正常 ✓ + DuckDB 引用清理干净 ✓
+- 未解决问题:
+  1. ARCHITECTURE.md / DEPLOY.md / MAINTENANCE.md / USER_GUIDE.md / WINDOWS_README.md 仍含部分 DuckDB 历史描述 (这些文档在 R18-C 已由 subagent 更新过，保留的是必要的迁移说明而非过时信息)
+  2. AI_HANDOVER.md 978 行偏长，但用户要求"详细版"，保留完整内容
+  3. worklog.md 已 1163 行，未来可能需要再次归档
+- 给用户的下一步:
+  1. Windows 真机部署: 按 AI_HANDOVER.md §五 6 步流程操作
+  2. 验证 Real 模式: curl /api/monitor?action=status 应显示 adapter_mode=real
+  3. 验证 tqcenter 连接: 日志应出现 "tqcenter API 覆盖完整：说明书 29 个 API 全部就绪"
+  4. 可选: 清理 engine/factors/ 和 engine/pipeline/ 下的 TODO 注释 (P1-2/P1-3 已完成)

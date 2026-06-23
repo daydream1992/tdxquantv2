@@ -66,8 +66,8 @@ filter:
 
 # 导出
 export:
-  formats: [csv, excel, duckdb]     # 导出格式
-  duckdb_table: selection_results
+  formats: [csv, excel, questdb]    # 导出格式（questdb 持久化）
+  questdb_table: selection_results
 ```
 
 ### 1.2 字段说明
@@ -353,10 +353,10 @@ python scripts/run_selection.py --strategy dbqzt --date 2025-06-22
 # API
 curl http://127.0.0.1:8000/api/selections?strategy_id=dbqzt
 
-# DuckDB 直查
+# QuestDB 直查（PG wire 8812，或访问 http://127.0.0.1:9000 Web 控制台）
 python -c "
-from engine.storage.duckdb_store import DuckDBStore
-s = DuckDBStore()
+from engine.storage.questdb_store import QuestDBStore
+s = QuestDBStore()
 print(s.query('SELECT * FROM selection_results ORDER BY run_date DESC LIMIT 5'))
 "
 ```

@@ -14,7 +14,7 @@
 | **监控** | 实时行情订阅 + 10 类预警规则 + 14 个信号模板 + 同板块联动 |
 | **预警** | 4 通道（飞书 / Webhook / WebSocket / 站内通知）+ 防抖聚合 |
 | **回测** | 历史数据回测 + 净值曲线 + 回撤分析 + 多策略对比 |
-| **导出** | CSV / Excel / 板块文件 / DuckDB 4 种导出器 |
+| **导出** | CSV / Excel / 板块文件 / QuestDB 4 种导出器 |
 | **限流** | 三层保护（tqcenter 令牌桶 + API 中间件 + 监控统计）|
 
 ---
@@ -22,7 +22,7 @@
 ## 🏗 技术栈
 
 - **前端**：Next.js 16 + React 19 + TypeScript 5 + Tailwind 4 + shadcn/ui + Zustand + TanStack Query
-- **后端**：FastAPI + DuckDB + PyYAML + simpleeval（表达式引擎）
+- **后端**：FastAPI + QuestDB + PyYAML + simpleeval（表达式引擎）
 - **数据源**：tqcenter（生产）/ Mock CSV（开发）— 插件式切换，业务层零改动
 - **实时**：WebSocket（前端 30s 轮询兜底）
 
@@ -75,7 +75,7 @@ tdxquant/
 │   ├── channels/            #   4 个预警通道插件
 │   ├── data_adapter/        #   数据源适配器（BaseDataAdapter + Mock/Real + 限流器）
 │   ├── exporters/           #   4 种导出器
-│   ├── storage/             #   DuckDB 存储封装
+│   ├── storage/             #   QuestDB 存储封装（DuckDBStore 为别名）
 │   ├── config/              #   配置加载（YAML 热加载）
 │   ├── expression/          #   表达式引擎（simpleeval 封装）
 │   ├── sector/              #   板块映射
@@ -85,11 +85,11 @@ tdxquant/
 │   ├── components/quant/    #   25 量化组件
 │   ├── components/ui/       #   48 shadcn/ui 组件
 │   └── lib/                 #   api-proxy + api + utils + theme + useRealtime
-├── config/                  # 7 个 YAML 配置（app/monitor/channels/cleaning/sector/export/theme）
+├── config/                  # 7 YAML + 1 SQL schema（app/monitor/channels/cleaning/sector/export/theme + questdb_schema.sql）
 ├── strategies/              # 5 个策略 YAML
 ├── scripts/                 # 8 个运维脚本（dev.py 主入口）
-├── data/                    # DuckDB + CSV 样本 + Excel 导出
-└── docs/                    # 6 份精简文档
+├── data/                    # QuestDB 数据卷 + CSV 样本 + Excel 导出
+└── docs/                    # 7 份精简文档（含 AI_HANDOVER.md）
 ```
 
 ---
@@ -131,7 +131,7 @@ bun run dev                    # 单独启动前端
   → POST /api/strategies/{id}/run
   → StrategyRunner.run_strategy()
   → Pipeline 6 步执行（load_data → clean → factors → score → filter_sort → export）
-  → 结果写 DuckDB selection_results 表
+  → 结果写 QuestDB selection_results 表
   → 自动订阅 Top 20 到 MonitorEngine
   → MonitorEngine 后台线程（subscribe_hq 回调 or 10s 轮询）
   → on_quote → RuleSet 求值 → 命中规则 → 写 signal_events
@@ -145,7 +145,7 @@ bun run dev                    # 单独启动前端
 
 1. **适配器模式不支持热加载** — 改 `adapter_mode` 必须重启 FastAPI
 2. **改 engine/ 已稳定代码前先读 worklog.md** — 避免重复踩坑
-3. **DuckDB 单写锁** — 不要开多个 FastAPI 实例（会 `database is locked`）
+3. **QuestDB 必须先启动** — Real 模式前置依赖（`docker compose up -d`）；Mock 模式自动降级
 4. **限流中间件 fail-open** — 中间件异常会放行，不会误杀请求
 5. **Mock 模式不限流** — 限流守卫只在 Real 模式触发
 
