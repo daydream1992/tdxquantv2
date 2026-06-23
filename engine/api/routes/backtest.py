@@ -33,6 +33,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from engine.api.deps import get_config, get_storage
+from engine.storage.questdb_store import _gen_id  # R18-A: QuestDB 无 SEQUENCE，应用层生成 id
 
 logger = logging.getLogger(__name__)
 
@@ -691,17 +692,25 @@ def _trading_days(start_dt: Any, end_dt: Any) -> list[Any]:
 
 
 def _persist_backtest(storage: Any, result: BacktestResultResponse) -> None:
-    """把回测结果写入 DuckDB ``backtest_results`` 表（惰性创建）。"""
+    """把回测结果写入 QuestDB ``backtest_results`` 表（惰性创建）。
+
+    R18-A: ``backtest_results`` 表不在 ``questdb_schema.sql`` 中（仅 8 张核心表），
+    本函数惰性创建。DuckDB→QuestDB 适配要点：
+    - 加 ``id LONG`` 列（QuestDB 无 SEQUENCE，应用层 _gen_id() 生成）
+    - 移除 ``PRIMARY KEY``（QuestDB 不支持，用 run_id UUID 兜底唯一）
+    - ``VARCHAR`` 兼容（QuestDB 接受）
+    """
     if storage is None or not hasattr(storage, "execute"):
         return
     try:
         storage.execute(
             """
             CREATE TABLE IF NOT EXISTS backtest_results (
-                run_id           VARCHAR PRIMARY KEY,
-                strategy_id      VARCHAR NOT NULL,
-                strategy_name    VARCHAR DEFAULT '',
-                strategy_emoji   VARCHAR DEFAULT '',
+                id               LONG,
+                run_id           VARCHAR,
+                strategy_id      VARCHAR,
+                strategy_name    VARCHAR,
+                strategy_emoji   VARCHAR,
                 start_date       VARCHAR,
                 end_date         VARCHAR,
                 initial_capital  DOUBLE,
@@ -711,11 +720,11 @@ def _persist_backtest(storage: Any, result: BacktestResultResponse) -> None:
                 sharpe_ratio     DOUBLE,
                 win_rate         DOUBLE,
                 total_trades     INTEGER,
-                top_n            INTEGER DEFAULT 5,
-                hold_days        INTEGER DEFAULT 5,
+                top_n            INTEGER,
+                hold_days        INTEGER,
                 result_json      VARCHAR,
-                created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
+                created_at       TIMESTAMP
+            ) timestamp(created_at)
             """,
         )
     except Exception as exc:  # noqa: BLE001
@@ -725,13 +734,14 @@ def _persist_backtest(storage: Any, result: BacktestResultResponse) -> None:
     payload = json.dumps(result.model_dump(), ensure_ascii=False, default=str)
     sql = (
         "INSERT INTO backtest_results "
-        "(run_id, strategy_id, strategy_name, strategy_emoji, "
+        "(id, run_id, strategy_id, strategy_name, strategy_emoji, "
         " start_date, end_date, initial_capital, final_capital, "
         " total_return, max_drawdown, sharpe_ratio, win_rate, total_trades, "
         " top_n, hold_days, result_json, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     params = [
+        _gen_id(),  # R18-A: QuestDB 无 SEQUENCE，应用层生成 id
         result.run_id,
         result.strategy_id,
         result.strategy_name,

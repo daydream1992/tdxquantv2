@@ -32,6 +32,7 @@ import pandas as pd
 
 from engine.exporters.base import DataExporter, ExporterError
 from engine.pipeline.base import PipelineContext
+from engine.storage.questdb_store import _gen_id  # R18-A: QuestDB 无 SEQUENCE，应用层生成 id
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,7 @@ class DuckDBExporter(DataExporter):
                 rank = int(rank)
 
             records.append({
+                "id": _gen_id(),  # R18-A: QuestDB 无 SEQUENCE，应用层生成 id
                 "run_id": context.run_id,
                 "strategy_id": context.strategy_id,
                 "run_date": datetime.now().strftime("%Y-%m-%d"),
@@ -124,23 +126,25 @@ class DuckDBExporter(DataExporter):
     def _ensure_table(self) -> None:
         """确保 selection_results 表存在。
 
-        TODO(P1-3): 待 DuckDBStore 提供 ensure_schema 或 migrations 后对接。
-        保守起见，本方法尝试 CREATE TABLE IF NOT EXISTS，若 storage 不支持则忽略。
+        R18-A: DuckDB→QuestDB 适配。``selection_results`` 已由
+        ``config/questdb_schema.sql`` + ``QuestDBStore.init_db()`` 创建，
+        本方法仅为兼容兜底（如手动删除表后重建）。
+        QuestDB 不支持 ``PRIMARY KEY`` / ``DEFAULT CURRENT_TIMESTAMP``，DDL 简化。
         """
         ddl = """
         CREATE TABLE IF NOT EXISTS selection_results (
-            id BIGINT PRIMARY KEY,
-            run_id VARCHAR NOT NULL,
-            strategy_id VARCHAR NOT NULL,
-            run_date DATE NOT NULL,
-            stock_code VARCHAR NOT NULL,
-            stock_name VARCHAR DEFAULT '',
-            total_score DOUBLE DEFAULT 0.0,
-            factor_scores VARCHAR DEFAULT '{}',
-            rank INTEGER DEFAULT 0,
-            extra_data VARCHAR DEFAULT '{}',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
+            id               LONG,
+            run_id           SYMBOL CAPACITY 1024,
+            strategy_id      SYMBOL CAPACITY 256,
+            run_date         DATE,
+            stock_code       SYMBOL CAPACITY 4096,
+            stock_name       STRING,
+            total_score      DOUBLE,
+            factor_scores    STRING,
+            rank             INT,
+            extra_data       STRING,
+            created_at       TIMESTAMP
+        ) timestamp(created_at)
         """
         try:
             if hasattr(self.storage, "execute"):

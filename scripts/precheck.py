@@ -5,7 +5,10 @@
 
 用法: precheck.py [--json] [--fix]
   --json  JSON 输出 (供 install.bat 解析)
-  --fix   自动修复可修复项 (创建缺失目录, 初始化 DuckDB)
+  --fix   自动修复可修复项 (创建缺失目录, 初始化 QuestDB)
+
+R18 起 DuckDB 已替换为 QuestDB (服务端架构, 无文件锁).
+本脚本同时检查 QuestDB 连接 (host:pg_port) 与 schema 文件存在性.
 """
 from __future__ import annotations
 
@@ -163,9 +166,11 @@ def check_tqcenter() -> dict[str, Any]:
 
 
 def check_python_deps() -> dict[str, Any]:
-    missing = [m for m in ("fastapi", "uvicorn", "duckdb", "simpleeval") if not _can_import(m)]
+    # R18: DuckDB 保留为兼容依赖; psycopg2/requests 是 QuestDB 访问必须
+    missing = [m for m in ("fastapi", "uvicorn", "duckdb", "simpleeval", "psycopg2", "requests") if not _can_import(m)]
     if not missing:
-        return _r("python_deps", "Python 依赖", PASS, "fastapi/uvicorn/duckdb/simpleeval 已装")
+        return _r("python_deps", "Python 依赖", PASS,
+                  "fastapi/uvicorn/duckdb/simpleeval/psycopg2/requests 已装")
     return _r("python_deps", "Python 依赖", FAIL, f"缺失: {', '.join(missing)}",
               "pip install -r requirements.txt")
 
@@ -205,10 +210,78 @@ def check_dirs_writable() -> dict[str, Any]:
 
 
 def check_duckdb_file() -> dict[str, Any]:
-    db = PROJECT_ROOT / "data" / "duckdb" / "quant.db"
-    if db.exists() and db.stat().st_size > 0:
-        return _r("duckdb_file", "DuckDB 文件", PASS, f"{db.name} ({db.stat().st_size} bytes)")
-    return _r("duckdb_file", "DuckDB 文件", FAIL, f"{db} 不存在或为空", "python scripts/init_db.py")
+    """R18: 检查 QuestDB schema 文件存在 (duckdb_schema.sql 已退弃用).
+
+    原 DuckDB 文件路径 data/duckdb/quant.db 仅在 mock 模式降级时可能存在,
+    不再作为必须项。改为检查 config/questdb_schema.sql 存在性。
+    """
+    schema = PROJECT_ROOT / "config" / "questdb_schema.sql"
+    if schema.exists() and schema.stat().st_size > 0:
+        return _r("duckdb_file", "QuestDB schema 文件", PASS,
+                  f"{schema.name} ({schema.stat().st_size} bytes)")
+    # 兼容检查旧 duckdb_schema.sql
+    old = PROJECT_ROOT / "config" / "duckdb_schema.sql"
+    if old.exists():
+        return _r("duckdb_file", "QuestDB schema 文件", WARN,
+                  f"仅找到旧 {old.name} (R18 应改为 questdb_schema.sql)",
+                  "从 R18 代码库拉取 config/questdb_schema.sql")
+    return _r("duckdb_file", "QuestDB schema 文件", FAIL,
+              f"{schema} 不存在或为空",
+              "从 R18 代码库拉取 config/questdb_schema.sql")
+
+
+def check_questdb() -> dict[str, Any]:
+    """R18: 检查 QuestDB 连接 (host:pg_port 可达性).
+
+    QuestDB 是服务端架构, 须先启动 (docker compose / questdb.exe).
+    沙箱/mock 模式不依赖 DB, 连接失败仅 WARN.
+    Real 模式连不上 → FAIL (必须先启 QuestDB).
+    """
+    # 读 config/app.yaml 的 questdb 段 (host / pg_port / http_port)
+    cfg_path = PROJECT_ROOT / "config" / "app.yaml"
+    host = os.environ.get("QUESTDB_HOST") or "127.0.0.1"
+    pg_port = int(os.environ.get("QUESTDB_PG_PORT") or 8812)
+    http_port = int(os.environ.get("QUESTDB_HTTP_PORT") or 9000)
+    if cfg_path.exists():
+        text = cfg_path.read_text(encoding="utf-8")
+        # 只在 questdb: 块内取, 简化: 按 questdb 段起点之后查
+        if "questdb:" in text:
+            block = text.split("questdb:", 1)[1]
+            # block 以其后的空行或下一个 top-level key 结束
+            block_lines = []
+            for ln in block.splitlines()[1:]:
+                if ln and not ln.startswith(" ") and not ln.startswith("\t"):
+                    break
+                block_lines.append(ln)
+            block_text = "\n".join(block_lines)
+            m_h = re.search(r"host:\s*(\S+)", block_text)
+            m_pg = re.search(r"pg_port:\s*(\d+)", block_text)
+            m_http = re.search(r"http_port:\s*(\d+)", block_text)
+            if m_h:
+                host = m_h.group(1)
+            if m_pg:
+                pg_port = int(m_pg.group(1))
+            if m_http:
+                http_port = int(m_http.group(1))
+
+    # 检查 PG wire 端口可达
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(2)
+    try:
+        s.connect((host, pg_port))
+        detail = f"PG wire {host}:{pg_port} 可达; HTTP :{http_port}"
+        return _r("questdb", "QuestDB 连接", PASS, detail)
+    except OSError as e:
+        detail = f"PG wire {host}:{pg_port} 不可达: {e}"
+        fix = (
+            "启动 QuestDB: docker compose -f docker/questdb/docker-compose.yml up -d "
+            "(或 Windows: questdb.exe start -d K:\\questdb\\data)"
+        )
+        if _read_adapter_mode() == "real":
+            return _r("questdb", "QuestDB 连接", FAIL, detail, fix)
+        return _r("questdb", "QuestDB 连接", WARN, detail + " (mock 模式可忽略)", fix)
+    finally:
+        s.close()
 
 
 def check_tdx_terminal() -> dict[str, Any]:
@@ -265,19 +338,27 @@ def check_disk_space() -> dict[str, Any]:
 CHECKS = [
     check_python_version, check_pip, check_bun, check_tqcenter,
     check_python_deps, check_ports, check_dirs_writable, check_duckdb_file,
+    check_questdb,
     check_tdx_terminal, check_tdx_tqcenter_path, check_configs, check_disk_space,
 ]
 
 
 def run_fix(results: list[dict[str, Any]]) -> list[str]:
-    """自动修复可修复项 (创建缺失目录/初始化 DuckDB). 静默执行, 返回修复 id 列表."""
+    """自动修复可修复项 (创建缺失目录/初始化 QuestDB). 静默执行, 返回修复 id 列表.
+
+    R18: duckdb_file 检查项的 ID 保留 (脚本历史调用以此为准),
+    但修复语义改为 "拉取 questdb_schema.sql 后调 init_db.py 建表".
+    """
     by_id = {r["id"]: r for r in results}
     fixed = []
     if by_id["duckdb_file"]["status"] == FAIL:
-        r = subprocess.run([sys.executable, str(PROJECT_ROOT / "scripts" / "init_db.py")],
-                           capture_output=True, text=True, cwd=PROJECT_ROOT)
-        if r.returncode == 0:
-            fixed.append("duckdb_file")
+        # 仅在 questdb_schema.sql 存在时才 init (避免无 schema 又去拉远端的复杂逻辑)
+        schema = PROJECT_ROOT / "config" / "questdb_schema.sql"
+        if schema.exists():
+            r = subprocess.run([sys.executable, str(PROJECT_ROOT / "scripts" / "init_db.py")],
+                               capture_output=True, text=True, cwd=PROJECT_ROOT)
+            if r.returncode == 0:
+                fixed.append("duckdb_file")
     return fixed
 
 
@@ -317,7 +398,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="TdxQuant 部署预检")
     parser.add_argument("--json", action="store_true", help="JSON 输出 (供 install.bat 解析)")
     parser.add_argument("--fix", action="store_true",
-                        help="自动修复可修复项 (创建缺失目录, 初始化 DuckDB)")
+                        help="自动修复可修复项 (创建缺失目录, 初始化 QuestDB)")
     args = parser.parse_args()
 
     results = [check() for check in CHECKS]

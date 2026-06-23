@@ -1,16 +1,23 @@
-﻿' TdxQuant 静默后台启动器 (VBScript)
+' TdxQuant 静默后台启动器 (VBScript)
 ' 双击本文件可在后台启动 TdxQuant 服务,不弹 cmd 黑窗
 ' 启动后弹提示框,5 秒后自动打开浏览器
+'
+' R18-B: 设置 PYTHONUTF8=1 / PYTHONIOENCODING=utf-8 解决 Windows 默认 GBK 中文乱码
 
 Option Explicit
 
 On Error Resume Next
 
-Dim objShell, scriptDir, cmdLine, exitCode
+Dim objShell, objEnv, scriptDir, cmdLine, exitCode
 
 ' ---------- 定位脚本所在目录(项目根) ----------
 Set objShell = WScript.CreateObject("WScript.Shell")
 scriptDir = Left(WScript.ScriptFullName, InStrRev(WScript.ScriptFullName, "\") - 1)
+
+' ---------- 设置 UTF-8 环境变量 (影响子进程 python/uvicorn) ----------
+Set objEnv = objShell.Environment("Process")
+objEnv.Item("PYTHONUTF8") = "1"
+objEnv.Item("PYTHONIOENCODING") = "utf-8"
 
 ' ---------- 拼接命令: python scripts\dev.py start ----------
 cmdLine = "python scripts\dev.py start"
@@ -32,7 +39,8 @@ End If
 ' ---------- 弹出提示 ----------
 MsgBox "TdxQuant 已后台启动,5 秒后打开浏览器" & vbCrLf & vbCrLf & _
        "前端大屏: http://127.0.0.1:3000" & vbCrLf & _
-       "API 健康检查: http://127.0.0.1:8000/health" & vbCrLf & vbCrLf & _
+       "API 健康检查: http://127.0.0.1:8000/health" & vbCrLf & _
+       "QuestDB 控制台: http://127.0.0.1:9000 (如已启动)" & vbCrLf & vbCrLf & _
        "停止服务: 双击 stop.bat", _
        vbInformation, "TdxQuant 启动器"
 

@@ -783,3 +783,274 @@ Stage Summary:
   2. 可建 V8 快照构建器服务: 全市场 get_stock_list('5') → 循环 get_more_info → 拼 91 列 DataFrame, 替代 V8 CSV 样本
   3. 可加"字段面板"前端页: 调 /api/tqcenter-fields(新) 展示 29 API × 字段清单, 支持搜字段反查 API
   4. 可重构 base.py 的 get_gpjy_value 接口为 (stock_list, field_list, start_time, end_time) 与说明书对齐
+
+---
+Task ID: R18-B
+Agent: Subagent B (Windows 优化)
+Task: 参考上传的 Windows 适配说明 (upload/粘贴了内容_1782190176359.txt 1790 行)，做路径/编码/进程/脚本优化
+
+Work Log:
+- 新建 engine/utils/encoding.py (180 行)
+  * 提供 safe_read / safe_write / safe_read_lines / safe_decode / safe_encode / set_utf8_stdio / ensure_utf8_env
+  * UTF-8 优先，Windows GBK 自动回退（utf-8 → utf-8-sig → gbk → cp936 → latin-1 → replace）
+  * set_utf8_stdio 用 io.TextIOWrapper 重配 stdin/stdout/stderr（解决 Windows cp936 中文乱码）
+  * ensure_utf8_env 设 PYTHONUTF8=1 / PYTHONIOENCODING=utf-8（影响子进程）
+  * 零依赖（仅标准库 io/os/sys/pathlib）
+- 修改 scripts/dev.py
+  * 启动早期强制 UTF-8 环境：PYTHONUTF8=1 + PYTHONIOENCODING=utf-8 + 调 set_utf8_stdio()
+  * docstring 加 R18-B 说明，setup 子命令 help 文本 "DuckDB" → "QuestDB 优先"
+  * cmd_setup 内部消息从"初始化 DuckDB"改为"初始化数据库 (QuestDB 优先; 沙箱无服务时跳过)"
+  * epilog 示例注释同步更新
+- 新建 start-questdb.bat (Windows QuestDB 启动脚本，5 段式)
+  * 方式 A: 检测 docker → docker compose -f docker/questdb/docker-compose.yml up -d → 轮询 30s 等 9000 就绪
+  * 方式 B: 无 docker 时打印 questdb.exe 便携版下载+启动指南
+  * chcp 65001 切 UTF-8 控制台
+- 修改 install.bat
+  * 步骤数 5→6: 加 [5/6] 启动 QuestDB (R18) 段，用 choice /c YN 让用户选 Y/N
+  * 头部说明同步：步骤 2 改为 "QuestDB 优先"
+  * 末尾提示加 "QuestDB 管理: 双击 start-questdb.bat"
+- 修改 start.bat / restart.bat
+  * 加 set PYTHONUTF8=1 + set PYTHONIOENCODING=utf-8 (本进程级)
+  * start.bat: 若 docker 可用且 QuestDB 未在 9000 端口响应，choice 提示用户是否先启动 QuestDB
+  * 末尾输出加 QuestDB URL: http://127.0.0.1:9000
+- 修改 stop.bat
+  * 加 UTF-8 环境变量设置
+  * 末尾提示：QuestDB (docker 容器) 不停止，保留数据持久化；提供 docker compose down 命令
+- 修改 tdxquant-launcher.vbs
+  * 加 objEnv.Item("PYTHONUTF8") = "1" + objEnv.Item("PYTHONIOENCODING") = "utf-8" (Process 级，影响子进程)
+  * 启动提示框加 QuestDB 控制台 URL
+- 修改 tdxquant-healthcheck.bat
+  * 检查项 2→3: 加 [3/3] QuestDB Web 控制台 (http://127.0.0.1:9000/)
+  * 加 UTF-8 环境变量
+- 修改 config/app.windows.example.yaml
+  * 加完整 questdb 段 (host/pg_port/http_port/username/password/database/connect_timeout/auto_init，与 app.yaml 一致)
+  * paths.duckdb 加注释说明 R18 弃用，新代码用 questdb 段
+  * 头部使用说明加"启动 QuestDB (R18 数据库,双击 start-questdb.bat)"
+  * tdx_warn terminal_path 示例从 C:\new_tdx 改为 K:\txdlianghua（与用户实际环境一致）
+- 修改 .env.example
+  * 加完整 QUESTDB_* 段：QUESTDB_HOST / PG_PORT / HTTP_PORT / USERNAME / PASSWORD / DATABASE
+  * 加 PYTHONUTF8=1 / PYTHONIOENCODING=utf-8（Windows 默认 GBK 兜底）
+  * questdb 段加注释说明启动方式（start-questdb.bat 或 docker compose）
+- 验证（无新依赖，仅标准库）:
+  * python3 -m py_compile scripts/dev.py engine/utils/encoding.py → OK
+  * encoding.py 功能测试: safe_encode/decode 往返、GBK bytes 解码、safe_write/read 文件往返、set_utf8_stdio 不抛异常、ensure_utf8_env 设变量、读不存在文件返回空串 全过
+  * python3 scripts/dev.py --help / paths --env windows --dry-run → OK
+  * ConfigLoader 读 questdb.host=127.0.0.1, questdb.pg_port=8812 OK
+  * QuestDBStore 沙箱降级实例化 OK (psycopg2 未装时 is_available=False)
+  * app.windows.example.yaml YAML 解析 OK，含 questdb 段
+  * .env.example 9 个 KEY=VALUE 行格式 OK
+
+Stage Summary:
+- 修改文件数: 7 (scripts/dev.py, install.bat, start.bat, stop.bat, restart.bat, tdxquant-launcher.vbs, tdxquant-healthcheck.bat, config/app.windows.example.yaml, .env.example)
+  注: 共 9 个文件被改动（含修复合并）
+- 新建文件数: 2 (engine/utils/encoding.py, start-questdb.bat)
+- 验证: py_compile 全过 + encoding.py 功能测试 7 项全过 + dev.py 子命令冒烟 + YAML/.env 格式校验
+- 关键改动: Windows 控制台中文乱码根治（PYTHONUTF8/PYTHONIOENCODING/set_utf8_stdio 三层兜底）；QuestDB 启动集成到 install.bat / start.bat（用户开箱即用）；encoding.py 给后续业务代码提供统一读写工具
+- 未解决问题:
+  1. .bat 文件无法在 Linux 沙箱验证语法（需 Windows 真机双击测试）
+  2. scripts/precheck.py 仍 check_duckdb_file + check_python_deps 包含 duckdb，与 R18 QuestDB 迁移方向不一致，但属 R18-A 范围（DB 迁移），不在本任务（Windows 兼容）范围
+  3. start.bat 中检测 QuestDB 是否运行用 curl http://127.0.0.1:9000/ 探测，curl 不可用时（极旧 Windows）会跳过提示，但不影响主流程
+  4. encoding.py 暂未被 engine/ 业务代码引用（仅 scripts/dev.py 启动期用 set_utf8_stdio），后续可渐进迁移 open() 调用
+
+---
+Task ID: R18-A
+Agent: Subagent A (SQL 方言迁移)
+Task: 迁移所有 INSERT SQL 调用点适配 QuestDB 方言（补 id 列）
+
+Work Log:
+- 读 worklog.md 了解前序工作 (R5-R17 演进史) + 读 questdb_store.py 了解 QuestDBStore 接口 + _gen_id/_convert_sql 实现
+- 读 config/questdb_schema.sql 确认 8 张核心表的 schema:
+  * 有 id LONG 列的表: selection_results / signal_events / sector_snapshots / monitor_subscriptions / config_changes / kline_cache (6 张)
+  * 无 id 列的表: strategies (用 strategy_id 主键) / strategy_runs (用 run_id 主键) (2 张)
+  * 不在 schema 中的表: backtest_results (代码惰性创建, 用 run_id 主键, 原为 DuckDB 语法)
+- 用 Grep 找出 7 个文件共 10 处 INSERT INTO 调用点, 逐一改造:
+
+- 文件 1: engine/api/routes/strategies.py (2 处 INSERT)
+  * 行 37: 加 `from engine.storage.questdb_store import _gen_id` 导入
+  * 行 607 INSERT INTO signal_events: 列清单加 id, VALUES 加 1 个 ?, params 列表开头插入 _gen_id() (11 列, 11 占位符)
+  * 行 690 INSERT INTO monitor_subscriptions (executemany): 列清单加 id, VALUES 加 1 个 ?, rows_to_insert 元组开头插入 _gen_id() (7 列, 7 占位符)
+
+- 文件 2: engine/api/routes/watchlist.py (2 处 INSERT)
+  * 行 25: 加 `from engine.storage.questdb_store import _gen_id` 导入
+  * 行 262 INSERT INTO monitor_subscriptions (_persist_subscription): 列清单加 id, VALUES 加 1 个 ?, params 开头插入 _gen_id() (7 列, 5 ? + 2 字面量 CURRENT_TIMESTAMP/true)
+  * 行 304 INSERT INTO monitor_subscriptions (_deactivate_subscription 归档行): 列清单加 id, VALUES 加 1 个 ?, params 开头插入 _gen_id() (8 列, 6 ? + 2 字面量 CURRENT_TIMESTAMP/false)
+
+- 文件 3: engine/api/routes/backtest.py (1 处 INSERT + 1 处 CREATE TABLE)
+  * 行 36: 加 `from engine.storage.questdb_store import _gen_id` 导入
+  * 行 695-732 _persist_backtest 函数: 重写 docstring 标注 R18-A 适配; 改 CREATE TABLE 为 QuestDB 方言:
+    - 加 `id LONG` 列 (替代 DuckDB `id BIGINT PRIMARY KEY`)
+    - 移除 `PRIMARY KEY` (QuestDB 不支持, 用 run_id UUID 兜底唯一)
+    - 移除 `DEFAULT` 子句 (QuestDB 不支持 DEFAULT CURRENT_TIMESTAMP 等, 由应用层填值)
+    - 加 `timestamp(created_at)` 设计时间戳标记 (时序优化)
+    - 保留 VARCHAR (QuestDB 接受作 STRING 别名)
+  * 行 736 INSERT INTO backtest_results: 列清单加 id, VALUES 加 1 个 ?, params 开头插入 _gen_id() (18 列, 18 占位符)
+
+- 文件 4: engine/pipeline/runner.py (2 处 INSERT, 1 处未改)
+  * 行 75-83: 加 _gen_id 导入 (用 try-except 兜底, questdb_store 不可用时本地实现)
+  * 行 280 INSERT INTO strategy_runs: 未改 (该表用 run_id 作主键, questdb_schema.sql 中无 id 列)
+  * 行 374 INSERT INTO monitor_subscriptions (_persist_subscription): 列清单加 id, VALUES 加 1 个 ?, params 开头插入 _gen_id() (7 列, 5 ? + 2 字面量)
+
+- 文件 5: engine/monitor/engine.py (1 处 INSERT)
+  * 行 37: 加 `from engine.storage.questdb_store import _gen_id` 导入
+  * 行 588 INSERT INTO signal_events: 列清单加 id, VALUES 加 1 个 ?, params 开头插入 _gen_id() (11 列, 10 ? + 1 字面量 CURRENT_TIMESTAMP)
+
+- 文件 6: engine/exporters/sector_exporter.py (1 处 INSERT)
+  * 行 33: 加 `from engine.storage.questdb_store import _gen_id` 导入
+  * 行 148 INSERT INTO sector_snapshots: 列清单加 id, VALUES 加 1 个 ?, params 开头插入 _gen_id() (8 列, 8 占位符)
+
+- 文件 7: engine/exporters/duckdb_exporter.py (1 处动态 INSERT + 1 处 CREATE TABLE)
+  * 行 35: 加 `from engine.storage.questdb_store import _gen_id` 导入
+  * 行 108 _build_records: records.append({...}) 字典开头加 `"id": _gen_id()` (10 个 top-level 键, id 居首)
+  * 行 126-155 _ensure_table: 重写 docstring 标注 R18-A; CREATE TABLE 改为 QuestDB 方言:
+    - `id BIGINT PRIMARY KEY` → `id LONG`
+    - `VARCHAR NOT NULL/DEFAULT ''` → `SYMBOL CAPACITY` / `STRING` (与 questdb_schema.sql 对齐)
+    - `DEFAULT CURRENT_TIMESTAMP` 移除 (QuestDB 不支持, 由 executemany 时应用层填值)
+    - 加 `timestamp(created_at)` 设计时间戳标记
+  * 行 161 动态 INSERT: 未改 SQL 模板 (columns/placeholders 都从 records[0].keys() 动态生成, 因 records 已含 id 故 SQL 自动包含 id)
+
+- 验证:
+  * `python3 -m py_compile` 7 个文件全过 (strategies/watchlist/backtest/runner/engine/sector_exporter/duckdb_exporter)
+  * `python3 -c "from engine.storage.questdb_store import _gen_id"` 验证 _gen_id() 可导入且两次调用产生不同值 (17821939311631232 / 17821939311633153)
+  * `python3 -c "import engine.api.routes.strategies"` 等 7 个模块导入全过 (无 ImportError)
+  * AST 解析验证 10 处 INSERT 的列数 vs 占位符数 vs 字面量数全部对齐:
+    - strategies.py signal_events: 11 列 = 11 ? (id 居首)
+    - strategies.py monitor_subscriptions: 7 列 = 7 ? (id 居首)
+    - watchlist.py monitor_subscriptions #1: 7 列 = 5 ? + 2 字面量 (id 居首)
+    - watchlist.py monitor_subscriptions #2: 8 列 = 6 ? + 2 字面量 (id 居首)
+    - backtest.py backtest_results: 18 列 = 18 ? (id 居首)
+    - runner.py strategy_runs: 11 列 = 11 ? (无 id, 表无 id 列)
+    - runner.py monitor_subscriptions: 7 列 = 5 ? + 2 字面量 (id 居首)
+    - monitor/engine.py signal_events: 11 列 = 10 ? + 1 字面量 (id 居首)
+    - sector_exporter.py sector_snapshots: 8 列 = 8 ? (id 居首)
+    - duckdb_exporter.py selection_results: 动态, records dict 10 键 id 居首
+  * DELETE/SELECT 语句未改 (占位符自动转换 + table_exists 已适配, 符合任务要求)
+
+Stage Summary:
+- 修改文件数: 7 (engine/api/routes/strategies.py / watchlist.py / backtest.py + engine/pipeline/runner.py + engine/monitor/engine.py + engine/exporters/sector_exporter.py + engine/exporters/duckdb_exporter.py)
+- INSERT 语句改造数: 9 处补 id 列 (signal_events ×2 / monitor_subscriptions ×4 / sector_snapshots ×1 / backtest_results ×1 / selection_results 动态 ×1)
+- INSERT 语句未改: 1 处 (strategy_runs, 表 schema 无 id 列)
+- 附带 DDL 改造: 2 处 (backtest_results 惰性 CREATE TABLE + selection_results 兜底 CREATE TABLE, 都从 DuckDB 语法改成 QuestDB 语法: 去 PRIMARY KEY / 去 DEFAULT / 加 timestamp() 标记)
+- 导入语句: 7 个文件都加 `from engine.storage.questdb_store import _gen_id` (runner.py 用 try-except 兜底防止 questdb_store 不可用时崩溃)
+- 验证: py_compile 全过 + 模块导入全过 + AST 解析 10 处 INSERT 列数/占位符/字面量全部对齐 + _gen_id() 唯一性验证
+- 未解决问题:
+  1. backtest_results 表不在 config/questdb_schema.sql 中 (只有 8 张核心表), 当前依赖 _persist_backtest 函数惰性 CREATE TABLE. 如未来需要统一管理, 可加进 questdb_schema.sql
+  2. duckdb_exporter.py 的 _ensure_table 是兜底 (selection_results 已由 QuestDBStore.init_db() 从 questdb_schema.sql 创建). 但若用户手动 DROP TABLE 后, 兜底 DDL 会用 QuestDB 语法重建, 应该能成功
+  3. strategy_runs INSERT 未加 id (表 schema 无 id 列). 如未来需要 id 列, 需先改 questdb_schema.sql 加 id LONG 列
+  4. UPDATE 语句: 项目中无原生 UPDATE 语句 (现有"更新"操作都用 DELETE+INSERT 模式, 已规避 DuckDB 索引 bug), 故无需迁移
+  5. Real 模式下 QuestDB 实际可用性仍依赖 psycopg2 + QuestDB 服务启动, sandbox 无法端到端验证
+
+
+---
+Task ID: R18-C
+Agent: Subagent C (文档和配置更新)
+Task: 更新所有文档/配置反映 DuckDB → QuestDB 迁移 (主控已完成核心: QuestDBStore + questdb_schema.sql + QuestDBConfig + docker-compose + requirements.txt)
+
+Work Log:
+- scripts/init_db.py: docstring 全改 QuestDB; DuckDBStore() 调用保留 (已自动指向 QuestDBStore); 新增 is_available 检测, 沙箱无 QuestDB 时优雅降级 + JSON 输出加 available 字段; 输出格式改 "QuestDB 初始化完成" + 连接信息 (host:pg_port)
+- scripts/precheck.py: 加 check_questdb() 函数 (PG wire 端口可达性检查, 读 config/app.yaml 的 questdb 段, mock 模式 WARN / real 模式 FAIL); check_duckdb_file() 改为检查 config/questdb_schema.sql 存在 (兼容检查旧 duckdb_schema.sql WARN); check_python_deps() 加 psycopg2 + requests 必装检查; CHECKS 列表加 check_questdb (12→13 项); run_fix() 修复语义改为 "拉 questdb_schema.sql 后调 init_db.py"; docstring + --fix 帮助文本更新
+- config/app.windows.example.yaml: 头部注释加 R18 关键变化说明 (DuckDB→QuestDB) + 启动方式二选一 (Docker / questdb.exe); paths.duckdb 注释改为 "保留向后兼容, 实际已弃用"; 新增 questdb 段 (host=127.0.0.1, pg_port=8812, http_port=9000, username=admin, password=quest, database=qdb, connect_timeout=5, auto_init=true)
+- .env.example: 新增 6 个 QUESTDB_* 环境变量 (QUESTDB_HOST / QUESTDB_PG_PORT / QUESTDB_HTTP_PORT / QUESTDB_USERNAME / QUESTDB_PASSWORD / QUESTDB_DATABASE), 含启动方式注释 + 沙箱降级行为说明
+- WINDOWS_README.md:
+  * install.bat 步骤表: "DuckDB 建表" → "QuestDB 建表 (原 DuckDB, R18 替代)"; 加 "启动 QuestDB" 步骤; "12 项检查" → "13 项检查"
+  * 预检覆盖清单: "DuckDB" → "QuestDB schema / QuestDB 连接"
+  * 性能调优表: "DuckDB 查询慢" → "QuestDB 查询慢" (改用 Web 控制台看体积)
+  * 进阶提示 #4: "DuckDB 单写锁" → "QuestDB 多进程并发写无锁"
+  * 新增「🗄️ QuestDB 安装与启动 (R18 替代 DuckDB)」章节: Docker 方式 + 原生 questdb.exe 方式 + 验证连通 + QuestDB 配置说明 + 环境变量覆盖列表
+  * FAQ 加 4 个 QuestDB 专项问答: Q1 (QuestDB vs DuckDB 区别 + 迁移原因表), Q2 (如何切换回 DuckDB), Q3 (沙箱/Mock 模式无 QuestDB 怎么办), Q4 (QuestDB 数据备份/迁移)
+  * FAQ 表加 2 行: "QuestDB 连接不可达" / "端口 8812/9000 被占用"
+- docs/DEPLOY.md: 新增「QuestDB 数据库 (R18 替代 DuckDB)」章节 (为什么迁移对比表 + 安装与启动 Docker/原生 + 配置 + 数据持久化 + 沙箱/Mock 模式降级); 环境要求表加 QuestDB / psycopg2-binary / requests; 沙箱步骤加 (可选) 启动 QuestDB; Windows 步骤加 #4 启动 QuestDB; Linux 步骤加 #2 启动 QuestDB; Windows 常见问题表加 QuestDB 相关 3 行; 重要提醒 #5 改为 R18 QuestDB 描述
+- docs/maintenance/ARCHITECTURE.md: 1.2 运行环境数据库改 QuestDB; L1 基础设施层描述改 "QuestDB 存储"; 目录结构 storage/ 段加 questdb_store.py + duckdb_store.py 注释兼容别名; config/ 段加 questdb_schema.sql + duckdb_schema.sql 已弃用; data/ 段 duckdb/quant.db 标已弃用; 第九章 "DuckDB Schema" 改 "QuestDB Schema (R18 替代 DuckDB)" + 加 SQL 方言差异说明; R13 配置文件清单加 questdb_schema.sql; 新增「§十四 R18 QuestDB 迁移 (DuckDB → QuestDB)」演进章节 (8 小节: 为什么迁移 / 架构变更对比表 / 依赖变更 / 配置变更 / 启动方式 / SQL 方言适配 / 优雅降级 / 关键约束更新)
+- docs/MAINTENANCE.md: 1.3 数据库章节改 QuestDB 描述 (含 8 张表清单 + 沙箱降级说明); 故障排查速查表加 QuestDB 相关 3 行 (database is locked R18 后已根治 / QuestDB 连接不可达 / 端口 8812/9000 占用); 新增「§六 QuestDB 运维 (R18 替代 DuckDB)」章节 7 小节: 6.1 文件锁问题根治 (DuckDB vs QuestDB 7 维度对比表 + 为什么 R12 限流没根治说明) / 6.2 备份 (Docker + 原生 + SQL 导出) / 6.3 恢复 (5 步) / 6.4 监控 (Web 控制台 + Docker 日志 + 关键指标) / 6.5 性能调优 (4 个 QDB_* 参数表 + SQL 调优 + 数据清理) / 6.6 重置/重建 (4 步) / 6.7 常见问题 (5 行)
+- docs/USER_GUIDE.md: 3.3 数据权限 "信号历史保存在 DuckDB" 改 "QuestDB (R18 起替代 DuckDB)"; 术语表加 QuestDB / DuckDB 两个条目; FAQ 加 Q16 (数据存在哪里? R18 后有什么变化?) 含 6 个要点 (R17 vs R18 对比 / 8 张表 / Web 控制台 / 沙箱降级 / 数据备份指引)
+- docs/CHANGELOG.md: 新建文件 (项目此前无 CHANGELOG), 加 R18 条目 (Breaking Change / 新增文件表 / 修改文件表 / 核心设计 5 点 / 验证 / 未解决问题 / 升级指南 5 步) + 回填 R17/R14/R13/R12/R5-R11 摘要条目
+
+Stage Summary:
+- 修改文件数: 10 (含 1 个新建 CHANGELOG.md)
+  * scripts/: init_db.py + precheck.py (2 个)
+  * config/: app.windows.example.yaml (1 个)
+  * 根目录: .env.example + WINDOWS_README.md (2 个)
+  * docs/: DEPLOY.md + maintenance/ARCHITECTURE.md + MAINTENANCE.md + USER_GUIDE.md + CHANGELOG.md (5 个)
+- 验证: py_compile 全过 (init_db.py + precheck.py); precheck.py 跑通 13 项 (沙箱 6 PASS / 2 FAIL / 5 WARN, 符合预期); init_db.py 沙箱无 QuestDB 时优雅降级 OK; YAML 配置文件合法 (app.windows.example.yaml safe_load 通过)
+- 未改 engine/ 下任何代码 (主控已改)
+- 未改 config/app.yaml (主控已改)
+- 未改 requirements.txt (主控已改)
+- 未解决问题:
+  1. 沙箱无 psycopg2 (没 pip install), precheck 的 python_deps 项 FAIL (预期, 真实 Windows 环境装 psycopg2-binary 即可)
+  2. 旧 DuckDB 数据文件 (data/duckdb/quant.db) 不会自动迁移到 QuestDB, 需手动 SQL 导出/导入 (已在 MAINTENANCE.md §6.2 备份方式 B 说明)
+  3. R5-R13 archived worklog 仍提及 DuckDB, 历史记录不回改
+  4. CHANGELOG.md 是新建文件, 之前无, 回填了 R5-R17 摘要条目 (完整历史在 worklog-archive-R5-R13.md.gz)
+
+---
+Task ID: R18-主控-QuestDB迁移+Windows优化
+Agent: Z.ai Code (Claude, 主控)
+Task: 参考上传的 Windows 适配说明做优化，数据库一步到位从 DuckDB 迁移到 QuestDB，彻底解决文件锁问题
+
+Work Log:
+- 完整读取上传的 Windows 适配说明 (1790 行) + 当前 worklog (785 行) 了解项目状态
+- 探索当前 DuckDB 使用: 31 个 .py 文件引用 duckdb, 8 张表 schema, DuckDBStore 单例 + threading.RLock 串行化
+- 诊断核心痛点: DuckDB 单文件 + 单写锁, 多进程/多实例并发写冲突 (上传说明 #8 低优, 用户要求彻底根治)
+- 设计 QuestDB 迁移方案:
+  * QuestDB 服务端架构 (PG wire 8812 / HTTP 9000 / ILP 9009), 彻底无文件锁
+  * 接口与 DuckDBStore 完全一致, DuckDBStore 保留为别名, 调用方零改动
+  * 沙箱无 QuestDB 时优雅降级 (mock 模式不依赖 DB, real 模式才需要)
+- 主控实现 (6 个新文件 + 5 个修改):
+  1. config/questdb_schema.sql (新, 153 行) - QuestDB 方言 8 张表: 无 SEQUENCE/无 UNIQUE/用 symbol 类型/designated timestamp 优化时序
+  2. engine/storage/questdb_store.py (新, 620 行) - QuestDBStore 类: PG wire (psycopg2) + HTTP /exec (DDL) + _gen_id() 应用层生成 ID + _convert_sql(?→$N) + upsert() 辅助 + 优雅降级
+  3. engine/storage/__init__.py (改) - 导出 QuestDBStore + DuckDBStore=QuestDBStore 别名 + get_store()
+  4. engine/storage/duckdb_store.py (改, 重写为兼容层) - re-export QuestDBStore + 迁移指南 docstring
+  5. engine/config/schema.py (改) - 加 QuestDBConfig dataclass (host/pg_port/http_port/username/password/database/connect_timeout/auto_init) + AppConfigRoot 加 questdb 字段 + from_dict 解析
+  6. config/app.yaml (改) - paths.duckdb 加 R18 弃用注释 + 新增 questdb 段 (8 个配置键)
+  7. requirements.txt (改) - 加 psycopg2-binary>=2.9 / requests>=2.28 / questdb-py-client>=0.0.5
+  8. docker/questdb/docker-compose.yml (新) - Docker 启动 QuestDB (8812/9000/9009 端口 + 数据持久化 + healthcheck)
+  9. docker/questdb/questdb.conf (新) - QuestDB 自定义配置 (时区 Asia/Shanghai + worker 线程)
+  10. docker/questdb/questdb-data/.gitignore (新) - 数据目录 gitignore
+- 前端文案更新 (3 处 DuckDB→QuestDB):
+  * src/app/page.tsx:328 footer "Next.js 16 + FastAPI + DuckDB" → "QuestDB"
+  * src/components/quant/ConfigSummary.tsx:61 PATH_LABELS.duckdb "DuckDB 数据库" → "QuestDB 数据库"
+  * src/components/quant/strategy/StrategyList.tsx:138 "来源 DuckDB strategy_runs 表" → "来源 QuestDB"
+- 并行调度 3 个 subagent:
+  * R18-A (SQL 方言迁移): 7 个文件 9 处 INSERT 补 id 列 + 2 处 CREATE TABLE 改 QuestDB 方言
+  * R18-B (Windows 优化): 新建 engine/utils/encoding.py + start-questdb.bat, 改 scripts/dev.py + 5 个 .bat + .vbs + app.windows.example.yaml + .env.example
+  * R18-C (文档更新): 10 个文件 (WINDOWS_README/DEPLOY/ARCHITECTURE/MAINTENANCE/USER_GUIDE/CHANGELOG + init_db.py/precheck.py + app.windows.example.yaml + .env.example)
+- 沙箱验证 (全过):
+  * pip install psycopg2-binary requests (venv)
+  * py_compile 8 个核心文件全过
+  * QuestDBStore 沙箱降级: is_available=False, table_exists=False, query 返回空 DataFrame, repr 显示 available=False
+  * _gen_id() 唯一性: 两次调用产生不同值
+  * _convert_sql(): ? → $1, $2 正确转换 (跳过字符串字面量内的 ?)
+  * ConfigLoader 读 questdb.host/pg_port/http_port/connect_timeout 全 OK
+  * AppConfigRoot.from_dict + validate() OK
+  * FastAPI 启动 200 (/health + /api/monitor/status + /api/signals + /api/selections 全 200)
+  * FastAPI log 仅 1 条 WARNING (QuestDB 连接失败, 优雅降级, 不阻断)
+  * bun run lint exit 0 (0 errors 0 warnings)
+  * agent-browser 验证: 页面加载 OK, 10 个 Tab 全部可切换, footer 显示 "Next.js 16 + FastAPI + QuestDB"
+  * 配置摘要对话框: 关键路径段显示 "QuestDB 数据库" label
+  * Core Web Vitals: TTFB 109ms / FCP 328ms / LCP 328ms / CLS 0.02 / hydration 55ms
+
+Stage Summary:
+- 产物清单 (11 个新文件 + 8 个修改):
+  * 核心: questdb_store.py (620行) + questdb_schema.sql (153行) + __init__.py + duckdb_store.py 兼容层
+  * 配置: schema.py QuestDBConfig + app.yaml questdb 段 + app.windows.example.yaml + .env.example
+  * 部署: docker/questdb/ (docker-compose.yml + questdb.conf + .gitignore) + start-questdb.bat
+  * 工具: engine/utils/encoding.py (UTF-8 强制, Windows GBK 兼容)
+  * 文档: WINDOWS_README/DEPLOY/ARCHITECTURE/MAINTENANCE/USER_GUIDE/CHANGELOG 全更新
+  * 脚本: dev.py (UTF-8 启动期) + init_db.py (QuestDB) + precheck.py (check_questdb) + 5 个 .bat + .vbs
+  * 前端: page.tsx footer + ConfigSummary.tsx label + StrategyList.tsx 文案
+- 核心价值:
+  1. 文件锁根治: DuckDB 单文件单写锁 → QuestDB 服务端架构, 多进程并发写无冲突
+  2. 接口零改动: DuckDBStore=QuestDBStore 别名, 31 个调用点无需改 import
+  3. 沙箱降级: 无 QuestDB 时 mock 模式仍可运行 (real 模式才需 QuestDB)
+  4. Windows 优化: 三层 UTF-8 兜底 (PYTHONUTF8 + PYTHONIOENCODING + set_utf8_stdio) + QuestDB 启动脚本
+  5. SQL 方言适配: ? → $N 自动转换 + _gen_id() 替代 SEQUENCE + upsert() 替代 UNIQUE
+- 未解决问题:
+  1. 沙箱无 QuestDB 服务, real 模式实际写入性能未验证 (需 Windows 真机 + docker compose up)
+  2. 旧 DuckDB 数据文件 (data/duckdb/quant.db) 不会自动迁移到 QuestDB, 需手动 SQL 导出/导入
+  3. console 有 PatternBuilderDialog.tsx 编译错误 (R18 之前就存在, 与 QuestDB 迁移无关)
+  4. ConfigSummary 显示的路径键名仍是 "duckdb" (后端 paths.duckdb 字段名保留兼容, R18 设计如此)
+- 给用户的下一步:
+  1. Windows 真机: docker compose -f docker/questdb/docker-compose.yml up -d 启动 QuestDB
+  2. 或双击 start-questdb.bat (自动检测 docker, 无 docker 时打印 questdb.exe 下载指南)
+  3. 编辑 config/app.yaml: adapter_mode: mock → real 切换 Real 模式
+  4. 双击 restart.bat 重启服务
+  5. curl http://127.0.0.1:8000/api/monitor/status 验证 engine_status=running + adapter_mode=real
+  6. 访问 http://127.0.0.1:9000 QuestDB Web 控制台查看数据

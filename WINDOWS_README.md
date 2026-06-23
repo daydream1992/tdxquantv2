@@ -41,10 +41,11 @@
 |---|---|---|
 | 预检环境 | Python 版本 / pip / 通达信 / 端口可用性 | ~5 秒 |
 | 装依赖 | `pip install -r requirements.txt` + `bun install` | 1-3 分钟 |
-| 初始化数据库 | DuckDB 建表 + 示例数据 | ~10 秒 |
+| 初始化数据库 | QuestDB 建表 (原 DuckDB，R18 替代) + 示例数据 | ~10 秒 |
+| 启动 QuestDB | 提示用户启动 (docker compose 或 questdb.exe) | ~5 秒 |
 | 配置 tqcenter 路径 | 扫描通达信目录，把 `tqcenter.py` 路径写入 `config\app.yaml` | ~5 秒 |
 | 创建快捷方式 | 桌面 `TdxQuant 启动` / `停止` / `大屏.url` | 即时 |
-| 最终就绪度报告 | 12 项检查再次输出 | ~5 秒 |
+| 最终就绪度报告 | 13 项检查再次输出 | ~5 秒 |
 
 看到 `安装完成!` 即成功。
 
@@ -133,6 +134,80 @@ curl http://127.0.0.1:8000/api/monitor/health
 
 ---
 
+## 🗄️ QuestDB 安装与启动（R18 替代 DuckDB）
+
+R18 起 DuckDB 单文件存储已替换为 **QuestDB**（服务端时序数据库，彻底解决文件锁问题）。Real 模式必须先启动 QuestDB，Mock 模式可跳过（无 QuestDB 时自动降级）。
+
+### 方式 A：Docker（推荐，跨平台一致）
+
+前置：装 [Docker Desktop for Windows](https://www.docker.com/products/docker-desktop/) 并启动。
+
+```cmd
+:: 启动 QuestDB (后台运行, 含 PG wire 8812 / HTTP 9000 / ILP 9009)
+docker compose -f docker\questdb\docker-compose.yml up -d
+
+:: 验证启动成功 (应返回 200)
+curl http://127.0.0.1:9000/
+
+:: 查看日志
+docker logs tdxquant-questdb --tail 50
+
+:: 停止
+docker compose -f docker\questdb\docker-compose.yml down
+```
+
+数据持久化在 `docker\questdb\questdb-data\`，重启电脑不丢数据。
+
+### 方式 B：原生 questdb.exe（无 Docker 时用）
+
+1. 下载 Windows 版：[https://questdb.io/get/](https://questdb.io/get/)（选 `questdb-windows-amd64.zip`）
+2. 解压到 `K:\questdb\`
+3. 启动：
+   ```cmd
+   K:\questdb\questdb.exe start -d K:\questdb\data
+   ```
+4. 验证：浏览器访问 [http://127.0.0.1:9000](http://127.0.0.1:9000)，看到 Web 控制台即成功
+5. 停止：
+   ```cmd
+   K:\questdb\questdb.exe stop -d K:\questdb\data
+   ```
+
+> 💡 想开机自启 QuestDB：用 `schtasks /create /tn "QuestDB" /tr "K:\questdb\questdb.exe start -d K:\questdb\data" /sc onstart /ru SYSTEM /f`
+
+### 验证 QuestDB 连通
+
+```cmd
+:: Web 控制台 (浏览器打开)
+http://127.0.0.1:9000
+
+:: PG wire 端口 (psycopg2 用)
+curl telnet://127.0.0.1:8812
+
+:: 跑预检看 QuestDB 连接项
+python scripts\precheck.py
+:: 应看到: [PASS] QuestDB 连接 — PG wire 127.0.0.1:8812 可达
+```
+
+### QuestDB 配置（config\app.yaml）
+
+默认配置即可使用，需要改时编辑 `config\app.yaml` 的 `questdb` 段：
+
+```yaml
+questdb:
+  host: 127.0.0.1
+  pg_port: 8812          # PG wire (查询/写入)
+  http_port: 9000        # HTTP (DDL/Web 控制台)
+  username: admin
+  password: quest        # 生产环境建议改
+  database: qdb
+  connect_timeout: 5
+  auto_init: true        # 启动时自动建表 (config\questdb_schema.sql)
+```
+
+环境变量覆盖（见 `.env.example`）：`QUESTDB_HOST` / `QUESTDB_PG_PORT` / `QUESTDB_HTTP_PORT` / `QUESTDB_USERNAME` / `QUESTDB_PASSWORD` / `QUESTDB_DATABASE`。
+
+---
+
 ## 📂 日常使用
 
 | 操作 | 双击文件 | 说明 |
@@ -162,7 +237,7 @@ curl http://127.0.0.1:8000/api/monitor/health
 遇到问题先跑预检，会比手动排查更高效：
 
 ```cmd
-:: 详细诊断（12 项检查）
+:: 详细诊断（13 项检查）
 python scripts\precheck.py
 
 :: 输出 JSON（供脚本调用）
@@ -172,7 +247,7 @@ python scripts\precheck.py --json
 python scripts\precheck.py --fix
 ```
 
-预检覆盖：Python 版本 / pip / bun / tqcenter / Python 依赖 / 端口 / 目录可写 / DuckDB / 通达信终端 / 配置文件 / 磁盘空间。
+预检覆盖：Python 版本 / pip / bun / tqcenter / Python 依赖 / 端口 / 目录可写 / QuestDB schema / QuestDB 连接 / 通达信终端 / 配置文件 / 磁盘空间。
 
 ---
 
@@ -184,10 +259,48 @@ python scripts\precheck.py --fix
 | `'bun' 不是内部或外部命令` | bun 没装 | `powershell -c "irm bun.sh/install.ps1 \| iex"`，重开 cmd |
 | `tq.initialize() 失败` / `终端未连接` | 通达信终端没启动或没登录 | 启动通达信，登录后保持前台（不要最小化到托盘），再 `restart.bat` |
 | `ModuleNotFoundError: tqcenter` | tqcenter 路径没配 | `python scripts\install_tqcenter.py`（自动扫描写入 config）；或手动配 `config\app.yaml` 的 `tqcenter.python_path`；或 `set TQ_CENTER_PATH=K:\txdlianghua\PYPlugins\user` |
-| `database is locked` | 已有实例在跑 | `stop.bat` 后重启；或 `taskkill /F /IM python.exe` 强杀所有 Python 进程 |
+| `database is locked` | 旧 DuckDB 文件锁遗留 (R18 后 QuestDB 无此问题) | `stop.bat` 后重启;或 `taskkill /F /IM python.exe` 强杀所有 Python 进程 |
+| `[WARN] QuestDB 连接 PG wire 127.0.0.1:8812 不可达` | QuestDB 未启动 | `docker compose -f docker\questdb\docker-compose.yml up -d` 或 `questdb.exe start` |
 | 端口 8000 / 3000 被占用 | 旧进程没退干净 | `netstat -ano \| findstr :8000` 找 PID，`taskkill /PID <pid> /F` |
+| 端口 8812 / 9000 被占用 | QuestDB 端口冲突 | `netstat -ano \| findstr :8812` 找 PID,关掉旧 QuestDB 进程;或改 `config\app.yaml` 的 `questdb.pg_port` / `http_port` |
 | 飞书推送不生效 | webhook 没配 | 编辑 `config\channels.yaml`，填 `feishu_webhook`，重启 |
 | cmd 中文乱码 | 编码不对 | cmd 执行 `chcp 65001`（UTF-8），或重开 cmd |
+
+### QuestDB 专项 FAQ
+
+**Q1: QuestDB 和 DuckDB 区别？为什么 R18 要迁移？**
+
+| 维度 | DuckDB (R17 及以前) | QuestDB (R18 起) |
+|---|---|---|
+| 架构 | 单文件嵌入式 | 服务端进程 |
+| 并发写 | **单写锁**,多 FastAPI 实例必冲突报 `database is locked` | **无文件锁**,PG wire 多连接并发写 |
+| 时序优化 | 无 | 原生时序表 (`timestamp(ts)`),自动分区 + 列存压缩 |
+| 访问方式 | `import duckdb` 直连文件 | PG wire (8812, psycopg2) / HTTP (9000, /exec) / ILP (9009) |
+| 运维 | 零运维,删 .db 即重置 | 需启动服务 (docker / questdb.exe),有 Web 控制台 |
+| 数据持久化 | 单文件 `quant.db` | `docker/questdb/questdb-data/` 或 `K:\questdb\data\` |
+
+迁移原因: DuckDB 单写锁导致多 FastAPI 实例并发必崩 (R12 限流方案缓解但未根治);Real 模式下盘中行情高频写入,锁冲突概率高。QuestDB 服务端架构彻底根治。
+
+**Q2: 如何切换回 DuckDB？**
+
+R18 起 DuckDB 已弃用,仅保留兼容入口:
+1. `engine/storage/duckdb_store.py` 仍可 `import DuckDBStore`,但实际指向 `QuestDBStore` (别名)
+2. `config/app.yaml` 的 `paths.duckdb` 字段保留,但代码不再读
+3. 如确实需要回退 DuckDB,可 git revert R18 提交 (QuestDBStore 类 + duckdb_store.py 改回原 DuckDB 实现 + schema.py 的 QuestDBConfig 删除)
+
+> ⚠️ 不建议回退。QuestDB 在并发写、时序查询、Web 控制台运维上都优于 DuckDB。回退需自行解决文件锁问题。
+
+**Q3: 沙箱/Mock 模式没装 QuestDB 怎么办？**
+
+无需任何操作。Mock 模式不依赖 DB (数据从 `data/v8-samples/` CSV 读),`QuestDBStore._connect()` 失败仅记 WARNING,所有读写降级返回空结果。`scripts/precheck.py` 也会标 `[WARN]` 而非 `[FAIL]`。
+
+**Q4: QuestDB 数据怎么备份/迁移？**
+
+- **Docker**: 数据在 `docker\questdb\questdb-data\`,直接 zip 整个目录即可
+- **原生**: 数据在 `K:\questdb\data\`,同上
+- **SQL 导出**: Web 控制台 `http://127.0.0.1:9000` 执行 `SELECT * FROM selection_results;` → 导出 CSV
+
+详见 `docs/MAINTENANCE.md` §QuestDB 运维。
 
 ---
 
@@ -240,7 +353,7 @@ python scripts\precheck.py --fix
 1. **配置热加载**: 改 `config\*.yaml` 后，cmd 跑 `python scripts\dev.py reload` 即生效，**无需重启**（adapter_mode 例外，必须 restart）
 2. **5 个 Tab**: Dashboard / Strategies / Selections / Signals / Sectors + 形态预警 + 实时选股 + 自选股管理 + 全局搜索
 3. **Mock 模式不限流**，开发体验优先；Real 模式有令牌桶保护通达信终端 GUI 线程
-4. **DuckDB 单写锁**: 不要同时跑多个 FastAPI 实例，会报 `database is locked`
+4. **QuestDB 多进程并发写无锁** (R18 替代 DuckDB): 可以同时跑多个 FastAPI 实例,QuestDB 是服务端架构不会报 `database is locked`
 5. **静默后台启动**: `tdxquant-launcher.vbs` 用 VBScript + `WScript.Shell` 实现，无需 Python 进程常驻；适合开机自启场景
 
 ### 性能调优速查
@@ -249,7 +362,7 @@ python scripts\precheck.py --fix
 |---|---|---|
 | Real 模式频繁报 `acquire_or_skip` | `config\app.yaml` → `tqcenter.global_qps` | 5-10（保守），盘内可调到 15 |
 | 前端轮询被限流（429） | `config\app.yaml` → `api.rate_limit.rules` | 按需调高 `qpm` |
-| DuckDB 查询慢 | `data\duckdb\quant.db` 体积 | 定期备份 + 删除旧数据 |
+| QuestDB 查询慢 | QuestDB Web 控制台 (http://127.0.0.1:9000) 看表体积 | 定期备份 + 删除旧数据;时序表自动分区,分区过期会自动清理 |
 | 日志占用磁盘 | `data\logs\` | 保留最近 30 天，旧的可删 |
 
 ### 自定义策略

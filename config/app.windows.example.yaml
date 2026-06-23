@@ -12,14 +12,17 @@
 #   1. 复制本文件为 app.yaml:  copy app.windows.example.yaml app.yaml
 #   2. 按需修改:
 #      - paths 段: 路径用 Windows 反斜杠(\\ 转义)
+#      - questdb 段: R18 数据库连接配置 (默认 127.0.0.1:8812/9000)
 #      - tqcenter 段: 已预填 K:\txdlianghua 路径,如你的通达信装别处请改 python_path
 #      - channels 段: 填飞书/钉钉 webhook(见 config\channels.yaml)
 #   3. 启动通达信终端并登录
-#   4. 双击 start.bat
+#   4. 启动 QuestDB (R18 数据库,双击 start-questdb.bat)
+#   5. 双击 start.bat
 #
 # 与 app.yaml(默认 mock 模式) 的差异:
 #   - adapter_mode: real
 #   - paths 全用 Windows 反斜杠
+#   - questdb 段: 同 app.yaml (127.0.0.1:8812/9000)
 #   - tqcenter.python_path 预填 K:\txdlianghua\PYPlugins\user
 #   - tqcenter.global_qps 调保守(8, 默认是 10),保护终端 GUI 线程
 #   - mock 段注释掉(real 模式不用)
@@ -43,7 +46,8 @@ paths:
   # Windows 路径用双反斜杠 \\ 转义,或用单正斜杠 / (Python pathlib 都支持)
   # 这里统一用 \\ 与 Windows 习惯一致
 
-  # DuckDB 单文件数据库
+  # R18: DuckDB 已弃用,新代码用 questdb 段(服务端架构,无文件锁)
+  # duckdb 字段保留兼容,实际不再使用
   duckdb: data\\duckdb\\quant.db
   # CSV 导出根目录(选股结果/信号日志)
   csv_output: data\\csv
@@ -57,6 +61,22 @@ paths:
   monitor: config\\monitor.yaml
   # 通道配置(飞书/钉钉/webhook)
   channels: config\\channels.yaml
+
+# R18: QuestDB 替代 DuckDB（彻底解决文件锁问题）
+# 启动: 双击 start-questdb.bat (Windows)
+#   或: docker compose -f docker\questdb\docker-compose.yml up -d
+#   或: questdb.exe start -d K:\questdb\data
+# Web 控制台: http://127.0.0.1:9000
+# 沙箱无 QuestDB 时自动降级（mock 模式不依赖 DB，仍可运行）
+questdb:
+  host: 127.0.0.1
+  pg_port: 8812          # PG wire（查询/写入，psycopg2 连接）
+  http_port: 9000        # HTTP（DDL/管理/Web 控制台）
+  username: admin
+  password: quest
+  database: qdb
+  connect_timeout: 5
+  auto_init: true        # 启动时自动建表（config/questdb_schema.sql）
 
 tqcenter:
   # tqcenter.py 所在目录（Windows 生产环境必填）
@@ -134,7 +154,7 @@ api:
 # tdx_warn:
 #   enabled: false
 #   # 通达信客户端弹窗(Windows only,Real 模式生效)
-#   terminal_path: C:\new_tdx\TDXW.exe                                  # 填你的通达信安装路径
+#   terminal_path: K:\txdlianghua\TDXW.exe                              # 填你的通达信安装路径
 #
 # csv_log:
 #   enabled: true

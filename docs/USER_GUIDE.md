@@ -140,7 +140,7 @@ TdxQuant 当前为 **单用户系统**（无登录认证），所有用户共享
 
 - 所有用户可见全部策略与历史数据
 - 导出文件（CSV/Excel）保存在服务端 `data/csv/` 和 `data/excel/`
-- 信号历史保存在 DuckDB，可通过 API 查询
+- 信号历史保存在 QuestDB (R18 起替代 DuckDB)，可通过 API 查询
 
 ---
 
@@ -637,6 +637,17 @@ TdxQuant 当前为 **单用户系统**（无登录认证），所有用户共享
 
 **答**：由管理员修改 `config/app.yaml` 的 `app.adapter_mode`（mock / real），需重启 FastAPI。终端用户不可操作。
 
+### Q16：数据存在哪里？R18 后有什么变化？
+
+**答**：R18 起存储层从 DuckDB 迁移到 QuestDB（服务端时序数据库）。
+
+- **R17 及以前 (DuckDB)**: 单文件 `data/duckdb/quant.db`,多 FastAPI 实例并发写会报 `database is locked`
+- **R18 起 (QuestDB)**: 服务端进程,PG wire (8812) / HTTP (9000),多进程并发写无锁冲突
+- **8 张表**: strategies / selection_results / signal_events / sector_snapshots / strategy_runs / monitor_subscriptions / config_changes / kline_cache
+- **Web 控制台**: http://127.0.0.1:9000 可在线执行 SQL / 查表 / 看分区
+- **沙箱/Mock 模式**: 无 QuestDB 时自动降级 (不依赖 DB,仍可运行)
+- **数据备份**: 见 `docs/MAINTENANCE.md` §QuestDB 运维
+
 ---
 
 ## 七、问题反馈渠道
@@ -704,6 +715,8 @@ TdxQuant 当前为 **单用户系统**（无登录认证），所有用户共享
 | **板块** | 通达信自定义板块，策略选股结果可回写 |
 | **Mock 模式** | 沙箱开发模式，用 V8 CSV 样本数据 |
 | **Real 模式** | 生产模式，调用通达信 tqcenter API |
+| **QuestDB** | R18 起替代 DuckDB 的时序数据库（服务端架构，无文件锁，多进程并发写安全） |
+| **DuckDB** | R17 及以前的单文件嵌入式数据库（R18 起弃用，保留兼容入口） |
 | **适配器** | 数据源抽象层（MockAdapter / RealAdapter） |
 | **热加载** | 修改 YAML 配置后无需重启即生效 |
 | **通道** | 推送通道（通达信 / Web / 飞书 / CSV） |

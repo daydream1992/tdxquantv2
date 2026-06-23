@@ -30,6 +30,7 @@ import pandas as pd
 
 from engine.exporters.base import DataExporter, ExporterError
 from engine.pipeline.base import PipelineContext
+from engine.storage.questdb_store import _gen_id  # R18-A: QuestDB 无 SEQUENCE，应用层生成 id
 
 logger = logging.getLogger(__name__)
 
@@ -145,10 +146,11 @@ class SectorExporter(DataExporter):
             return
         sql = (
             "INSERT INTO sector_snapshots "
-            "(sector_code, sector_name, strategy_id, stock_count, stock_list, operation, snapshot_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)"
+            "(id, sector_code, sector_name, strategy_id, stock_count, stock_list, operation, snapshot_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         )
         params = [
+            _gen_id(),  # R18-A: QuestDB 无 SEQUENCE，应用层生成 id
             code,
             name,
             strategy_id,

@@ -34,6 +34,7 @@ from engine.api.schemas import (
     StrategySectorInfo,
     StrategyToggleRequest,
 )
+from engine.storage.questdb_store import _gen_id  # R18-A: QuestDB 无 SEQUENCE，应用层生成 id
 
 logger = logging.getLogger(__name__)
 
@@ -604,11 +605,12 @@ def _emit_selection_signal(state: Any, ctx: Any, sc: Any) -> None:
     if storage is not None and hasattr(storage, "execute"):
         sql = (
             "INSERT INTO signal_events "
-            "(event_id, strategy_id, stock_code, stock_name, alert_type, "
+            "(id, event_id, strategy_id, stock_code, stock_name, alert_type, "
             " condition_expr, snapshot, severity, channels_fired, triggered_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         params = [
+            _gen_id(),  # R18-A: QuestDB 无 SEQUENCE，应用层生成 id
             event_id,
             strategy_id,
             "",  # 信号非单股，stock_code 留空
@@ -686,8 +688,8 @@ def _auto_subscribe_top_picks(state: Any, ctx: Any, top_n: int = 20) -> None:
 
     sql_insert = (
         "INSERT INTO monitor_subscriptions "
-        "(stock_code, strategy_id, subscriber, subscribed_at, active, batch_no) "
-        "VALUES (?, ?, ?, ?, ?, ?)"
+        "(id, stock_code, strategy_id, subscriber, subscribed_at, active, batch_no) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)"
     )
     now = datetime.now()
     rows_to_insert: list[tuple] = []
@@ -706,7 +708,7 @@ def _auto_subscribe_top_picks(state: Any, ctx: Any, top_n: int = 20) -> None:
             # 已存在 active 订阅，跳过 INSERT（避免表无限增长，bug R9-3 #4）
             continue
         rows_to_insert.append(
-            (code, ctx.strategy_id, "auto_top_pick", now, True, i // 50 + 1)
+            (_gen_id(), code, ctx.strategy_id, "auto_top_pick", now, True, i // 50 + 1)
         )
     if not rows_to_insert:
         return

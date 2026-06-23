@@ -12,7 +12,12 @@ watchfiles>=0.3
 python-multipart>=0.0.9
 
 # 存储 / 数据处理
-duckdb>=1.0.0
+# R18: DuckDB 已替换为 QuestDB（服务端架构，彻底无文件锁）
+# QuestDB 通过 PG wire (8812) / HTTP (9000) 访问，多进程并发写无锁冲突
+duckdb>=1.0.0              # 保留兼容（mock 模式降级时可用，real 模式不再依赖）
+questdb-py-client>=0.0.5  # QuestDB ILP 批量写入（可选，高性能场景）
+psycopg2-binary>=2.9      # QuestDB PG wire 连接（必须）
+requests>=2.28            # QuestDB HTTP /exec（DDL 用）
 pyyaml>=6.0
 pandas>=2.0
 openpyxl>=3.1

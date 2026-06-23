@@ -16,7 +16,8 @@ server:
   port: 8000
 
 paths:
-  # DuckDB 单文件存储路径
+  # R18: DuckDB 已弃用，新代码用 questdb 段（服务端架构，无文件锁）
+  # duckdb 字段保留兼容，实际不再使用
   duckdb: ./data/duckdb/quant.db
   # CSV / Excel / 日志导出根目录
   csv_output: ./data/csv
@@ -29,6 +30,21 @@ paths:
   monitor: ./config/monitor.yaml
   # 通道配置
   channels: ./config/channels.yaml
+
+# R18: QuestDB 替代 DuckDB（彻底解决文件锁问题）
+# 启动: docker compose -f docker/questdb/docker-compose.yml up -d
+# 或 Windows: questdb.exe start -d K:\questdb\data
+# Web 控制台: http://127.0.0.1:9000
+# 沙箱无 QuestDB 时自动降级（mock 模式不依赖 DB，仍可运行）
+questdb:
+  host: 127.0.0.1
+  pg_port: 8812          # PG wire（查询/写入，psycopg2 连接）
+  http_port: 9000        # HTTP（DDL/管理/Web 控制台）
+  username: admin
+  password: quest
+  database: qdb
+  connect_timeout: 5
+  auto_init: true        # 启动时自动建表（config/questdb_schema.sql）
 
 tqcenter:
   # tqcenter.py 所在目录（Windows 生产环境必填，mock 模式留空即可）

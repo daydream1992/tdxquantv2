@@ -1,0 +1,802 @@
+     1→     1→ 优先级建议
+     2→     2→高优先级 (必须立即处理):
+     3→     3→1. 路径处理优化 (#1)
+     4→     4→2. 启动脚本适配 (#2)
+     5→     5→3. 依赖管理优化 (#3)
+     6→     6→4. 通达信API对接 (#6)
+     7→     7→中优先级
+     8→     8→ (影响稳定性):
+     9→     9→5. 文件编码处理 (#4)
+    10→    10→6. 进程管理优化 (#5)
+    11→    11→7. 配置文件路径 (#13)
+    12→    12→8. 服务部署优化 (#14)
+    13→    13→低优先级
+    14→    14→ (长期优化):
+    15→    15→9. 文件锁机制 (#8)
+    16→    16→10. 环境变量处理 (#9)
+    17→    17→11. Git配置优化 (#10)
+    18→    18→这些优化确保项目能在Windows环境中稳定运行，同时保持与Linux环境的兼容性。
+    19→    19→￼
+    20→    20→明细和细节全部列出来
+    21→    21→Thought for 2s
+    22→    22→基于这个项目的完整Windows适配经验，以下是详细的优化清单：
+    23→    23→🔧 Windows迁移完整优化清单
+    24→    24→一、代码级别优化
+    25→    25→1.1 路径处理系统 ⭐⭐⭐⭐⭐
+    26→    26→问题分析:
+    27→    27→• Windows使用\分隔符，Linux使用/
+    28→    28→• Windows驱动器字母(C:\)，Linux根目录(/)
+    29→    29→• 路径长度限制(Windows 260字符)
+    30→    30→• 大小写不敏感特性
+    31→    31→解决方案:
+    32→    32→Copy code to clipboard
+    33→    33→# ❌ 错误写法
+    34→    34→path = "data/logs/fastapi.log"
+    35→    35→file_path = "/home/user/project/config.yaml"
+    36→    36→
+    37→    37→# ✅ 正确写法
+    38→    38→from pathlib import Path
+    39→    39→import os
+    40→    40→
+    41→    41→# 基础路径操作
+    42→    42→PROJECT_ROOT = Path(__file__).parent.parent
+    43→    43→LOG_DIR = PROJECT_ROOT / "data" / "logs"
+    44→    44→CONFIG_FILE = PROJECT_ROOT / "config" / "app.yaml"
+    45→    45→
+    46→    46→# 确保目录存在
+    47→    47→LOG_DIR.mkdir(parents=True, exist_ok=True)
+    48→    48→
+    49→    49→# 跨平台路径拼接
+    50→    50→data_file = LOG_DIR / "fastapi.log"
+    51→    51→
+    52→    52→# 路径转换(用于需要字符串的场景)
+    53→    53→str_path = str(data_file)
+    54→    54→posix_path = data_file.as_posix()  # 强制使用/分隔符
+    55→    55→路径替换占位符系统:
+    56→    56→Copy code to clipboard
+    57→    57→# scripts/paths.yaml
+    58→    58→placeholders:
+    59→    59→  VENV_PYTHON:
+    60→    60→    linux: "python"
+    61→    61→    windows: "python"
+    62→    62→    description: "Python解释器路径"
+    63→    63→  
+    64→    64→  PROJECT_ROOT:
+    65→    65→    linux: "."
+    66→    66→    windows: "." 
+    67→    67→    description: "项目根目录"
+    68→    68→    
+    69→    69→  LOG_DIR:
+    70→    70→    linux: "data/logs"
+    71→    71→    windows: "data\\logs"
+    72→    72→    description: "日志目录"
+    73→    73→    
+    74→    74→  TMP_DIR:
+    75→    75→    linux: "/tmp"
+    76→    76→    windows: "$env:TEMP"
+    77→    77→    description: "临时文件目录"
+    78→    78→    
+    79→    79→  NULL_DEV:
+    80→    80→    linux: "/dev/null"
+    81→    81→    windows: "NUL"
+    82→    82→    description: "空设备"
+    83→    83→    
+    84→    84→active_env: "linux"  # 当前激活环境
+    85→    85→自动化替换脚本:
+    86→    86→Copy code to clipboard
+    87→    87→#!/bin/bash
+    88→    88→# scripts/replace-paths.sh
+    89→    89→# 用法: bash scripts/replace-paths.sh --env windows
+    90→    90→
+    91→    91→ENV=${1:-$(grep 'active_env:' scripts/paths.yaml | awk '{print $2}')}
+    92→    92→
+    93→    93→# 读取映射表
+    94→    94→declare -A MAP
+    95→    95→while IFS=': ' read -r key value; do
+    96→    96→    if [[ "$key" =~ ^[A-Z_]+$ ]]; then
+    97→    97→        MAP[$key]=$value
+    98→    98→    fi
+    99→    99→done < <(grep -A 100 "placeholders:" scripts/paths.yaml | \
+   100→   100→        grep -E "^  [A-Z_]+:" | \
+   101→   101→        sed 's/: /:/' | \
+   102→   102→        awk '{print $1":"$2}')
+   103→   103→
+   104→   104→# 替换逻辑
+   105→   105→replace_placeholders() {
+   106→   106→    local file=$1
+   107→   107→    local ext=${file##*.}
+   108→   108→    
+   109→   109→    # 跳过二进制文件
+   110→   110→    if [[ "$ext" =~ ^(png|jpg|jpeg|gif|ico|svg|zip|7z|xlsx|csv|db|pyc)$ ]]; then
+   111→   111→        return
+   112→   112→    fi
+   113→   113→    
+   114→   114→    for key in "${!MAP[@]}"; do
+   115→   115→        placeholder="{{${key}}}"
+   116→   116→        value="${MAP[$key]}"
+   117→   117→        sed -i "s|${placeholder}|${value}|g" "$file"
+   118→   118→    done
+   119→   119→}
+   120→   120→
+   121→   121→# 扫描替换
+   122→   122→find . -type f \( -name "*.py" -o -name "*.sh" -o -name "*.yaml" \) \
+   123→   123→    -not -path "./node_modules/*" \
+   124→   124→    -not -path "./.git/*" \
+   125→   125→    -exec bash -c 'replace_placeholders "$0"' {} \;
+   126→   126→1.2 文件编码处理 ⭐⭐⭐⭐
+   127→   127→问题分析:
+   128→   128→• Windows默认GBK编码
+   129→   129→• Linux默认UTF-8编码
+   130→   130→• 文件读取时的编码不一致
+   131→   131→• 控制台输出编码问题
+   132→   132→解决方案:
+   133→   133→Copy code to clipboard
+   134→   134→# encoding_utils.py
+   135→   135→import sys
+   136→   136→import os
+   137→   137→from pathlib import Path
+   138→   138→
+   139→   139→# 强制UTF-8环境
+   140→   140→os.environ['PYTHONIOENCODING'] = 'utf-8'
+   141→   141→
+   142→   142→# 文件读取封装
+   143→   143→def safe_read(file_path, encoding='utf-8'):
+   144→   144→    """安全读取文件，自动处理编码"""
+   145→   145→    try:
+   146→   146→        with open(file_path, 'r', encoding=encoding) as f:
+   147→   147→            return f.read()
+   148→   148→    except UnicodeDecodeError:
+   149→   149→        # 回退到系统默认编码
+   150→   150→        with open(file_path, 'r', encoding='gbk') as f:
+   151→   151→            return f.read()
+   152→   152→    except Exception as e:
+   153→   153→        raise RuntimeError(f"文件读取失败: {e}")
+   154→   154→
+   155→   155→def safe_write(file_path, content, encoding='utf-8'):
+   156→   156→    """安全写入文件"""
+   157→   157→    with open(file_path, 'w', encoding=encoding, newline='') as f:
+   158→   158→        f.write(content)
+   159→   159→
+   160→   160→# 配置文件读取
+   161→   161→def load_yaml(file_path):
+   162→   162→    """加载YAML配置"""
+   163→   163→    import yaml
+   164→   164→    content = safe_read(file_path)
+   165→   165→    return yaml.safe_load(content)
+   166→   166→
+   167→   167→# CSV文件处理
+   168→   168→import pandas as pd
+   169→   169→def safe_read_csv(file_path):
+   170→   170→    """安全读取CSV"""
+   171→   171→    try:
+   172→   172→        return pd.read_csv(file_path, encoding='utf-8')
+   173→   173→    except UnicodeDecodeError:
+   174→   174→        return pd.read_csv(file_path, encoding='gbk')
+   175→   175→编码检测工具:
+   176→   176→Copy code to clipboard
+   177→   177→import chardet
+   178→   178→
+   179→   179→def detect_encoding(file_path):
+   180→   180→    """检测文件编码"""
+   181→   181→    with open(file_path, 'rb') as f:
+   182→   182→        raw_data = f.read(4096)  # 读取前4KB检测
+   183→   183→    result = chardet.detect(raw_data)
+   184→   184→    return result['encoding']
+   185→   185→
+   186→   186→# 使用示例
+   187→   187→encoding = detect_encoding('data.csv')
+   188→   188→df = pd.read_csv('data.csv', encoding=encoding)
+   189→   189→1.3 进程管理优化 ⭐⭐⭐⭐⭐
+   190→   190→问题分析:
+   191→   191→• Windows使用taskkill，Linux使用pkill
+   192→   192→• 进程启动方式不同
+   193→   193→• 后台进程管理差异
+   194→   194→• PID获取方式不同
+   195→   195→解决方案:
+   196→   196→Copy code to clipboard
+   197→   197→# process_utils.py
+   198→   198→import platform
+   199→   199→import subprocess
+   200→   200→import os
+   201→   201→import signal
+   202→   202→
+   203→   203→class ProcessManager:
+   204→   204→    """跨平台进程管理"""
+   205→   205→    
+   206→   206→    @staticmethod
+   207→   207→    def is_windows():
+   208→   208→        return platform.system() == 'Windows'
+   209→   209→    
+   210→   210→    @staticmethod
+   211→   211→    def kill_process_by_name(pattern):
+   212→   212→        """根据进程名杀死进程"""
+   213→   213→        if ProcessManager.is_windows():
+   214→   214→            # Windows: 使用taskkill
+   215→   215→            try:
+   216→   216→                subprocess.run(
+   217→   217→                    ['taskkill', '/F', '/IM', pattern],
+   218→   218→                    capture_output=True,
+   219→   219→                    text=True,
+   220→   220→                    timeout=10
+   221→   221→                )
+   222→   222→            except subprocess.TimeoutExpired:
+   223→   223→                pass
+   224→   224→        else:
+   225→   225→            # Linux: 使用pkill
+   226→   226→            try:
+   227→   227→                subprocess.run(
+   228→   228→                    ['pkill', '-f', pattern],
+   229→   229→                    capture_output=True,
+   230→   230→                    timeout=10
+   231→   231→                )
+   232→   232→            except subprocess.TimeoutExpired:
+   233→   233→                pass
+   234→   234→    
+   235→   235→    @staticmethod
+   236→   236→    def kill_process_by_pid(pid):
+   237→   237→        """根据PID杀死进程"""
+   238→   238→        if ProcessManager.is_windows():
+   239→   239→            subprocess.run(['taskkill', '/F', '/PID', str(pid)], 
+   240→   240→                          capture_output=True)
+   241→   241→        else:
+   242→   242→            os.kill(pid, signal.SIGKILL)
+   243→   243→    
+   244→   244→    @staticmethod
+   245→   245→    def find_processes(pattern):
+   246→   246→        """查找匹配的进程"""
+   247→   247→        if ProcessManager.is_windows():
+   248→   248→            # Windows: 使用tasklist
+   249→   249→            result = subprocess.run(
+   250→   250→                ['tasklist', '/FI', f'IMAGENAME eq {pattern}'],
+   251→   251→                capture_output=True,
+   252→   252→                text=True
+   253→   253→            )
+   254→   254→            # 解析输出获取PID
+   255→   255→            pids = []
+   256→   256→            for line in result.stdout.split('\n'):
+   257→   257→                if pattern.lower() in line.lower():
+   258→   258→                    parts = line.split()
+   259→   259→                    if len(parts) >= 2:
+   260→   260→                        try:
+   261→   261→                            pids.append(int(parts[1]))
+   262→   262→                        except ValueError:
+   263→   263→                            continue
+   264→   264→            return pids
+   265→   265→        else:
+   266→   266→            # Linux: 使用pgrep
+   267→   267→            result = subprocess.run(['pgrep', '-f', pattern],
+   268→   268→                                  capture_output=True, text=True)
+   269→   269→            return [int(pid) for pid in result.stdout.strip().split('\n') if pid]
+   270→   270→    
+   271→   271→    @staticmethod
+   272→   272→    def start_background_process(command, log_file=None):
+   273→   273→        """启动后台进程"""
+   274→   274→        if ProcessManager.is_windows():
+   275→   275→            # Windows后台进程
+   276→   276→            if log_file:
+   277→   277→                subprocess.Popen(
+   278→   278→                    command,
+   279→   279→                    stdout=open(log_file, 'w'),
+   280→   280→                    stderr=subprocess.STDOUT,
+   281→   281→                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+   282→   282→                )
+   283→   283→            else:
+   284→   284→                subprocess.Popen(
+   285→   285→                    command,
+   286→   286→                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+   287→   287→                )
+   288→   288→        else:
+   289→   289→            # Linux后台进程
+   290→   290→            if log_file:
+   291→   291→                subprocess.Popen(
+   292→   292→                    command,
+   293→   293→                    stdout=open(log_file, 'w'),
+   294→   294→                    stderr=subprocess.STDOUT,
+   295→   295→                    start_new_session=True
+   296→   296→                )
+   297→   297→            else:
+   298→   298→                subprocess.Popen(command, start_new_session=True)
+   299→   299→    
+   300→   300→    @staticmethod
+   301→   301→    def get_process_info(pid):
+   302→   302→        """获取进程信息"""
+   303→   303→        if ProcessManager.is_windows():
+   304→   304→            try:
+   305→   305→                result = subprocess.run(
+   306→   306→                    ['tasklist', '/FI', f'PID eq {pid}', '/FO', 'CSV'],
+   307→   307→                    capture_output=True,
+   308→   308→                    text=True,
+   309→   309→                    check=True
+   310→   310→                )
+   311→   311→                # 解析CSV格式输出
+   312→   312→                lines = result.stdout.strip().split('\n')
+   313→   313→                if len(lines) > 1:
+   314→   314→                    parts = lines[1].split(',')
+   315→   315→                    return {
+   316→   316→                        'name': parts[0].strip('"'),
+   317→   317→                        'pid': int(parts[1].strip('"')),
+   318→   318→                        'memory': parts[4].strip('"')
+   319→   319→                    }
+   320→   320→            except (subprocess.CalledProcessError, ValueError, IndexError):
+   321→   321→                pass
+   322→   322→        else:
+   323→   323→            try:
+   324→   324→                result = subprocess.run(
+   325→   325→                    ['ps', '-p', str(pid), '-o', 'comm,rss'],
+   326→   326→                    capture_output=True,
+   327→   327→                    text=True,
+   328→   328→                    check=True
+   329→   329→                )
+   330→   330→                lines = result.stdout.strip().split('\n')
+   331→   331→                if len(lines) > 1:
+   332→   332→                    parts = lines[1].split()
+   333→   333→                    return {
+   334→   334→                        'name': parts[0],
+   335→   335→                        'pid': pid,
+   336→   336→                        'memory': f"{parts[1]} KB"
+   337→   337→                    }
+   338→   338→            except subprocess.CalledProcessError:
+   339→   339→                pass
+   340→   340→        return None
+   341→   341→使用示例:
+   342→   342→Copy code to clipboard
+   343→   343→# 启动脚本中的使用
+   344→   344→from process_utils import ProcessManager
+   345→   345→
+   346→   346→# 停止所有相关进程
+   347→   347→ProcessManager.kill_process_by_name('python')
+   348→   348→ProcessManager.kill_process_by_name('node')
+   349→   349→ProcessManager.kill_process_by_name('bun')
+   350→   350→
+   351→   351→# 启动新进程
+   352→   352→ProcessManager.start_background_process(
+   353→   353→    ['python', '-m', 'uvicorn', 'engine.api.main:app', '--port', '8000'],
+   354→   354→    log_file='data/logs/fastapi.log'
+   355→   355→)
+   356→   356→
+   357→   357→# 检查进程状态
+   358→   358→pids = ProcessManager.find_processes('uvicorn')
+   359→   359→for pid in pids:
+   360→   360→    info = ProcessManager.get_process_info(pid)
+   361→   361→    print(f"进程 {pid}: {info}")
+   362→   362→1.4 DLL加载与通达信API ⭐⭐⭐⭐⭐
+   363→   363→问题分析:
+   364→   364→• 通达信TPythClient.dll只在Windows环境可用
+   365→   365→• DLL加载路径问题
+   366→   366→• 32/64位DLL匹配
+   367→   367→• DLL依赖项检查
+   368→   368→解决方案:
+   369→   369→Copy code to clipboard
+   370→   370→# tdx_connection.py
+   371→   371→import sys
+   372→   372→import os
+   373→   373→import platform
+   374→   374→import ctypes
+   375→   375→from pathlib import Path
+   376→   376→import logging
+   377→   377→
+   378→   378→logger = logging.getLogger(__name__)
+   379→   379→
+   380→   380→class TdxConnectionManager:
+   381→   381→    """通达信连接管理器"""
+   382→   382→    
+   383→   383→    def __init__(self):
+   384→   384→        self._dll = None
+   385→   385→        self._initialized = False
+   386→   386→        self.run_id = -1
+   387→   387→        self._validate_environment()
+   388→   388→    
+   389→   389→    def _validate_environment(self):
+   390→   390→        """验证运行环境"""
+   391→   391→        # 1. 检查操作系统
+   392→   392→        if platform.system() != 'Windows':
+   393→   393→            raise RuntimeError("通达信API仅在Windows环境可用")
+   394→   394→        
+   395→   395→        # 2. 检查Python架构
+   396→   396→        python_arch = platform.architecture()[0]  # '32bit' or '64bit'
+   397→   397→        if python_arch != '64bit':
+   398→   398→            logger.warning("推荐使用64位Python")
+   399→   399→        
+   400→   400→        # 3. 检查DLL文件存在
+   401→   401→        dll_path = self._find_tdx_dll()
+   402→   402→        if not dll_path or not dll_path.exists():
+   403→   403→            raise RuntimeError(
+   404→   404→                f"通达信DLL未找到: {dll_path}\n"
+   405→   405→                "请确保通达信终端已正确安装"
+   406→   406→            )
+   407→   407→        
+   408→   408→        logger.info(f"环境验证通过: {platform.system()} {python_arch}")
+   409→   409→    
+   410→   410→    def _find_tdx_dll(self):
+   411→   411→        """查找通达信DLL路径"""
+   412→   412→        # 优先级: 环境变量 > 配置文件 > 默认路径
+   413→   413→        dll_path = os.environ.get('TDX_DLL_PATH')
+   414→   414→        
+   415→   415→        if dll_path:
+   416→   416→            return Path(dll_path)
+   417→   417→        
+   418→   418→        # 常见通达信安装路径
+   419→   419→        possible_paths = [
+   420→   420→            Path(r"C:\新建文件夹\TdxW_HuaTai\TPythClient.dll"),
+   421→   421→            Path(r"D:\新建文件夹\TdxW_HuaTai\TPythClient.dll"),
+   422→   422→            Path(r"C:\通达信\TdxW_HuaTai\TPythClient.dll"),
+   423→   423→            Path(r"k:\txdlianghua\TPythClient.dll"),  # 项目特定路径
+   424→   424→        ]
+   425→   425→        
+   426→   426→        for path in possible_paths:
+   427→   427→            if path.exists():
+   428→   428→                logger.info(f"找到通达信DLL: {path}")
+   429→   429→                return path
+   430→   430→        
+   431→   431→        return None
+   432→   432→    
+   433→   433→    def _find_tqcenter(self):
+   434→   434→        """查找tqcenter.py路径"""
+   435→   435→        # 优先级: 环境变量 > 配置文件 > 推算路径
+   436→   436→        tqcenter_path = os.environ.get('TQ_CENTER_PATH')
+   437→   437→        
+   438→   438→        if not tqcenter_path:
+   439→   439→            # 从DLL路径推算
+   440→   440→            dll_path = self._find_tdx_dll()
+   441→   441→            if dll_path:
+   442→   442→                # DLL在TPythClient.dll，tqcenter.py在PYPlugins/user/
+   443→   443→                tdx_root = dll_path.parent
+   444→   444→                tqcenter_path = tdx_root / "PYPlugins" / "user"
+   445→   445→        
+   446→   446→        if tqcenter_path:
+   447→   447→            tqcenter_file = Path(tqcenter_path) / "tqcenter.py"
+   448→   448→            if tqcenter_file.exists():
+   449→   449→                return str(tqcenter_file.parent)
+   450→   450→        
+   451→   451→        raise RuntimeError("无法找到tqcenter.py文件")
+   452→   452→    
+   453→   453→    def load_dll(self):
+   454→   454→        """加载通达信DLL"""
+   455→   455→        if self._dll is not None:
+   456→   456→            return True
+   457→   457→        
+   458→   458→        try:
+   459→   459→            dll_path = self._find_tdx_dll()
+   460→   460→            
+   461→   461→            # 设置DLL函数返回类型
+   462→   462→            self._dll = ctypes.CDLL(str(dll_path))
+   463→   463→            self._dll.InitConnect.restype = ctypes.c_char_p
+   464→   464→            self._dll.GetTdxDataStr.restype = ctypes.c_char_p
+   465→   465→            self._dll.TdxFuncMain.restype = ctypes.c_char_p
+   466→   466→            
+   467→   467→            logger.info("DLL加载成功")
+   468→   468→            return True
+   469→   469→            
+   470→   470→        except Exception as e:
+   471→   471→            logger.error(f"DLL加载失败: {e}")
+   472→   472→            raise RuntimeError(f"通达信DLL加载失败: {e}")
+   473→   473→    
+   474→   474→    def initialize_tqcenter(self):
+   475→   475→        """初始化tqcenter模块"""
+   476→   476→        try:
+   477→   477→            # 添加tqcenter路径到sys.path
+   478→   478→            tqcenter_dir = self._find_tqcenter()
+   479→   479→            if tqcenter_dir not in sys.path:
+   480→   480→                sys.path.insert(0, tqcenter_dir)
+   481→   481→            
+   482→   482→            # 导入tqcenter
+   483→   483→            from tqcenter import tq
+   484→   484→            self.tq = tq
+   485→   485→            
+   486→   486→            # 初始化连接
+   487→   487→            init_file = Path(tqcenter_dir) / "tqcenter.py"
+   488→   488→            self.tq.initialize(str(init_file))
+   489→   489→            
+   490→   490→            self._initialized = True
+   491→   491→            logger.info("tqcenter初始化成功")
+   492→   492→            return True
+   493→   493→            
+   494→   494→        except ImportError as e:
+   495→   495→            logger.error(f"tqcenter导入失败: {e}")
+   496→   496→            raise RuntimeError(f"无法导入tqcenter: {e}")
+   497→   497→        except Exception as e:
+   498→   498→            logger.error(f"tqcenter初始化失败: {e}")
+   499→   499→            raise RuntimeError(f"tqcenter初始化失败: {e}")
+   500→   500→    
+   501→   501→    def validate_connection(self):
+   502→   502→        """验证通达信连接"""
+   503→   503→        if not self._initialized:
+   504→   504→            return False
+   505→   505→        
+   506→   506→        try:
+   507→   507→            # 尝试获取简单数据验证连接
+   508→   508→            test_data = self.tq.get_stock_list(market='1', list_type='0')
+   509→   509→            return len(test_data) > 0
+   510→   510→        except Exception as e:
+   511→   511→            logger.warning(f"连接验证失败: {e}")
+   512→   512→            return False
+   513→   513→    
+   514→   514→    def close(self):
+   515→   515→        """关闭连接"""
+   516→   516→        if self._initialized and hasattr(self, 'tq'):
+   517→   517→            try:
+   518→   518→                self.tq.close()
+   519→   519→                logger.info("通达信连接已关闭")
+   520→   520→            except Exception as e:
+   521→   521→                logger.warning(f"关闭连接时出错: {e}")
+   522→   522→            finally:
+   523→   523→                self._initialized = False
+   524→   524→
+   525→   525→# 单例模式
+   526→   526→_tdx_connection = None
+   527→   527→
+   528→   528→def get_tdx_connection():
+   529→   529→    """获取通达信连接单例"""
+   530→   530→    global _tdx_connection
+   531→   531→    if _tdx_connection is None:
+   532→   532→        _tdx_connection = TdxConnectionManager()
+   533→   533→        _tdx_connection.load_dll()
+   534→   534→        _tdx_connection.initialize_tqcenter()
+   535→   535→    return _tdx_connection
+   536→   536→1.5 文件锁与并发访问 ⭐⭐⭐
+   537→   537→问题分析:
+   538→   538→• Windows文件锁更严格
+   539→   539→• 多进程同时访问同一文件
+   540→   540→• SQLite文件锁定问题
+   541→   541→• DuckDB并发访问限制
+   542→   542→解决方案:
+   543→   543→Copy code to clipboard
+   544→   544→# file_lock.py
+   545→   545→import platform
+   546→   546→import fcntl  # Linux
+   547→   547→import msvcrt  # Windows
+   548→   548→import os
+   549→   549→from contextlib import contextmanager
+   550→   550→import logging
+   551→   551→
+   552→   552→logger = logging.getLogger(__name__)
+   553→   553→
+   554→   554→class FileLock:
+   555→   555→    """跨平台文件锁"""
+   556→   556→    
+   557→   557→    def __init__(self, file_path):
+   558→   558→        self.file_path = file_path
+   559→   559→        self.file_obj = None
+   560→   560→        self.is_windows = platform.system() == 'Windows'
+   561→   561→    
+   562→   562→    def acquire(self):
+   563→   563→        """获取文件锁"""
+   564→   564→        try:
+   565→   565→            self.file_obj = open(self.file_path, 'w')
+   566→   566→            
+   567→   567→            if self.is_windows:
+   568→   568→                # Windows文件锁
+   569→   569→                import pywintypes
+   570→   570→                import win32file
+   571→   571→                import win32con
+   572→   572→                
+   573→   573→                # 使用Windows API获取更可靠的锁
+   574→   574→                handle = win32file.CreateFile(
+   575→   575→                    self.file_path,
+   576→   576→                    win32file.GENERIC_WRITE,
+   577→   577→                    0,  # 不共享
+   578→   578→                    None,
+   579→   579→                    win32con.OPEN_ALWAYS,
+   580→   580→                    0,
+   581→   581→                    None
+   582→   582→                )
+   583→   583→                win32file.LockFileEx(
+   584→   584→                    handle,
+   585→   585→                    win32con.LOCKFILE_EXCLUSIVE_LOCK,
+   586→   586→                    0xFFFF0000,
+   587→   587→                    0xFFFFFFFF,
+   588→   588→                    pywintypes.OVERLAPPED()
+   589→   589→                )
+   590→   590→                self.lock_handle = handle
+   591→   591→                
+   592→   592→            else:
+   593→   593→                # Linux文件锁
+   594→   594→                fcntl.flock(self.file_obj.fileno(), fcntl.LOCK_EX)
+   595→   595→            
+   596→   596→            logger.debug(f"文件锁获取成功: {self.file_path}")
+   597→   597→            return True
+   598→   598→            
+   599→   599→        except Exception as e:
+   600→   600→            logger.error(f"文件锁获取失败: {e}")
+   601→   601→            if self.file_obj:
+   602→   602→                self.file_obj.close()
+   603→   603→            return False
+   604→   604→    
+   605→   605→    def release(self):
+   606→   606→        """释放文件锁"""
+   607→   607→        try:
+   608→   608→            if self.is_windows and hasattr(self, 'lock_handle'):
+   609→   609→                # Windows释放锁
+   610→   610→                import win32file
+   611→   611→                win32file.CloseHandle(self.lock_handle)
+   612→   612→            elif self.file_obj:
+   613→   613→                # Linux释放锁
+   614→   614→                fcntl.flock(self.file_obj.fileno(), fcntl.LOCK_UN)
+   615→   615→            
+   616→   616→            if self.file_obj:
+   617→   617→                self.file_obj.close()
+   618→   618→            
+   619→   619→            logger.debug(f"文件锁释放成功: {self.file_path}")
+   620→   620→            
+   621→   621→        except Exception as e:
+   622→   622→            logger.warning(f"文件锁释放失败: {e}")
+   623→   623→    
+   624→   624→    def __enter__(self):
+   625→   625→        return self.acquire()
+   626→   626→    
+   627→   627→    def __exit__(self, exc_type, exc_val, exc_tb):
+   628→   628→        self.release()
+   629→   629→
+   630→   630→@contextmanager
+   631→   631→def safe_file_write(file_path, content):
+   632→   632→    """安全的文件写入上下文管理器"""
+   633→   633→    lock = FileLock(file_path)
+   634→   634→    try:
+   635→   635→        with lock:
+   636→   636→            with open(file_path, 'w', encoding='utf-8') as f:
+   637→   637→                f.write(content)
+   638→   638→            yield True
+   639→   639→    except Exception as e:
+   640→   640→        logger.error(f"文件写入失败: {e}")
+   641→   641→        yield False
+   642→   642→数据库连接池管理:
+   643→   643→Copy code to clipboard
+   644→   644→# db_pool.py
+   645→   645→import duckdb
+   646→   646→import threading
+   647→   647→import time
+   648→   648→from contextlib import contextmanager
+   649→   649→import logging
+   650→   650→
+   651→   651→logger = logging.getLogger(__name__)
+   652→   652→
+   653→   653→class DatabaseConnectionPool:
+   654→   654→    """DuckDB连接池"""
+   655→   655→    
+   656→   656→    def __init__(self, db_path, max_connections=5):
+   657→   657→        self.db_path = db_path
+   658→   658→        self.max_connections = max_connections
+   659→   659→        self._connections = []
+   660→   660→        self._lock = threading.Lock()
+   661→   661→        self._in_use = set()
+   662→   662→    
+   663→   663→    @contextmanager
+   664→   664→    def get_connection(self):
+   665→   665→        """获取数据库连接"""
+   666→   666→        conn = None
+   667→   667→        try:
+   668→   668→            # 等待可用连接
+   669→   669→            while True:
+   670→   670→                with self._lock:
+   671→   671→                    if self._connections:
+   672→   672→                        conn = self._connections.pop()
+   673→   673→                        self._in_use.add(id(conn))
+   674→   674→                        break
+   675→   675→                    elif len(self._in_use) < self.max_connections:
+   676→   676→                        conn = duckdb.connect(self.db_path)
+   677→   677→                        self._in_use.add(id(conn))
+   678→   678→                        break
+   679→   679→                    else:
+   680→   680→                        pass  # 等待其他连接释放
+   681→   681→                
+   682→   682→                if conn:
+   683→   683→                    break
+   684→   684→                
+   685→   685→                time.sleep(0.1)  # 短暂等待
+   686→   686→            
+   687→   687→            yield conn
+   688→   688→            
+   689→   689→        finally:
+   690→   690→            # 归还连接
+   691→   691→            if conn:
+   692→   692→                with self._lock:
+   693→   693→                    self._in_use.discard(id(conn))
+   694→   694→                    self._connections.append(conn)
+   695→   695→    
+   696→   696→    def close_all(self):
+   697→   697→        """关闭所有连接"""
+   698→   698→        with self._lock:
+   699→   699→            for conn in self._connections:
+   700→   700→                try:
+   701→   701→                    conn.close()
+   702→   702→                except:
+   703→   703→                    pass
+   704→   704→            self._connections.clear()
+   705→   705→            self._in_use.clear()
+   706→   706→
+   707→   707→# 全局连接池
+   708→   708→_db_pool = None
+   709→   709→
+   710→   710→def get_db_pool():
+   711→   711→    """获取数据库连接池"""
+   712→   712→    global _db_pool
+   713→   713→    if _db_pool is None:
+   714→   714→        _db_pool = DatabaseConnectionPool('data/duckdb/quant.db')
+   715→   715→    return _db_pool
+   716→   716→二、配置级别优化
+   717→   717→2.1 环境配置 ⭐⭐⭐⭐⭐
+   718→   718→Windows专用配置:
+   719→   719→Copy code to clipboard
+   720→   720→# .env.windows
+   721→   721→# 数据适配器模式
+   722→   722→ADAPTER_MODE=real
+   723→   723→
+   724→   724→# 通达信路径配置
+   725→   725→TQ_CENTER_PATH=k:\txdlianghua\PYPlugins\user
+   726→   726→TQ_CENTER_INITIALIZE=k:\txdlianghua\PYPlugins\user\tqcenter.py
+   727→   727→TDX_DLL_PATH=k:\txdlianghua\TPythClient.dll
+   728→   728→
+   729→   729→# 数据库路径  
+   730→   730→DATABASE_URL=file:./data/duckdb/quant.db
+   731→   731→
+   732→   732→# 编码设置
+   733→   733→PYTHONIOENCODING=utf-8
+   734→   734→
+   735→   735→# 日志配置
+   736→   736→LOG_LEVEL=INFO
+   737→   737→LOG_DIR=data\logs
+   738→   738→
+   739→   739→# 服务器配置
+   740→   740→SERVER_HOST=0.0.0.0
+   741→   741→SERVER_PORT=8000
+   742→   742→
+   743→   743→# 前端配置
+   744→   744→NEXT_PORT=3000
+   745→   745→NEXT_HOST=127.0.0.1
+   746→   746→
+   747→   747→# 进程管理
+   748→   748→PROCESS_CHECK_INTERVAL=30
+   749→   749→AUTO_RESTART=true
+   750→   750→
+   751→   751→# 文件监控
+   752→   752→FILE_WATCHER_ENABLED=true
+   753→   753→FILE_WATCHER_POLL_INTERVAL=2
+   754→   754→2.2 YAML配置适配 ⭐⭐⭐⭐
+   755→   755→Copy code to clipboard
+   756→   756→# config/app.yaml.windows
+   757→   757→app:
+   758→   758→  name: TdxQuant Engine
+   759→   759→  version: "1.0"
+   760→   760→  adapter_mode: real  # Windows必须用real模式
+   761→   761→  log_level: INFO
+   762→   762→  platform: windows  # 平台标识
+   763→   763→
+   764→   764→server:
+   765→   765→  host: 0.0.0.0
+   766→   766→  port: 8000
+   767→   767→  workers: 1  # Windows不支持多worker
+   768→   768→  
+   769→   769→paths:
+   770→   770→  duckdb: .\data\duckdb\quant.db
+   771→   771→  csv_output: .\data\csv
+   772→   772→  excel_output: .\data\excel
+   773→   773→  logs: .\data\logs
+   774→   774→  temp: ${TEMP}  # Windows临时目录
+   775→   775→  null_dev: NUL  # Windows空设备
+   776→   776→
+   777→   777→tqcenter:
+   778→   778→  initialize_file: k:\txdlianghua\PYPlugins\user\tqcenter.py
+   779→   779→  subscribe_batch_size: 50
+   780→   780→  kline_max_count: 24000
+   781→   781→  
+   782→   782→  # Windows特定配置
+   783→   783→  timeout: 60
+   784→   784→  retry_count: 3
+   785→   785→  connection_check_interval: 300
+   786→   786→
+   787→   787→# 限流配置
+   788→   788→rate_limit:
+   789→   789→  enabled: true
+   790→   790→  global_qps: 10  # Windows降低QPS
+   791→   791→  burst: 20
+   792→   792→  acquire_timeout: 5
+   793→   793→  
+   794→   794→# Windows进程管理
+   795→   795→process_management:
+   796→   796→  kill_command: taskkill /F /PID {pid}
+   797→   797→  find_command: tasklist /FI "PID eq {pid}"
+   798→   798→  start_command: start /B
+   799→   799→  
+   800→   800→# 文件系统
+
+[showing lines 1-800 of 1790; use offset=801 with limit to continue reading]

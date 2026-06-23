@@ -325,7 +325,7 @@ export default function Home() {
             <div className="flex items-center gap-2">
               <span className="font-mono">TdxQuant v0.1.0 (P1)</span>
               <span>·</span>
-              <span>Next.js 16 + FastAPI + DuckDB</span>
+              <span>Next.js 16 + FastAPI + QuestDB</span>
               <span>·</span>
               <span>数据源：{status?.adapter_mode ?? 'mock'} 适配器</span>
             </div>

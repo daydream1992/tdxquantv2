@@ -1,0 +1,797 @@
+     1→     1→#!/usr/bin/env python3
+     2→     2→"""TdxQuant 跨平台运维脚本 (统一入口).
+     3→     3→
+     4→     4→替代 18 个 .sh/.ps1 双版本脚本, 一个 Python 走天下.
+     5→     5→跨平台 (Linux / macOS / Windows), 仅依赖 Python 3.10+ 标准库 + (可选) PyYAML.
+     6→     6→
+     7→     7→子命令
+     8→     8→------
+     9→     9→    python scripts/dev.py start [--no-fastapi|--no-next]   # 启动双服务 + 健康检查
+    10→    10→    python scripts/dev.py stop                              # 停止所有服务
+    11→    11→    python scripts/dev.py setup                             # venv + 装依赖 + 初始化 DuckDB
+    12→    12→    python scripts/dev.py reload                            # 热加载配置 (调 reload_config.py)
+    13→    13→    python scripts/dev.py test [--smoke|--lint|--all]       # 冒烟测试 / lint / 全部
+    14→    14→    python scripts/dev.py paths --env <linux|windows> [--dry-run]  # 路径占位符替换
+    15→    15→    python scripts/dev.py daemon                             # 守护进程模式 (5s 轮询)
+    16→    16→
+    17→    17→兼容性: Linux / macOS / Windows (PowerShell 或 cmd).
+    18→    18→"""
+    19→    19→
+    20→    20→from __future__ import annotations
+    21→    21→
+    22→    22→import argparse
+    23→    23→import json
+    24→    24→import os
+    25→    25→import platform
+    26→    26→import re
+    27→    27→import shutil
+    28→    28→import subprocess
+    29→    29→import sys
+    30→    30→import time
+    31→    31→import urllib.error
+    32→    32→import urllib.request
+    33→    33→from pathlib import Path
+    34→    34→from typing import Optional
+    35→    35→
+    36→    36→# ─── 项目根目录 ────────────────────────────────────────────────
+    37→    37→PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
+    38→    38→os.chdir(PROJECT_ROOT)  # 所有 subprocess 的 cwd 都从项目根开始
+    39→    39→
+    40→    40→IS_WINDOWS: bool = platform.system() == "Windows"
+    41→    41→IS_LINUX_LIKE: bool = platform.system() in ("Linux", "Darwin")
+    42→    42→
+    43→    43→# ─── 彩色输出 (Windows 10+ 通过 ctypes 启用 ANSI, 无需 colorama) ───
+    44→    44→def _enable_ansi_on_windows() -> bool:
+    45→    45→    """在 Windows 10+ 上启用 ANSI 转义序列. 返回是否成功."""
+    46→    46→    if not IS_WINDOWS:
+    47→    47→        return False
+    48→    48→    try:
+    49→    49→        import ctypes  # noqa: PLC0415
+    50→    50→        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    51→    51→        # STD_OUTPUT_HANDLE = -11, ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+    52→    52→        handle = kernel32.GetStdHandle(-11)
+    53→    53→        mode = ctypes.c_uint32()
+    54→    54→        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+    55→    55→            return False
+    56→    56→        new_mode = mode.value | 0x0004
+    57→    57→        if not kernel32.SetConsoleMode(handle, new_mode):
+    58→    58→            return False
+    59→    59→        return True
+    60→    60→    except Exception:
+    61→    61→        return False
+    62→    62→
+    63→    63→
+    64→    64→_ANSI_ENABLED = _enable_ansi_on_windows()
+    65→    65→
+    66→    66→
+    67→    67→def _supports_color() -> bool:
+    68→    68→    if IS_WINDOWS:
+    69→    69→        return _ANSI_ENABLED
+    70→    70→    # Linux/macOS: 终端才上色 (避免输出到文件/管道时夹带转义)
+    71→    71→    return sys.stdout.isatty() or os.environ.get("FORCE_COLOR") == "1"
+    72→    72→
+    73→    73→
+    74→    74→_PALETTE = {
+    75→    75→    "green": "\033[32m",
+    76→    76→    "red": "\033[31m",
+    77→    77→    "yellow": "\033[33m",
+    78→    78→    "cyan": "\033[36m",
+    79→    79→    "gray": "\033[90m",
+    80→    80→}
+    81→    81→_RESET = "\033[0m"
+    82→    82→
+    83→    83→
+    84→    84→def cprint(msg: str, color: str = "") -> None:
+    85→    85→    """彩色 print. color ∈ {'', 'green','red','yellow','cyan','gray'}."""
+    86→    86→    if color and _supports_color():
+    87→    87→        print(f"{_PALETTE[color]}{msg}{_RESET}")
+    88→    88→    else:
+    89→    89→        print(msg)
+    90→    90→
+    91→    91→
+    92→    92→def info(msg: str) -> None:
+    93→    93→    cprint(f"[INFO] {msg}", "cyan")
+    94→    94→
+    95→    95→
+    96→    96→def ok(msg: str) -> None:
+    97→    97→    cprint(f"[OK]   {msg}", "green")
+    98→    98→
+    99→    99→
+   100→   100→def warn(msg: str) -> None:
+   101→   101→    cprint(f"[WARN] {msg}", "yellow")
+   102→   102→
+   103→   103→
+   104→   104→def err(msg: str) -> None:
+   105→   105→    cprint(f"[ERROR] {msg}", "red")
+   106→   106→
+   107→   107→
+   108→   108→# ─── 工具函数 ──────────────────────────────────────────────────
+   109→   109→def _python_bin() -> str:
+   110→   110→    """选 Python 解释器 (优先 .venv, 然后 sys.executable)."""
+   111→   111→    venv_python = (
+   112→   112→        PROJECT_ROOT / ".venv"
+   113→   113→        / ("Scripts" if IS_WINDOWS else "bin")
+   114→   114→        / ("python.exe" if IS_WINDOWS else "python")
+   115→   115→    )
+   116→   116→    if venv_python.exists():
+   117→   117→        return str(venv_python)
+   118→   118→    return sys.executable or shutil.which("python") or "python"
+   119→   119→
+   120→   120→
+   121→   121→def _bun_bin() -> Optional[str]:
+   122→   122→    return shutil.which("bun")
+   123→   123→
+   124→   124→
+   125→   125→def _detached_popen(cmd: list[str], **kw) -> subprocess.Popen:
+   126→   126→    """跨平台 detached Popen: Linux/macOS 用 start_new_session, Windows 用 CREATE_NEW_PROCESS_GROUP.
+   127→   127→    让子进程在父进程退出后仍能继续运行 (守护/启动场景必备).
+   128→   128→    """
+   129→   129→    if IS_WINDOWS:
+   130→   130→        kw.setdefault("creationflags", subprocess.CREATE_NEW_PROCESS_GROUP)
+   131→   131→    else:
+   132→   132→        kw.setdefault("start_new_session", True)
+   133→   133→    kw.setdefault("cwd", PROJECT_ROOT)
+   134→   134→    return subprocess.Popen(cmd, **kw)
+   135→   135→
+   136→   136→
+   137→   137→def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
+   138→   138→    """subprocess.run 包装, 默认 cwd=PROJECT_ROOT."""
+   139→   139→    kw.setdefault("cwd", PROJECT_ROOT)
+   140→   140→    return subprocess.run(cmd, **kw)
+   141→   141→
+   142→   142→
+   143→   143→def _http_status(url: str, timeout: float = 2.0) -> Optional[int]:
+   144→   144→    """返回 HTTP 状态码, 网络错误返回 None."""
+   145→   145→    try:
+   146→   146→        with urllib.request.urlopen(url, timeout=timeout) as r:
+   147→   147→            return r.status
+   148→   148→    except urllib.error.HTTPError as e:
+   149→   149→        return e.code
+   150→   150→    except Exception:
+   151→   151→        return None
+   152→   152→
+   153→   153→
+   154→   154→def _run_precheck_json() -> Optional[dict]:
+   155→   155→    """运行 precheck.py --json, 返回解析后的 dict (失败返回 None).
+   156→   156→
+   157→   157→    用于 cmd_setup 前置检查: 若 precheck.py 不存在或 JSON 解析失败返回 None,
+   158→   158→    调用方应跳过 precheck 流程 (不阻塞 setup).
+   159→   159→    """
+   160→   160→    precheck = PROJECT_ROOT / "scripts" / "precheck.py"
+   161→   161→    if not precheck.exists():
+   162→   162→        return None
+   163→   163→    r = _run([sys.executable, str(precheck), "--json"],
+   164→   164→             capture_output=True, text=True)
+   165→   165→    if not r.stdout:
+   166→   166→        return None
+   167→   167→    try:
+   168→   168→        return json.loads(r.stdout)
+   169→   169→    except Exception:
+   170→   170→        return None
+   171→   171→
+   172→   172→
+   173→   173→def _run_precheck_text() -> int:
+   174→   174→    """运行 precheck.py (文本模式), 输出最终就绪度报告. 返回 precheck 退出码."""
+   175→   175→    precheck = PROJECT_ROOT / "scripts" / "precheck.py"
+   176→   176→    if not precheck.exists():
+   177→   177→        warn("precheck.py 不存在, 跳过最终就绪度检查")
+   178→   178→        return 0
+   179→   179→    r = _run([sys.executable, str(precheck)])
+   180→   180→    return r.returncode
+   181→   181→
+   182→   182→
+   183→   183→# ─── 1. start ──────────────────────────────────────────────────
+   184→   184→def cmd_start(args) -> int:
+   185→   185→    """启动 FastAPI + Next.js + 健康检查."""
+   186→   186→    (PROJECT_ROOT / "data" / "logs").mkdir(parents=True, exist_ok=True)
+   187→   187→
+   188→   188→    # 0. 先停旧服务 (避免端口冲突, 与原 start_all.sh 行为一致)
+   189→   189→    info("停旧服务 ...")
+   190→   190→    _stop_services()
+   191→   191→    time.sleep(1)
+   192→   192→
+   193→   193→    # 1. 启动 FastAPI
+   194→   194→    api_proc: Optional[subprocess.Popen] = None
+   195→   195→    api_log_fp = None
+   196→   196→    if not args.no_fastapi:
+   197→   197→        api_log = PROJECT_ROOT / "data" / "logs" / "fastapi.log"
+   198→   198→        info(f"启动 FastAPI (port 8000) → {api_log.relative_to(PROJECT_ROOT)}")
+   199→   199→        api_log_fp = open(api_log, "ab")
+   200→   200→        api_proc = _detached_popen(
+   201→   201→            [_python_bin(), "-m", "uvicorn", "engine.api.main:app",
+   202→   202→             "--host", "0.0.0.0", "--port", "8000", "--log-level", "warning"],
+   203→   203→            stdout=api_log_fp, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+   204→   204→        )
+   205→   205→        ok(f"FastAPI started (PID {api_proc.pid})")
+   206→   206→
+   207→   207→    # 2. 启动 Next.js
+   208→   208→    web_proc: Optional[subprocess.Popen] = None
+   209→   209→    web_log_fp = None
+   210→   210→    if not args.no_next:
+   211→   211→        bun = _bun_bin()
+   212→   212→        if not bun:
+   213→   213→            err("bun 未安装, 无法启动 Next.js (https://bun.sh)")
+   214→   214→            return 1
+   215→   215→        web_log = PROJECT_ROOT / "dev.log"
+   216→   216→        info(f"启动 Next.js (port 3000) → {web_log.relative_to(PROJECT_ROOT)}")
+   217→   217→        web_log_fp = open(web_log, "ab")
+   218→   218→        web_proc = _detached_popen(
+   219→   219→            [bun, "run", "dev"],
+   220→   220→            stdout=web_log_fp, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+   221→   221→        )
+   222→   222→        ok(f"Next.js started (PID {web_proc.pid})")
+   223→   223→
+   224→   224→    # 3. 健康检查 - 轮询 20 次每次 2s
+   225→   225→    info("等待服务就绪 (最多 40s) ...")
+   226→   226→    api_ready = bool(args.no_fastapi)  # 若不启 FastAPI, 视为 ready
+   227→   227→    web_ready = bool(args.no_next)
+   228→   228→    for i in range(1, 21):
+   229→   229→        time.sleep(2)
+   230→   230→        if not api_ready and _http_status("http://127.0.0.1:8000/health") == 200:
+   231→   231→            api_ready = True
+   232→   232→            ok(f"FastAPI ready ({i * 2}s)")
+   233→   233→        if not web_ready and _http_status("http://127.0.0.1:3000/") == 200:
+   234→   234→            web_ready = True
+   235→   235→            ok(f"Next.js ready ({i * 2}s)")
+   236→   236→        if api_ready and web_ready:
+   237→   237→            break
+   238→   238→
+   239→   239→    # 4. 结果汇报
+   240→   240→    print()
+   241→   241→    if api_ready and web_ready:
+   242→   242→        ok("Both services ready")
+   243→   243→        cprint("  停止服务: python scripts/dev.py stop", "gray")
+   244→   244→        return 0
+   245→   245→    if not api_ready:
+   246→   246→        err(f"FastAPI 未就绪, 查日志: data/logs/fastapi.log (PID {api_proc.pid if api_proc else 'N/A'})")
+   247→   247→    if not web_ready:
+   248→   248→        err(f"Next.js 未就绪, 查日志: dev.log (PID {web_proc.pid if web_proc else 'N/A'})")
+   249→   249→    return 1
+   250→   250→
+   251→   251→
+   252→   252→# ─── 2. stop ───────────────────────────────────────────────────
+   253→   253→def _stop_services() -> int:
+   254→   254→    """跨平台杀进程, 返回杀掉的进程数. 仅匹配本项目相关进程."""
+   255→   255→    stopped = 0
+   256→   256→    if IS_LINUX_LIKE:
+   257→   257→        # 按端口 (8000/3000) 精准停
+   258→   258→        for port in (8000, 3000):
+   259→   259→            try:
+   260→   260→                r = subprocess.run(["lsof", "-ti", f":{port}"],
+   261→   261→                                   capture_output=True, text=True, timeout=5)
+   262→   262→                for pid in r.stdout.split():
+   263→   263→                    try:
+   264→   264→                        subprocess.run(["kill", "-9", pid], timeout=5)
+   265→   265→                        ok(f"停止端口 {port} PID {pid}")
+   266→   266→                        stopped += 1
+   267→   267→                    except Exception:
+   268→   268→                        pass
+   269→   269→            except FileNotFoundError:
+   270→   270→                # lsof 不存在, 兜底 ss
+   271→   271→                try:
+   272→   272→                    r = subprocess.run(["ss", "-tlnp"], capture_output=True, text=True, timeout=5)
+   273→   273→                    for line in r.stdout.splitlines():
+   274→   274→                        if f":{port} " in line:
+   275→   275→                            m = re.search(r"pid=(\d+)", line)
+   276→   276→                            if m:
+   277→   277→                                subprocess.run(["kill", "-9", m.group(1)], timeout=5)
+   278→   278→                                ok(f"停止端口 {port} PID {m.group(1)}")
+   279→   279→                                stopped += 1
+   280→   280→                except Exception:
+   281→   281→                    pass
+   282→   282→            except Exception:
+   283→   283→                pass
+   284→   284→        # 按进程名匹配 (项目特定 pattern)
+   285→   285→        for pattern in ("uvicorn engine.api", "next-server", "next dev", "bun run dev"):
+   286→   286→            try:
+   287→   287→                r = subprocess.run(["pgrep", "-f", pattern],
+   288→   288→                                   capture_output=True, text=True, timeout=5)
+   289→   289→                for pid in r.stdout.split():
+   290→   290→                    try:
+   291→   291→                        subprocess.run(["kill", "-9", pid], timeout=5)
+   292→   292→                        ok(f"停止 PID {pid} ({pattern})")
+   293→   293→                        stopped += 1
+   294→   294→                    except Exception:
+   295→   295→                        pass
+   296→   296→            except FileNotFoundError:
+   297→   297→                break
+   298→   298→            except Exception:
+   299→   299→                pass
+   300→   300→    elif IS_WINDOWS:
+   301→   301→        # PowerShell: 匹配 commandline 含项目目录 + uvicorn/next/bun 的进程
+   302→   302→        root = str(PROJECT_ROOT).replace("'", "''")
+   303→   303→        ps_script = (
+   304→   304→            f"$root = '{root}';\n"
+   305→   305→            "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {\n"
+   306→   306→            "  $_.CommandLine -and\n"
+   307→   307→            "  ($_.CommandLine -match 'uvicorn|next-server|next dev|bun run') -and\n"
+   308→   308→            "  $_.CommandLine -match [regex]::Escape($root)\n"
+   309→   309→            "} | ForEach-Object {\n"
+   310→   310→            "  Write-Output ($_.ProcessId.ToString() + '|' + $_.Name);\n"
+   311→   311→            "  Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue\n"
+   312→   312→            "}"
+   313→   313→        )
+   314→   314→        try:
+   315→   315→            r = subprocess.run(
+   316→   316→                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+   317→   317→                capture_output=True, text=True, timeout=30,
+   318→   318→            )
+   319→   319→            for line in r.stdout.strip().splitlines():
+   320→   320→                line = line.strip()
+   321→   321→                if "|" in line:
+   322→   322→                    pid, name = line.split("|", 1)
+   323→   323→                    ok(f"停止 PID {pid} ({name})")
+   324→   324→                    stopped += 1
+   325→   325→        except Exception as e:
+   326→   326→            warn(f"PowerShell 停止失败: {e}")
+   327→   327→    return stopped
+   328→   328→
+   329→   329→
+   330→   330→def cmd_stop(args) -> int:
+   331→   331→    info("停止 TdxQuant 服务 ...")
+   332→   332→    n = _stop_services()
+   333→   333→    if n == 0:
+   334→   334→        warn("没有找到运行中的 TdxQuant 进程")
+   335→   335→    else:
+   336→   336→        ok(f"停止 {n} 个进程")
+   337→   337→    return 0
+   338→   338→
+   339→   339→
+   340→   340→# ─── 3. setup ──────────────────────────────────────────────────
+   341→   341→def cmd_setup(args) -> int:
+   342→   342→    """venv + 装依赖 + 初始化 DuckDB."""
+   343→   343→    info("环境初始化开始 ...")
+   344→   344→
+   345→   345→    # 0. 前置预检: Python 版本/pip 失败则直接退出 (避免无谓的 venv/依赖安装)
+   346→   346→    info("运行预检 (precheck --json) ...")
+   347→   347→    pre = _run_precheck_json()
+   348→   348→    if pre:
+   349→   349→        critical_fail = False
+   350→   350→        for chk in pre.get("checks", []):
+   351→   351→            if chk.get("id") in ("python_version", "pip") and chk.get("status") == "FAIL":
+   352→   352→                err(f"预检关键失败: {chk['name']} — {chk.get('detail', '')}")
+   353→   353→                if chk.get("fix"):
+   354→   354→                    err(f"修复建议: {chk['fix']}")
+   355→   355→                critical_fail = True
+   356→   356→        if critical_fail:
+   357→   357→            err("setup 已中止 (请先修复上述关键问题, 再重试 setup)")
+   358→   358→            return 1
+   359→   359→        ok("前置预检通过 (Python 版本 + pip 可用)")
+   360→   360→    else:
+   361→   361→        warn("precheck.py 不可用或 JSON 解析失败, 跳过前置预检")
+   362→   362→
+   363→   363→    # 1. 创建 venv
+   364→   364→    venv_dir = PROJECT_ROOT / ".venv"
+   365→   365→    if venv_dir.exists():
+   366→   366→        warn(f".venv 已存在, 跳过创建 ({venv_dir.relative_to(PROJECT_ROOT)})")
+   367→   367→    else:
+   368→   368→        # Linux/macOS: python3 -m venv .venv; Windows: py -m venv .venv (兜底 python)
+   369→   369→        if IS_WINDOWS:
+   370→   370→            venv_exe = "py" if shutil.which("py") else "python"
+   371→   371→        else:
+   372→   372→            venv_exe = "python3" if shutil.which("python3") else "python"
+   373→   373→        venv_cmd = [venv_exe, "-m", "venv", ".venv"]
+   374→   374→        info(f"创建 venv: {' '.join(venv_cmd)}")
+   375→   375→        r = _run(venv_cmd)
+   376→   376→        if r.returncode != 0:
+   377→   377→            err(f"venv 创建失败 (rc={r.returncode})")
+   378→   378→            return r.returncode
+   379→   379→        ok(".venv 已创建")
+   380→   380→
+   381→   381→    py = _python_bin()
+   382→   382→
+   383→   383→    # 2. pip install -r requirements.txt
+   384→   384→    info("安装 Python 依赖 (pip install -r requirements.txt) ...")
+   385→   385→    r = _run([py, "-m", "pip", "install", "-r", "requirements.txt"])
+   386→   386→    if r.returncode == 0:
+   387→   387→        ok("Python 依赖已安装")
+   388→   388→    else:
+   389→   389→        warn(f"pip install 失败 (rc={r.returncode})")
+   390→   390→
+   391→   391→    # 3. bun install
+   392→   392→    bun = _bun_bin()
+   393→   393→    if bun:
+   394→   394→        info("安装前端依赖 (bun install) ...")
+   395→   395→        r = _run([bun, "install"])
+   396→   396→        if r.returncode == 0:
+   397→   397→            ok("前端依赖已安装")
+   398→   398→        else:
+   399→   399→            warn(f"bun install 失败 (rc={r.returncode})")
+   400→   400→    else:
+   401→   401→        warn("bun 未安装, 跳过 bun install (https://bun.sh)")
+   402→   402→
+   403→   403→    # 4. 初始化 DuckDB
+   404→   404→    info("初始化 DuckDB ...")
+   405→   405→    r = _run([py, "scripts/init_db.py"])
+   406→   406→    if r.returncode == 0:
+   407→   407→        ok("DuckDB 已初始化")
+   408→   408→    else:
+   409→   409→        warn(f"init_db.py 失败 (rc={r.returncode})")
+   410→   410→
+   411→   411→    # 5. 创建数据目录
+   412→   412→    for d in ("data/logs", "data/csv", "data/excel", "data/duckdb"):
+   413→   413→        (PROJECT_ROOT / d).mkdir(parents=True, exist_ok=True)
+   414→   414→
+   415→   415→    # 6. 最终就绪度报告 (precheck 文本模式)
+   416→   416→    print()
+   417→   417→    info("最终就绪度检查 (precheck) ...")
+   418→   418→    _run_precheck_text()
+   419→   419→
+   420→   420→    print()
+   421→   421→    ok("环境就绪! 下一步: python scripts/dev.py start")
+   422→   422→    return 0
+   423→   423→
+   424→   424→
+   425→   425→# ─── 4. reload ─────────────────────────────────────────────────
+   426→   426→def cmd_reload(args) -> int:
+   427→   427→    info("热加载配置 (调 reload_config.py) ...")
+   428→   428→    r = _run([_python_bin(), "scripts/reload_config.py"])
+   429→   429→    return r.returncode
+   430→   430→
+   431→   431→
+   432→   432→# ─── 5. test ───────────────────────────────────────────────────
+   433→   433→def _smoke_test() -> tuple[int, int]:
+   434→   434→    """跑 8 个端点冒烟测试, 返回 (passes, fails)."""
+   435→   435→    api = "http://127.0.0.1:8000"
+   436→   436→    checks = [
+   437→   437→        ("GET /api/monitor/status",           f"{api}/api/monitor/status",          200, "engine_status"),
+   438→   438→        ("GET /api/monitor/quotes",           f"{api}/api/monitor/quotes?count=5",  200, ""),
+   439→   439→        ("GET /api/monitor/match-strategies", f"{api}/api/monitor/match-strategies",200, "match_id"),
+   440→   440→        ("GET /api/monitor/watchlist",        f"{api}/api/monitor/watchlist",       200, ""),
+   441→   441→        ("GET /api/strategies",               f"{api}/api/strategies",              200, "strategy_id"),
+   442→   442→        ("GET /api/sectors",                  f"{api}/api/sectors",                 200, ""),
+   443→   443→        ("GET /api/channels",                 f"{api}/api/channels",                200, "channels"),
+   444→   444→        ("GET /api/config",                   f"{api}/api/config",                  200, "adapter_mode"),
+   445→   445→    ]
+   446→   446→
+   447→   447→    passes = fails = 0
+   448→   448→    for name, url, expect, body_contains in checks:
+   449→   449→        try:
+   450→   450→            with urllib.request.urlopen(url, timeout=5) as r:
+   451→   451→                code = r.status
+   452→   452→                body = r.read().decode("utf-8", errors="replace")
+   453→   453→        except urllib.error.HTTPError as e:
+   454→   454→            code = e.code
+   455→   455→            try:
+   456→   456→                body = e.read().decode("utf-8", errors="replace")
+   457→   457→            except Exception:
+   458→   458→                body = ""
+   459→   459→        except Exception as e:
+   460→   460→            cprint(f"  [FAIL] {name} -> 连接失败: {e}", "red")
+   461→   461→            fails += 1
+   462→   462→            continue
+   463→   463→        if code == expect and (not body_contains or body_contains in body):
+   464→   464→            cprint(f"  [PASS] {name} -> {code}", "green")
+   465→   465→            passes += 1
+   466→   466→        else:
+   467→   467→            detail = f"body 缺少 '{body_contains}'" if body_contains else ""
+   468→   468→            cprint(f"  [FAIL] {name} -> {code} (期望 {expect}) {detail}".rstrip(), "red")
+   469→   469→            fails += 1
+   470→   470→    return passes, fails
+   471→   471→
+   472→   472→
+   473→   473→def cmd_test(args) -> int:
+   474→   474→    # 默认跑全部 (用户不带 flag 时)
+   475→   475→    if not (args.smoke or args.lint or args.all):
+   476→   476→        args.smoke = args.lint = args.all = True
+   477→   477→
+   478→   478→    rc = 0
+   479→   479→    if args.smoke or args.all:
+   480→   480→        info("冒烟测试 (8 端点) ...")
+   481→   481→        p, f = _smoke_test()
+   482→   482→        if f == 0:
+   483→   483→            ok(f"smoke: PASS={p}  FAIL={f}")
+   484→   484→        else:
+   485→   485→            err(f"smoke: PASS={p}  FAIL={f}")
+   486→   486→            rc = 1
+   487→   487→    if args.lint or args.all:
+   488→   488→        bun = _bun_bin()
+   489→   489→        if not bun:
+   490→   490→            err("bun 未安装, 无法跑 lint")
+   491→   491→            rc = 1
+   492→   492→        else:
+   493→   493→            info("lint (bun run lint) ...")
+   494→   494→            r = _run([bun, "run", "lint"])
+   495→   495→            if r.returncode == 0:
+   496→   496→                ok("lint: PASS")
+   497→   497→            else:
+   498→   498→                err(f"lint: FAIL (rc={r.returncode})")
+   499→   499→                rc = 1
+   500→   500→    return rc
+   501→   501→
+   502→   502→
+   503→   503→# ─── 6. paths ──────────────────────────────────────────────────
+   504→   504→def _parse_paths_yaml(env: str) -> list[tuple[str, str]]:
+   505→   505→    """读 scripts/paths.yaml, 返回 [(placeholder, value), ...]."""
+   506→   506→    paths_yaml = PROJECT_ROOT / "scripts" / "paths.yaml"
+   507→   507→    if not paths_yaml.exists():
+   508→   508→        err(f"找不到配置文件: {paths_yaml}")
+   509→   509→        return []
+   510→   510→    text = paths_yaml.read_text(encoding="utf-8")
+   511→   511→
+   512→   512→    # 优先用 PyYAML (在 requirements.txt 中)
+   513→   513→    try:
+   514→   514→        import yaml  # type: ignore[import-untyped]
+   515→   515→        data = yaml.safe_load(text) or {}
+   516→   516→        result: list[tuple[str, str]] = []
+   517→   517→        for ph, env_map in (data.get("placeholders") or {}).items():
+   518→   518→            if isinstance(env_map, dict):
+   519→   519→                val = env_map.get(env) or next(iter(env_map.values()), "")
+   520→   520→            else:
+   521→   521→                val = str(env_map)
+   522→   522→            result.append((ph, val))
+   523→   523→        return result
+   524→   524→    except ImportError:
+   525→   525→        # 兜底: 正则解析 (与原 .sh 实现一致, 不依赖 PyYAML)
+   526→   526→        result = []
+   527→   527→        m = re.search(r"^placeholders:\s*\n((?:\s{2,}.*\n|\s*\n)+)", text, re.M)
+   528→   528→        if not m:
+   529→   529→            return result
+   530→   530→        block = m.group(1)
+   531→   531→        for key, body in re.findall(
+   532→   532→            r'"(\{\{[^"}]+\}\})":\s*\n((?:[ \t]+(?:linux|windows):\s*.*\n)+)',
+   533→   533→            block,
+   534→   534→        ):
+   535→   535→            m2 = re.search(rf"^[ \t]+{env}:\s*\"?(.*?)\"?\s*$", body, re.M)
+   536→   536→            val = m2.group(1) if m2 else ""
+   537→   537→            result.append((key, val))
+   538→   538→        return result
+   539→   539→
+   540→   540→
+   541→   541→def cmd_paths(args) -> int:
+   542→   542→    env = args.env
+   543→   543→    mapping = _parse_paths_yaml(env)
+   544→   544→    if not mapping:
+   545→   545→        err("未从 paths.yaml 读到任何占位符")
+   546→   546→        return 1
+   547→   547→
+   548→   548→    info(f"激活环境: {env}")
+   549→   549→    info("DRY-RUN (不写文件)" if args.dry_run else "模式: 实际写入")
+   550→   550→    info("扫描目录: scripts docs engine config")
+   551→   551→    print()
+   552→   552→    info("占位符映射表:")
+   553→   553→    for ph, val in mapping:
+   554→   554→        print(f"    {ph}  ->  {val}")
+   555→   555→    print("-" * 40)
+   556→   556→
+   557→   557→    # 扫描配置
+   558→   558→    scan_dirs = ["scripts", "docs", "engine", "config"]
+   559→   559→    skip_dir_names = {
+   560→   560→        "node_modules", "__pycache__", ".git", ".next",
+   561→   561→        "data", "logs", "tool-results", "upload", "download",
+   562→   562→    }
+   563→   563→    skip_exts = {
+   564→   564→        ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".zip", ".7z",
+   565→   565→        ".xlsx", ".csv", ".db", ".db.bak", ".wal", ".pyc", ".lock",
+   566→   566→    }
+   567→   567→    skip_files = {"paths.yaml", "dev.py", "PATH_REPLACEMENT_GUIDE.md"}
+   568→   568→
+   569→   569→    total_files = changed_files = total_replacements = 0
+   570→   570→
+   571→   571→    for d in scan_dirs:
+   572→   572→        full = PROJECT_ROOT / d
+   573→   573→        if not full.is_dir():
+   574→   574→            continue
+   575→   575→        for fpath in full.rglob("*"):
+   576→   576→            if not fpath.is_file():
+   577→   577→                continue
+   578→   578→            # 跳过目录 (按路径任一段匹配)
+   579→   579→            parts = set(fpath.relative_to(PROJECT_ROOT).parts[:-1])
+   580→   580→            if parts & skip_dir_names:
+   581→   581→                continue
+   582→   582→            # 跳过扩展名
+   583→   583→            if fpath.suffix.lower() in skip_exts:
+   584→   584→                continue
+   585→   585→            # 跳过特定文件
+   586→   586→            if fpath.name in skip_files:
+   587→   587→                continue
+   588→   588→            # 跳过二进制 (前 4KB 检测 NUL)
+   589→   589→            try:
+   590→   590→                with open(fpath, "rb") as bf:
+   591→   591→                    chunk = bf.read(4096)
+   592→   592→                if b"\x00" in chunk:
+   593→   593→                    continue
+   594→   594→            except Exception:
+   595→   595→                continue
+   596→   596→
+   597→   597→            total_files += 1
+   598→   598→            try:
+   599→   599→                content = fpath.read_text(encoding="utf-8")
+   600→   600→            except Exception:
+   601→   601→                continue
+   602→   602→
+   603→   603→            count = 0
+   604→   604→            for ph, val in mapping:
+   605→   605→                if ph in content:
+   606→   606→                    count += content.count(ph)
+   607→   607→                    content = content.replace(ph, val)
+   608→   608→            if count > 0:
+   609→   609→                changed_files += 1
+   610→   610→                total_replacements += count
+   611→   611→                rel = fpath.relative_to(PROJECT_ROOT).as_posix()
+   612→   612→                if args.dry_run:
+   613→   613→                    cprint(f"  [DRY] {rel}  ({count} 处)", "yellow")
+   614→   614→                else:
+   615→   615→                    cprint(f"  [OK]  {rel}  ({count} 处)", "green")
+   616→   616→                    try:
+   617→   617→                        fpath.write_text(content, encoding="utf-8")
+   618→   618→                    except Exception as e:
+   619→   619→                        err(f"写入失败 {rel}: {e}")
+   620→   620→
+   621→   621→    print("-" * 40)
+   622→   622→    info(f"扫描文件数: {total_files}")
+   623→   623→    info(f"修改文件数: {changed_files}")
+   624→   624→    info(f"替换总处数: {total_replacements}")
+   625→   625→    if args.dry_run:
+   626→   626→        info("(DRY-RUN, 未实际写入)")
+   627→   627→    else:
+   628→   628→        ok("已写入磁盘")
+   629→   629→    return 0
+   630→   630→
+   631→   631→
+   632→   632→# ─── 7. daemon ─────────────────────────────────────────────────
+   633→   633→def _is_service_alive(pattern: str) -> bool:
+   634→   634→    """跨平台检测服务进程是否存活 (按 commandline pattern 匹配)."""
+   635→   635→    if IS_LINUX_LIKE:
+   636→   636→        try:
+   637→   637→            r = subprocess.run(["pgrep", "-f", pattern],
+   638→   638→                               capture_output=True, timeout=5)
+   639→   639→            return r.returncode == 0 and bool(r.stdout.strip())
+   640→   640→        except FileNotFoundError:
+   641→   641→            # 无 pgrep, 兜底 ps + grep
+   642→   642→            try:
+   643→   643→                r = subprocess.run(["ps", "aux"], capture_output=True, text=True, timeout=5)
+   644→   644→                return any(pattern in line for line in r.stdout.splitlines())
+   645→   645→            except Exception:
+   646→   646→                return False
+   647→   647→        except Exception:
+   648→   648→            return False
+   649→   649→    elif IS_WINDOWS:
+   650→   650→        ps_script = (
+   651→   651→            "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | "
+   652→   652→            "Where-Object { $_.CommandLine -match '" + pattern.replace("'", "''") + "' } | "
+   653→   653→            "Select-Object -First 1 | ForEach-Object { $_.ProcessId }"
+   654→   654→        )
+   655→   655→        try:
+   656→   656→            r = subprocess.run(
+   657→   657→                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+   658→   658→                capture_output=True, text=True, timeout=10,
+   659→   659→            )
+   660→   660→            return bool(r.stdout.strip())
+   661→   661→        except Exception:
+   662→   662→            return False
+   663→   663→    return False
+   664→   664→
+   665→   665→
+   666→   666→def _start_fastapi_bg() -> None:
+   667→   667→    """后台启动 FastAPI, 写入 data/logs/fastapi.log."""
+   668→   668→    api_log = PROJECT_ROOT / "data" / "logs" / "fastapi.log"
+   669→   669→    (PROJECT_ROOT / "data" / "logs").mkdir(parents=True, exist_ok=True)
+   670→   670→    fp = open(api_log, "ab")
+   671→   671→    _detached_popen(
+   672→   672→        [_python_bin(), "-m", "uvicorn", "engine.api.main:app",
+   673→   673→         "--host", "0.0.0.0", "--port", "8000", "--log-level", "warning"],
+   674→   674→        stdout=fp, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+   675→   675→    )
+   676→   676→
+   677→   677→
+   678→   678→def _start_next_bg() -> None:
+   679→   679→    """后台启动 Next.js, 写入 dev.log."""
+   680→   680→    bun = _bun_bin()
+   681→   681→    if not bun:
+   682→   682→        warn("bun 未安装, 无法启动 Next.js")
+   683→   683→        return
+   684→   684→    web_log = PROJECT_ROOT / "dev.log"
+   685→   685→    fp = open(web_log, "ab")
+   686→   686→    _detached_popen(
+   687→   687→        [bun, "run", "dev"],
+   688→   688→        stdout=fp, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+   689→   689→    )
+   690→   690→
+   691→   691→
+   692→   692→def cmd_daemon(args) -> int:
+   693→   693→    """守护进程模式: 5s 轮询, 服务挂了重启."""
+   694→   694→    info("守护模式启动, 5s 轮询, Ctrl+C 退出 (子进程会继续运行)")
+   695→   695→
+   696→   696→    while True:
+   697→   697→        try:
+   698→   698→            if not _is_service_alive("uvicorn engine.api"):
+   699→   699→                ts = time.strftime("%H:%M:%S")
+   700→   700→                cprint(f"[{ts}] FastAPI 挂了, 重启", "cyan")
+   701→   701→                _start_fastapi_bg()
+   702→   702→                time.sleep(3)
+   703→   703→            if not _is_service_alive("next-server") and not _is_service_alive("next dev"):
+   704→   704→                ts = time.strftime("%H:%M:%S")
+   705→   705→                cprint(f"[{ts}] Next.js 挂了, 重启", "cyan")
+   706→   706→                _start_next_bg()
+   707→   707→                time.sleep(5)
+   708→   708→            time.sleep(5)
+   709→   709→        except KeyboardInterrupt:
+   710→   710→            cprint("\n[中断] 用户 Ctrl+C, 守护退出 (子进程仍在运行)", "yellow")
+   711→   711→            cprint("  停止子进程: python scripts/dev.py stop", "gray")
+   712→   712→            return 130
+   713→   713→        except Exception as e:
+   714→   714→            warn(f"守护循环异常 (继续): {e}")
+   715→   715→            time.sleep(5)
+   716→   716→
+   717→   717→
+   718→   718→# ─── argparse ──────────────────────────────────────────────────
+   719→   719→def build_parser() -> argparse.ArgumentParser:
+   720→   720→    parser = argparse.ArgumentParser(
+   721→   721→        prog="dev.py",
+   722→   722→        description="TdxQuant 跨平台运维脚本 (统一入口, 替代 18 个 .sh/.ps1)",
+   723→   723→        formatter_class=argparse.RawDescriptionHelpFormatter,
+   724→   724→        epilog="""\
+   725→   725→示例:
+   726→   726→  python scripts/dev.py start                  # 启动 FastAPI + Next.js
+   727→   727→  python scripts/dev.py start --no-fastapi     # 只启 Next.js
+   728→   728→  python scripts/dev.py start --no-next        # 只启 FastAPI
+   729→   729→  python scripts/dev.py stop                   # 停止所有服务
+   730→   730→  python scripts/dev.py setup                  # 初始化环境 (venv + 依赖 + DuckDB)
+   731→   731→  python scripts/dev.py reload                 # 热加载配置
+   732→   732→  python scripts/dev.py test --all             # 跑冒烟 + lint
+   733→   733→  python scripts/dev.py paths --env linux      # 路径替换 (linux)
+   734→   734→  python scripts/dev.py paths --env windows --dry-run  # 预览 (windows)
+   735→   735→  python scripts/dev.py daemon                 # 守护进程 (5s 轮询)
+   736→   736→
+   737→   737→兼容: 老 bash scripts/start_all.sh 仍可运行 (内部转发到本脚本).
+   738→   738→""",
+   739→   739→    )
+   740→   740→    sub = parser.add_subparsers(dest="command", required=True)
+   741→   741→
+   742→   742→    p_start = sub.add_parser("start", help="启动 FastAPI + Next.js + 健康检查")
+   743→   743→    p_start.add_argument("--no-fastapi", action="store_true",
+   744→   744→                         help="不启 FastAPI (只启 Next.js)")
+   745→   745→    p_start.add_argument("--no-next", action="store_true",
+   746→   746→                         help="不启 Next.js (只启 FastAPI)")
+   747→   747→    p_start.set_defaults(func=cmd_start)
+   748→   748→
+   749→   749→    p_stop = sub.add_parser("stop", help="停止所有服务")
+   750→   750→    p_stop.set_defaults(func=cmd_stop)
+   751→   751→
+   752→   752→    p_setup = sub.add_parser("setup", help="venv + 装依赖 + 初始化 DuckDB")
+   753→   753→    p_setup.set_defaults(func=cmd_setup)
+   754→   754→
+   755→   755→    p_reload = sub.add_parser("reload", help="热加载配置 (调 reload_config.py)")
+   756→   756→    p_reload.set_defaults(func=cmd_reload)
+   757→   757→
+   758→   758→    p_test = sub.add_parser("test", help="冒烟测试 / lint / 全部")
+   759→   759→    g = p_test.add_mutually_exclusive_group()
+   760→   760→    g.add_argument("--smoke", action="store_true", help="跑冒烟测试 (8 端点)")
+   761→   761→    g.add_argument("--lint", action="store_true", help="跑 bun run lint")
+   762→   762→    g.add_argument("--all", action="store_true", help="冒烟 + lint 全跑")
+   763→   763→    p_test.set_defaults(func=cmd_test)
+   764→   764→
+   765→   765→    p_paths = sub.add_parser("paths", help="路径占位符替换")
+   766→   766→    p_paths.add_argument("--env", required=True, choices=["linux", "windows"],
+   767→   767→                         help="目标环境")
+   768→   768→    p_paths.add_argument("--dry-run", action="store_true",
+   769→   769→                         help="只打印不写文件")
+   770→   770→    p_paths.set_defaults(func=cmd_paths)
+   771→   771→
+   772→   772→    p_daemon = sub.add_parser("daemon",
+   773→   773→                              help="守护进程模式 (5s 轮询, 挂了重启)")
+   774→   774→    p_daemon.set_defaults(func=cmd_daemon)
+   775→   775→
+   776→   776→    return parser
+   777→   777→
+   778→   778→
+   779→   779→def main() -> int:
+   780→   780→    parser = build_parser()
+   781→   781→    args = parser.parse_args()
+   782→   782→    try:
+   783→   783→        rc = args.func(args)
+   784→   784→        return int(rc or 0)
+   785→   785→    except KeyboardInterrupt:
+   786→   786→        cprint("\n[中断] 用户 Ctrl+C, 退出", "yellow")
+   787→   787→        return 130
+   788→   788→    except Exception as e:
+   789→   789→        err(f"未捕获异常: {e}")
+   790→   790→        import traceback
+   791→   791→        traceback.print_exc()
+   792→   792→        return 1
+   793→   793→
+   794→   794→
+   795→   795→if __name__ == "__main__":
+   796→   796→    sys.exit(main())
+   797→   797→

@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from engine.api.deps import get_state, get_storage
 from engine.api.state import EngineState
+from engine.storage.questdb_store import _gen_id  # R18-A: QuestDB 无 SEQUENCE，应用层生成 id
 
 logger = logging.getLogger(__name__)
 
@@ -259,10 +260,10 @@ def _persist_subscription(
         storage.execute(
             """
             INSERT INTO monitor_subscriptions
-                (strategy_id, stock_code, subscriber, subscribed_at, active, batch_no)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP, true, ?)
+                (id, strategy_id, stock_code, subscriber, subscribed_at, active, batch_no)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, true, ?)
             """,
-            [strategy_id, code, subscriber, batch_no],
+            [_gen_id(), strategy_id, code, subscriber, batch_no],
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug("写 monitor_subscriptions 失败（可忽略）: %s", exc)
@@ -301,11 +302,12 @@ def _deactivate_subscription(storage: Any, code: str) -> None:
             storage.execute(
                 """
                 INSERT INTO monitor_subscriptions
-                    (strategy_id, stock_code, subscriber, subscribed_at,
+                    (id, strategy_id, stock_code, subscriber, subscribed_at,
                      unsubscribed_at, active, batch_no)
-                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, false, ?)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, false, ?)
                 """,
                 [
+                    _gen_id(),
                     str(row.get("strategy_id") or ""),
                     code,
                     str(row.get("subscriber") or ""),

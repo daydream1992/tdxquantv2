@@ -72,6 +72,17 @@ except (ImportError, AttributeError, Exception):  # noqa: BLE001
         # TODO: 待 P1-3 完成
 
 
+# R18-A: QuestDB 无 SEQUENCE，应用层生成 id（monitor_subscriptions 表需要）
+try:
+    from engine.storage.questdb_store import _gen_id  # type: ignore
+except (ImportError, AttributeError, Exception):  # noqa: BLE001
+    def _gen_id() -> int:  # type: ignore[no-redef]
+        """占位 _gen_id（questdb_store 不可用时兜底）。"""
+        import time as _time
+        import random as _random
+        return int(_time.time() * 1000) * 10000 + _random.randint(0, 9999)
+
+
 # 兼容旧代码: P1-3 整体就绪标志
 _P1_3_READY = _CONFIG_LOADER_READY and _ADAPTER_READY and _STORAGE_READY
 
@@ -362,10 +373,10 @@ class StrategyRunner:
             self.storage.execute(  # type: ignore[attr-defined]
                 """
                 INSERT INTO monitor_subscriptions
-                    (strategy_id, stock_code, subscriber, subscribed_at, active, batch_no)
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP, true, ?)
+                    (id, strategy_id, stock_code, subscriber, subscribed_at, active, batch_no)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, true, ?)
                 """,
-                [strategy_id, code, subscriber, batch_no],
+                [_gen_id(), strategy_id, code, subscriber, batch_no],
             )
         except Exception as exc:  # noqa: BLE001
             self.logger.debug("写 monitor_subscriptions 失败（可忽略）: %s", exc)

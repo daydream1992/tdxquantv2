@@ -4,11 +4,14 @@
 替代 18 个 .sh/.ps1 双版本脚本, 一个 Python 走天下.
 跨平台 (Linux / macOS / Windows), 仅依赖 Python 3.10+ 标准库 + (可选) PyYAML.
 
+R18-B: 启动时强制 UTF-8 (PYTHONUTF8=1 / PYTHONIOENCODING=utf-8 / set_utf8_stdio),
+       解决 Windows 默认 GBK 导致的中文乱码 / UnicodeEncodeError.
+
 子命令
 ------
     python scripts/dev.py start [--no-fastapi|--no-next]   # 启动双服务 + 健康检查
     python scripts/dev.py stop                              # 停止所有服务
-    python scripts/dev.py setup                             # venv + 装依赖 + 初始化 DuckDB
+    python scripts/dev.py setup                             # venv + 装依赖 + 初始化 QuestDB
     python scripts/dev.py reload                            # 热加载配置 (调 reload_config.py)
     python scripts/dev.py test [--smoke|--lint|--all]       # 冒烟测试 / lint / 全部
     python scripts/dev.py paths --env <linux|windows> [--dry-run]  # 路径占位符替换
@@ -39,6 +42,23 @@ os.chdir(PROJECT_ROOT)  # 所有 subprocess 的 cwd 都从项目根开始
 
 IS_WINDOWS: bool = platform.system() == "Windows"
 IS_LINUX_LIKE: bool = platform.system() in ("Linux", "Darwin")
+
+# ─── UTF-8 强制（R18-B：Windows 默认 GBK 会中文乱码/UnicodeEncodeError） ───
+# 1) 设置环境变量：影响后续派生的 uvicorn / bun 子进程
+#    PYTHONUTF8=1 启用 Python 3.7+ 的 UTF-8 mode（open 默认 UTF-8）
+#    PYTHONIOENCODING=utf-8 强制 stdin/stdout/stderr 编码
+if not os.environ.get("PYTHONUTF8"):
+    os.environ["PYTHONUTF8"] = "1"
+if not os.environ.get("PYTHONIOENCODING"):
+    os.environ["PYTHONIOENCODING"] = "utf-8"
+# 2) 重配当前进程的 stdio（Windows 上 sys.stdout 默认 cp936）
+try:
+    from engine.utils.encoding import set_utf8_stdio  # noqa: PLC0415
+
+    set_utf8_stdio()
+except Exception:  # noqa: BLE001
+    # 引擎模块未就绪时静默跳过（如运行 paths 子命令前 __init__ 失败）
+    pass
 
 # ─── 彩色输出 (Windows 10+ 通过 ctypes 启用 ANSI, 无需 colorama) ───
 def _enable_ansi_on_windows() -> bool:
@@ -339,7 +359,7 @@ def cmd_stop(args) -> int:
 
 # ─── 3. setup ──────────────────────────────────────────────────
 def cmd_setup(args) -> int:
-    """venv + 装依赖 + 初始化 DuckDB."""
+    """venv + 装依赖 + 初始化数据库 (R18: QuestDB 优先, 沙箱无 QuestDB 时优雅降级)."""
     info("环境初始化开始 ...")
 
     # 0. 前置预检: Python 版本/pip 失败则直接退出 (避免无谓的 venv/依赖安装)
@@ -400,11 +420,11 @@ def cmd_setup(args) -> int:
     else:
         warn("bun 未安装, 跳过 bun install (https://bun.sh)")
 
-    # 4. 初始化 DuckDB
-    info("初始化 DuckDB ...")
+    # 4. 初始化数据库 (R18: QuestDB; DuckDBStore 已是 QuestDBStore 别名, 沙箱无服务时优雅降级)
+    info("初始化数据库 (QuestDB 优先; 沙箱无服务时跳过) ...")
     r = _run([py, "scripts/init_db.py"])
     if r.returncode == 0:
-        ok("DuckDB 已初始化")
+        ok("数据库已初始化 (QuestDB 或降级模式)")
     else:
         warn(f"init_db.py 失败 (rc={r.returncode})")
 
@@ -727,7 +747,7 @@ def build_parser() -> argparse.ArgumentParser:
   python scripts/dev.py start --no-fastapi     # 只启 Next.js
   python scripts/dev.py start --no-next        # 只启 FastAPI
   python scripts/dev.py stop                   # 停止所有服务
-  python scripts/dev.py setup                  # 初始化环境 (venv + 依赖 + DuckDB)
+  python scripts/dev.py setup                  # 初始化环境 (venv + 依赖 + QuestDB)
   python scripts/dev.py reload                 # 热加载配置
   python scripts/dev.py test --all             # 跑冒烟 + lint
   python scripts/dev.py paths --env linux      # 路径替换 (linux)
@@ -749,7 +769,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_stop = sub.add_parser("stop", help="停止所有服务")
     p_stop.set_defaults(func=cmd_stop)
 
-    p_setup = sub.add_parser("setup", help="venv + 装依赖 + 初始化 DuckDB")
+    p_setup = sub.add_parser("setup", help="venv + 装依赖 + 初始化数据库 (QuestDB 优先)")
     p_setup.set_defaults(func=cmd_setup)
 
     p_reload = sub.add_parser("reload", help="热加载配置 (调 reload_config.py)")

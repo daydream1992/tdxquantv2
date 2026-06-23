@@ -58,7 +58,7 @@ const KEY_PATHS = [
 ] as const
 
 const PATH_LABELS: Record<string, string> = {
-  duckdb: 'DuckDB 数据库',
+  duckdb: 'QuestDB 数据库',
   csv_output: 'CSV 输出',
   excel_output: 'Excel 输出',
   logs: '日志目录',

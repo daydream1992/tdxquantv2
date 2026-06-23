@@ -13,15 +13,16 @@ echo 时间: %DATE% %TIME%
 echo.
 echo 将依次执行:
 echo   1. 预检环境 (Python / pip / 通达信 / 端口)
-echo   2. 装依赖 + 初始化数据库 (scripts/dev.py setup)
+echo   2. 装依赖 + 初始化数据库 (QuestDB 优先; scripts/dev.py setup)
 echo   3. 自动安装 tqcenter (通达信官方 API)
 echo   4. 创建桌面快捷方式
-echo   5. 输出最终就绪度报告
+echo   5. 启动 QuestDB (R18; 无 Docker 时跳过)
+echo   6. 输出最终就绪度报告
 echo.
 
 REM ========== Step 1: 预检 ==========
 echo ----------------------------------------------------------------
-echo [1/5] 预检环境 (scripts/precheck.py)
+echo [1/6] 预检环境 (scripts/precheck.py)
 echo ----------------------------------------------------------------
 python scripts\precheck.py
 set PRECHECK_EXIT=%ERRORLEVEL%
@@ -40,7 +41,7 @@ echo.
 
 REM ========== Step 2: 装依赖 + 初始化数据库 ==========
 echo ----------------------------------------------------------------
-echo [2/5] 装依赖 + 初始化数据库 (scripts/dev.py setup)
+echo [2/6] 装依赖 + 初始化数据库 (QuestDB 优先; scripts/dev.py setup)
 echo ----------------------------------------------------------------
 python scripts\dev.py setup
 set SETUP_EXIT=%ERRORLEVEL%
@@ -57,7 +58,7 @@ echo.
 
 REM ========== Step 3: 安装 tqcenter ==========
 echo ----------------------------------------------------------------
-echo [3/5] 安装 tqcenter (scripts/install_tqcenter.py)
+echo [3/6] 安装 tqcenter (scripts/install_tqcenter.py)
 echo ----------------------------------------------------------------
 python scripts\install_tqcenter.py
 set TQ_EXIT=%ERRORLEVEL%
@@ -67,7 +68,7 @@ if not "!TQ_EXIT!"=="0" (
     echo     tqcenter 是 Windows 专用包,来自通达信终端目录。
     echo     如已手动 pip install,可忽略本提示。
     echo     否则请运行: python scripts\install_tqcenter.py --list
-    echo     或手动: python scripts\install_tqcenter.py --path "C:\new_tdx"
+    echo     或手动: python scripts\install_tqcenter.py --path "K:\txdlianghua"
     echo.
 ) else (
     echo.
@@ -77,7 +78,7 @@ echo.
 
 REM ========== Step 4: 创建桌面快捷方式 ==========
 echo ----------------------------------------------------------------
-echo [4/5] 创建桌面快捷方式 (scripts/create_shortcut.py)
+echo [4/6] 创建桌面快捷方式 (scripts/create_shortcut.py)
 echo ----------------------------------------------------------------
 python scripts\create_shortcut.py
 set SC_EXIT=%ERRORLEVEL%
@@ -91,9 +92,37 @@ if not "!SC_EXIT!"=="0" (
 )
 echo.
 
-REM ========== Step 5: 最终预检报告 ==========
+REM ========== Step 5: 启动 QuestDB (R18) ==========
 echo ----------------------------------------------------------------
-echo [5/5] 最终就绪度报告 (scripts/precheck.py)
+echo [5/6] 启动 QuestDB (R18 替代 DuckDB; 无 Docker 时跳过)
+echo ----------------------------------------------------------------
+echo 可选步骤: 启动 QuestDB 服务 (PG wire:8812 / HTTP:9000)
+echo   - Real 模式强烈建议启动 (写监控/选股/信号/回测结果)
+echo   - Mock 模式可跳过 (沙箱不依赖 DB)
+echo.
+choice /c YN /m "现在启动 QuestDB (Y=启动 docker compose, N=跳过)"
+if errorlevel 2 (
+    echo.
+    echo [SKIP] 用户选择跳过 QuestDB 启动。
+    echo        后续如需启动，双击 start-questdb.bat 即可。
+    echo.
+) else (
+    call "%~dp0start-questdb.bat"
+    set QUESTDB_EXIT=!ERRORLEVEL!
+    if not "!QUESTDB_EXIT!"=="0" (
+        echo.
+        echo [!] QuestDB 启动失败 ^(exit=!QUESTDB_EXIT!^)。不影响主程序，可后续手动启动。
+        echo.
+    ) else (
+        echo.
+        echo [OK] QuestDB 已启动 (Web 控制台: http://127.0.0.1:9000)
+        echo.
+    )
+)
+
+REM ========== Step 6: 最终预检报告 ==========
+echo ----------------------------------------------------------------
+echo [6/6] 最终就绪度报告 (scripts/precheck.py)
 echo ----------------------------------------------------------------
 python scripts\precheck.py
 echo.
@@ -109,6 +138,7 @@ echo.
 echo  静默后台启动: 双击 tdxquant-launcher.vbs
 echo  健康检查:     双击 tdxquant-healthcheck.bat
 echo  开机自启:     见 windows\TdxQuantAutoStart.xml
+echo  QuestDB 管理: 双击 start-questdb.bat (R18, 启动数据库)
 echo.
 echo  详细使用说明: WINDOWS_README.md
 echo.

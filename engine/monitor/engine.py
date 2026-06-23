@@ -34,6 +34,7 @@ from engine.config.loader import ConfigLoader
 from engine.expression.evaluator import ExpressionEvaluator, ExpressionError
 from engine.monitor.match_registry import AlertRef, MatchRegistry, MatchStrategy
 from engine.monitor.rules import AlertRule, RuleSet
+from engine.storage.questdb_store import _gen_id  # R18-A: QuestDB 无 SEQUENCE，应用层生成 id
 
 logger = logging.getLogger(__name__)
 
@@ -586,11 +587,12 @@ class MonitorEngine:
             store.execute(
                 """
                 INSERT INTO signal_events
-                    (event_id, strategy_id, stock_code, stock_name, alert_type,
+                    (id, event_id, strategy_id, stock_code, stock_name, alert_type,
                      condition_expr, snapshot, severity, channels_fired, triggered_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """,
                 [
+                    _gen_id(),  # R18-A: QuestDB 无 SEQUENCE，应用层生成 id
                     event_id, strategy_id, stock_code, stock_name, alert_type,
                     condition_expr, snapshot, severity, channels_fired,
                 ],

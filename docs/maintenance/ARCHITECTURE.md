@@ -18,8 +18,8 @@
 ### 1.2 运行环境
 - **Python 引擎**：Windows + Python 3.13 + 通达信金融终端（必须预启动）
 - **Web 前端**：Next.js 16，跨平台
-- **数据库**：DuckDB（单文件，零运维）
-- **本开发环境**：Linux 沙箱，使用 Mock 适配器模拟（无通达信）
+- **数据库**：QuestDB（R18 起替代 DuckDB,服务端架构,无文件锁）
+- **本开发环境**：Linux 沙箱，使用 Mock 适配器模拟（无通达信；无 QuestDB 时自动降级）
 
 ### 1.3 数据源
 - **生产**：tqcenter API（通达信终端）
@@ -49,7 +49,7 @@
 │  实现: engine/pipeline/ engine/monitor/ engine/messaging/   │
 ├─────────────────────────────────────────────────────────────┤
 │  Layer 1: 基础设施层（一年不变）                            │
-│  数据适配器 / DuckDB存储 / WebSocket网关 / FastAPI          │
+│  数据适配器 / QuestDB 存储 / WebSocket网关 / FastAPI         │
 │  实现: engine/data_adapter/ engine/storage/ engine/api/     │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -128,7 +128,8 @@
 │   │   └── events.py                #   事件类型定义
 │   │
 │   ├── storage/                     # L1: 存储层
-│   │   ├── duckdb_store.py          #   DuckDB 封装
+│   │   ├── questdb_store.py         #   QuestDB 封装 (R18 替代 duckdb_store)
+│   │   ├── duckdb_store.py          #   兼容别名,指向 QuestDBStore
 │   │   └── migrations/              #   Schema 迁移
 │   │
 │   ├── expression/                  # L4: 表达式引擎
@@ -162,14 +163,15 @@
 │   └── strategy_qzrfc.yaml          #   强转弱反抽
 │
 ├── config/                          # 【L5】全局配置
-│   ├── app.yaml                     #   应用配置（端口/路径/模式）
+│   ├── app.yaml                     #   应用配置（端口/路径/模式/QuestDB）
 │   ├── sector_mapping.yaml          #   策略↔板块映射
 │   ├── channels.yaml                #   推送通道配置
 │   ├── cleaning_rules.yaml          #   通用清洗规则
-│   ├── monitor_rules.yaml           #   监控预警规则
+│   ├── monitor.yaml                 #   监控预警规则
 │   ├── export.yaml                  #   导出配置
 │   ├── theme.yaml                   #   前端主题配置（可切换）
-│   └── duckdb_schema.sql            #   DuckDB 建表 SQL
+│   ├── questdb_schema.sql           #   QuestDB 建表 SQL (R18 替代 duckdb_schema.sql)
+│   └── duckdb_schema.sql            #   [已弃用] 旧 DuckDB 建表 SQL
 │
 ├── src/                             # 【Web 前端】Next.js 16
 │   ├── app/
@@ -189,7 +191,8 @@
 │       └── theme.ts                 #   主题系统
 │
 ├── data/                            # 运行时数据（gitignore）
-│   ├── duckdb/quant.db              #   DuckDB 文件
+│   ├── duckdb/quant.db              #   [已弃用] 旧 DuckDB 文件 (R18 起代码不读)
+│   ├── questdb-data/                #   [可选] 原生 QuestDB 数据目录 (默认 Docker 卷走)
 │   ├── csv/                         #   CSV 导出
 │   ├── excel/                       #   Excel 导出
 │   └── logs/                        #   日志
@@ -502,17 +505,25 @@ class BaseDataAdapter(ABC):
 
 ---
 
-## 九、DuckDB Schema
+## 九、QuestDB Schema (R18 替代 DuckDB)
 
-详见 `config/duckdb_schema.sql`，核心表：
+详见 `config/questdb_schema.sql`，核心表：
 - `strategies` - 策略注册表
-- `selection_results` - 选股结果
-- `signal_events` - 信号事件
+- `selection_results` - 选股结果 (时序表, timestamp(created_at))
+- `signal_events` - 信号事件 (时序表, timestamp(triggered_at))
 - `sector_snapshots` - 板块快照
 - `strategy_runs` - 执行日志
 - `monitor_subscriptions` - 监控订阅
 - `config_changes` - 配置变更审计
-- `kline_cache` - K线缓存
+- `kline_cache` - K线缓存 (时序表, timestamp(cached_at))
+
+QuestDB vs DuckDB SQL 方言差异：
+- 无 `SEQUENCE/AUTOINCREMENT` → 应用层 `_gen_id()` 生成 LONG ID
+- 无 `UNIQUE` 约束 → 应用层 UPSERT (DELETE WHERE + INSERT)
+- 无 `information_schema.tables` → 用 `tables()` 函数查
+- 参数化查询: `?` 占位符 → `$1, $2, ...` (PG wire 风格)
+- 时序表用 `timestamp(col)` 标记 designated timestamp, 自动分区
+- 低基数字符串 (stock_code/alert_type) 用 `SYMBOL` 类型, 自动去重压缩
 
 ---
 
@@ -632,15 +643,16 @@ theme:
 
 **R13 合并**：`monitor_rules.yaml` + `match_strategies.yaml` → `monitor.yaml`（4 段：monitor / alert_templates / dedup / match_strategies）
 
-**当前 config/ 目录**（7 个文件，从 9 个精简）：
-- `app.yaml` — 主配置（adapter_mode / paths / tqcenter / api 限流）
+**当前 config/ 目录**（R18 后含 QuestDB 迁移新增 questdb_schema.sql）：
+- `app.yaml` — 主配置（adapter_mode / paths / questdb / tqcenter / api 限流）
 - `monitor.yaml` — 监控配置（合并自 monitor_rules + match_strategies）
 - `channels.yaml` — 4 个推送通道
 - `cleaning_rules.yaml` — V8.1 5 项数据清洗
 - `sector_mapping.yaml` — 板块映射
 - `export.yaml` — 导出配置
 - `theme.yaml` — 主题
-- `duckdb_schema.sql` — DuckDB 8 张表 schema
+- `questdb_schema.sql` — QuestDB 8 张表 schema (R18 替代 duckdb_schema.sql)
+- `duckdb_schema.sql` — [已弃用] 旧 DuckDB schema,保留供回滚参考
 
 ### 13.3 脚本统一（R13）
 
@@ -718,3 +730,105 @@ Layer 3: 监控统计
 ---
 
 **R5-R13 演进结束** · 有疑问先查 `worklog.md` + `docs/CHANGELOG.md`。
+
+---
+
+## 十四、R18 QuestDB 迁移 (DuckDB → QuestDB)
+
+> R18 起 DuckDB 单文件存储已替换为 QuestDB (服务端时序数据库, 彻底解决文件锁问题)。
+
+### 14.1 为什么迁移
+
+**DuckDB 痛点**:
+1. **单写锁**: DuckDB 是单文件嵌入式 DB, 多进程/多 FastAPI 实例并发写必冲突报 `database is locked`
+2. **盘中高频写入压力**: Real 模式下盘中行情推送每秒数十次, R12 限流仅缓解未根治
+3. **时序查询无优化**: DuckDB 无 designated timestamp / 分区 / 列存压缩, 时序查询全表扫描
+4. **运维简陋**: 无 Web 控制台, 删 .db 即重置, 难以在线查看数据
+
+**QuestDB 优势**:
+1. **无文件锁**: 服务端架构, PG wire (8812) / HTTP (9000) / ILP (9009) 多连接并发写
+2. **原生时序优化**: `timestamp(col)` 标记 designated timestamp, 自动按天分区 + 列存压缩
+3. **SYMBOL 类型**: 低基数字符串 (stock_code/alert_type) 自动去重 + 压缩
+4. **Web 控制台**: http://127.0.0.1:9000 在线执行 SQL / 查表 / 看分区
+5. **PG wire 兼容**: 直接用 psycopg2 连接, 无需额外驱动
+
+### 14.2 架构变更
+
+| 维度 | DuckDB (R5-R17) | QuestDB (R18+) |
+|---|---|---|
+| 存储类 | `engine/storage/duckdb_store.py` (DuckDBStore) | `engine/storage/questdb_store.py` (QuestDBStore) |
+| 别名兼容 | - | `DuckDBStore = QuestDBStore` (旧代码零改动迁移) |
+| Schema | `config/duckdb_schema.sql` | `config/questdb_schema.sql` |
+| 配置段 | `paths.duckdb` | `questdb.host` / `questdb.pg_port` / `questdb.http_port` 等 |
+| 访问方式 | `import duckdb` 直连文件 | psycopg2 PG wire + requests HTTP /exec |
+| 启动依赖 | 无 (随进程启) | 必须先启 QuestDB (docker compose / questdb.exe) |
+| 沙箱降级 | 无 (单文件即用) | 无 QuestDB 时 mock 模式自动降级 (不依赖 DB) |
+
+### 14.3 依赖变更
+
+`requirements.txt` 新增:
+- `psycopg2-binary>=2.9` — QuestDB PG wire 连接 (必须)
+- `requests>=2.28` — QuestDB HTTP /exec (DDL 用)
+- `questdb-py-client>=0.0.5` — QuestDB ILP 批量写入 (可选, 高性能场景)
+- `duckdb>=1.0.0` — 保留兼容 (mock 模式降级时可用, real 模式不再依赖)
+
+### 14.4 配置变更 (`config/app.yaml`)
+
+新增 `questdb` 段:
+```yaml
+questdb:
+  host: 127.0.0.1
+  pg_port: 8812          # PG wire
+  http_port: 9000        # HTTP
+  username: admin
+  password: quest
+  database: qdb
+  connect_timeout: 5
+  auto_init: true        # 启动时自动建表
+```
+
+`paths.duckdb` 字段保留兼容 (代码不再读, 仅供 mock 模式降级时使用)。
+
+环境变量覆盖: `QUESTDB_HOST` / `QUESTDB_PG_PORT` / `QUESTDB_HTTP_PORT` / `QUESTDB_USERNAME` / `QUESTDB_PASSWORD` / `QUESTDB_DATABASE` (见 `.env.example`)。
+
+### 14.5 启动方式
+
+见 `docker/questdb/docker-compose.yml`:
+```bash
+docker compose -f docker/questdb/docker-compose.yml up -d
+```
+
+或原生二进制:
+```bash
+questdb.exe start -d K:\questdb\data     # Windows
+/opt/questdb/questdb start -d /opt/questdb/data  # Linux
+```
+
+Web 控制台: http://127.0.0.1:9000
+
+### 14.6 SQL 方言适配 (QuestDBStore 内部完成)
+
+- `?` 占位符 → `$1, $2, ...` (PG wire 风格)
+- `SEQUENCE + nextval()` → 应用层 `_gen_id()` 生成 LONG ID (毫秒时间戳×1000 + 随机)
+- `UNIQUE INDEX` → 应用层 UPSERT (DELETE WHERE + INSERT)
+- `information_schema.tables` → `SELECT table_name FROM tables()`
+- 时序表 `CREATE TABLE ... timestamp(col)` 标记 designated timestamp
+- 低基数字符串 `SYMBOL CAPACITY N` 类型
+
+### 14.7 优雅降级
+
+`QuestDBStore._connect()` 失败时 (沙箱无 QuestDB / 网络问题) 不抛异常:
+- 仅记 WARNING 日志
+- `is_available` 属性返回 `False`
+- `execute/query` 调用返回空结果
+- `init_db()` 跳过建表
+- mock 模式不依赖 DB, 仍可正常运行
+- real 模式必须在 `precheck.py` 中先验证 QuestDB 连接 (`check_questdb()`), FAIL 则提示启动 QuestDB
+
+### 14.8 关键约束更新
+
+- **不再有 `database is locked`**: 多 FastAPI 实例并发写无锁冲突
+- **QuestDB 必须先启动**: real 模式前置依赖 (mock 模式可跳过)
+- **schema 文件改名**: `config/duckdb_schema.sql` → `config/questdb_schema.sql` (DuckDBStore 别名仍指向 QuestDBStore, init_db 读新 schema)
+- **环境变量优先级**: `QUESTDB_*` > `config/app.yaml` 的 `questdb` 段
+- **`engine/storage/__init__.py` 导出**: `QuestDBStore` / `DuckDBStore` (别名) / `get_store`

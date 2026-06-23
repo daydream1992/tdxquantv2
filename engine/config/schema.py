@@ -60,6 +60,7 @@ class ServerConfig:
 class PathsConfig:
     """``config/app.yaml`` 中 ``paths`` 段。所有相对路径以项目根为基准。"""
 
+    # R18: duckdb 字段保留兼容（实际已弃用，新代码用 questdb 段）
     duckdb: str = "./data/duckdb/quant.db"
     csv_output: str = "./data/csv"
     excel_output: str = "./data/excel"
@@ -69,6 +70,35 @@ class PathsConfig:
     # 监控配置统一入口：monitor / alert_templates / dedup / match_strategies 4 段
     monitor: str = "./config/monitor.yaml"
     channels: str = "./config/channels.yaml"
+
+
+@dataclass
+class QuestDBConfig:
+    """``config/app.yaml`` 中 ``questdb`` 段（R18 替代 DuckDB，无文件锁）。
+
+    QuestDB 是服务端时序数据库，通过 PG wire (8812) / HTTP (9000) / ILP (9009)
+    访问，多进程并发写无文件锁冲突。启动方式见 docker/questdb/docker-compose.yml。
+
+    环境变量覆盖：QUESTDB_HOST / QUESTDB_PG_PORT / QUESTDB_HTTP_PORT /
+                  QUESTDB_USERNAME / QUESTDB_PASSWORD / QUESTDB_DATABASE
+    """
+
+    host: str = "127.0.0.1"
+    pg_port: int = 8812          # PG wire（查询/写入）
+    http_port: int = 9000        # HTTP（DDL/管理/Web 控制台）
+    username: str = "admin"
+    password: str = "quest"
+    database: str = "qdb"
+    connect_timeout: int = 5     # 秒
+    auto_init: bool = True       # 启动时自动建表
+
+    def validate(self) -> None:
+        if not (1 <= self.pg_port <= 65535):
+            raise ValueError(f"questdb.pg_port 越界: {self.pg_port}")
+        if not (1 <= self.http_port <= 65535):
+            raise ValueError(f"questdb.http_port 越界: {self.http_port}")
+        if self.connect_timeout <= 0:
+            raise ValueError(f"questdb.connect_timeout 必须 > 0: {self.connect_timeout}")
 
 
 @dataclass
@@ -260,6 +290,7 @@ class AppConfigRoot:
     app: AppConfig = field(default_factory=AppConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
+    questdb: QuestDBConfig = field(default_factory=QuestDBConfig)
     tqcenter: TqCenterConfig = field(default_factory=TqCenterConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
     mock: MockConfig = field(default_factory=MockConfig)
@@ -267,6 +298,7 @@ class AppConfigRoot:
     def validate(self) -> None:
         self.app.validate()
         self.server.validate()
+        self.questdb.validate()
         self.tqcenter.validate()
 
     @classmethod
@@ -296,6 +328,7 @@ class AppConfigRoot:
             app=AppConfig(**(data.get("app") or {})),
             server=ServerConfig(**(data.get("server") or {})),
             paths=PathsConfig(**(data.get("paths") or {})),
+            questdb=QuestDBConfig(**(data.get("questdb") or {})),
             tqcenter=TqCenterConfig(**(data.get("tqcenter") or {})),
             api=api_cfg,
             mock=MockConfig(**(data.get("mock") or {})),

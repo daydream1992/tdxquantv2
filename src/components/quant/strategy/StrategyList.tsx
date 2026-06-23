@@ -135,7 +135,7 @@ export function StrategyList({
               </Badge>
             </SheetTitle>
             <SheetDescription>
-              最近 50 次选股执行记录（来源 DuckDB strategy_runs 表）
+              最近 50 次选股执行记录（来源 QuestDB strategy_runs 表）
             </SheetDescription>
           </SheetHeader>
 

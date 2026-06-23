@@ -1,0 +1,48 @@
+# ============================================================================
+# TdxQuant Engine - QuestDB Docker Compose
+# R18: 替代 DuckDB，彻底解决文件锁问题
+# ============================================================================
+# 启动: docker compose -f docker/questdb/docker-compose.yml up -d
+# 停止: docker compose -f docker/questdb/docker-compose.yml down
+# Web 控制台: http://127.0.0.1:9000
+# PG wire (psycopg2): 127.0.0.1:8812
+# ILP (InfluxDB line protocol): 127.0.0.1:9009
+# 数据持久化: ./questdb-data (相对本文件)
+# ============================================================================
+
+services:
+  questdb:
+    image: questdb/questdb:latest
+    container_name: tdxquant-questdb
+    restart: unless-stopped
+    ports:
+      # PG wire - psycopg2 连接（FastAPI 引擎用）
+      - "8812:8812"
+      # HTTP - DDL / Web 控制台 / /exec 端点
+      - "9000:9000"
+      # ILP - InfluxDB line protocol（批量写入，可选）
+      - "9009:9009"
+    environment:
+      # QuestDB 配置
+      QDB_HTTP_BIND_TO: "0.0.0.0:9000"
+      QDB_PG_BIND_TO: "0.0.0.0:8812"
+      QDB_ILP_BIND_TO: "0.0.0.0:9009"
+      # 共享 worker（多核优化）
+      QDB_SHARED_WORKER_COUNT: 2
+      # 时区
+      QDB_TIMEZONE: "Asia/Shanghai"
+      # 日志级别
+      QDB_LOG_LEVEL: "INFO"
+    volumes:
+      # 数据持久化（相对路径，存到 docker/questdb/questdb-data/）
+      - ./questdb-data:/var/lib/questdb
+      # 自定义配置（可选）
+      - ./questdb.conf:/etc/questdb/questdb.conf:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    # Windows 路径兼容：避免 volume 权限问题
+    user: "root"
