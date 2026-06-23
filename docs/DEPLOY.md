@@ -55,6 +55,10 @@ python scripts/dev.py stop
 
 ## 🪟 Windows 生产部署
 
+> 🚀 **新手开箱即用**：先看根目录 [`WINDOWS_README.md`](../WINDOWS_README.md)（5 分钟图文教程），有困难再回到本节。
+>
+> 一键安装: 双击 `install.bat` ｜ 启动: `start.bat` ｜ 静默后台: `tdxquant-launcher.vbs`
+
 ### 前置检查
 - 通达信金融终端已启动并登录（保持前台，不要最小化到托盘）
 - Python 3.13+ 已装（`python --version`）

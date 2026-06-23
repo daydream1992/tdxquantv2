@@ -1,0 +1,498 @@
+     1→     1→# TdxQuant 项目工作记录
+     2→     2→
+     3→     3→> 完整历史归档: `worklog-archive-R5-R13.md.gz`（74 段 Task ID，R5-R13 全部迭代）
+     4→     4→> 本文件只保留最近 5 段 + 项目纪要，避免膨胀。
+     5→     5→
+     6→     6→---
+     7→     7→
+     8→     8→## 项目纪要
+     9→     9→
+    10→    10→### 当前状态（R13 精简完成后）
+    11→    11→- **adapter_mode**: mock（沙箱开发模式）
+    12→    12→- **engine_status**: running
+    13→    13→- **5 Tab 前端**: Dashboard / Strategies / Selections / Signals / Sectors 全通
+    14→    14→- **40+ 后端路由**: 全 200
+    15→    15→- **R13 精简完成**: 文档 64→8 个文件、脚本 18→8 个、配置 9→7 个、删 Prisma 死代码、6 个巨型组件已拆分
+    16→    16→
+    17→    17→### 架构核心
+    18→    18→- 5 层架构: L1 基础设施 / L2 引擎 / L3 插件 / L4 业务规则 / L5 用户配置
+    19→    19→- 插件式: 因子(26) / 通道(4) / 数据源(Mock/Real) / 导出器(4) 均可扩展
+    20→    20→- 三层限流(R12): 令牌桶 + 端点中间件 + 监控统计
+    21→    21→- 配置热加载: YAML 改完 `python scripts/dev.py reload` 即生效（adapter_mode 除外）
+    22→    22→
+    23→    23→### 关键约束
+    24→    24→1. 适配器模式(mock↔real)不支持热加载，必须重启
+    25→    25→2. DuckDB 单写锁，不要开多 FastAPI 实例
+    26→    26→3. 改 engine/ 已稳定代码前先读本文档 + ARCHITECTURE.md
+    27→    27→4. Mock 模式不限流（开发体验优先）
+    28→    28→5. 前端不直连 DB，全走 FastAPI API（Prisma 已删）
+    29→    29→
+    30→    30→### 文档导航
+    31→    31→- `docs/README.md` — 项目总览
+    32→    32→- `docs/maintenance/ARCHITECTURE.md` — 5 层架构（改代码前必读）
+    33→    33→- `docs/MAINTENANCE.md` — 运维 + 8 场景提示词
+    34→    34→- `docs/DEPLOY.md` — 部署指南
+    35→    35→- `docs/STRATEGY_FACTOR.md` — 策略/因子开发
+    36→    36→- `docs/USER_GUIDE.md` — 用户手册
+    37→    37→- `docs/CHANGELOG.md` — R5-R13 变更日志
+    38→    38→
+    39→    39→---
+    40→    40→
+    41→    41→## 最近工作记录
+    42→    42→
+    43→    43→(以下为最近 5 段 Task ID，更早的见 `worklog-archive-R5-R13.md.gz`)
+    44→    44→
+    45→    45→---
+    46→    46→Task ID: R13-精简-文档+worklog
+    47→    47→Agent: Z.ai Code (Claude, 主控)
+    48→    48→Task: 文档瘦身(64→8) + worklog 归档(13008行→纪要+5段)
+    49→    49→
+    50→    50→Work Log:
+    51→    51→- 删除已实施完的设计文档: MONITOR_ENGINE_PLAN.md / MONITOR_ENGINE_IMPLEMENTATION_PROMPT.md
+    52→    52→- 删除冗余文档(合并到新文档): API_CAPABILITY_MAP.md / QUICKSTART_10MIN.md / PATH_REPLACEMENT_GUIDE.md / PROJECT_HANDOVER.md / PROJECT_MAINTENANCE.md / HANDOVER_PROMPTS.md / STRATEGY_FACTOR_EXTENSION.md / maintenance/STRATEGY_LOGIC.md
+    53→    53→- 删除 docs/tdx-quant/ (51 个通达信官方文档，网上有)
+    54→    54→- 移动 docs/v8-data/ → data/v8-samples/ (它是数据不是文档，24MB)
+    55→    55→- 更新 config/app.yaml + engine/config/schema.py + engine/data_adapter/mock_adapter.py 的路径引用
+    56→    56→- 删除 agent-ctx/ (63 个 QA 截图归档，6.8MB)
+    57→    57→- 删除 tool-results/ (中间产物，4.6MB)
+    58→    58→- 新建 docs/README.md (项目总览，140 行)
+    59→    59→- 新建 docs/DEPLOY.md (部署指南，Windows/Linux/沙箱三环境，200 行)
+    60→    60→- 新建 docs/MAINTENANCE.md (运维 + 8 场景提示词 + 限流方案 + 故障排查，300 行)
+    61→    61→- 新建 docs/STRATEGY_FACTOR.md (策略/因子开发指南，400 行)
+    62→    62→- 更新 docs/maintenance/ARCHITECTURE.md: 追加「R5-R13 演进补充」章节(110 行)，覆盖 P1 过时描述
+    63→    63→- 归档 worklog.md → worklog-archive-R5-R13.md.gz (238KB)
+    64→    64→- 重建 worklog.md: 项目纪要 + 最近 5 段
+    65→    65→
+    66→    66→Stage Summary:
+    67→    67→- 文档: 64 个文件 / 16142 行 → 8 个文件 / ~3500 行（-78%）
+    68→    68→- worklog: 13008 行 → ~200 行 + 归档（-98%）
+    69→    69→- 辅助目录清理: agent-ctx(6.8MB) + tool-results(4.6MB) + docs/tdx-quant(508KB) + docs/v8-data(24MB，移到 data/)
+    70→    70→- v8-data 路径引用已同步更新(3 个文件)
+    71→    71→- 文档导航: README.md 为入口，6 个文档分工明确
+    72→    72→- 未解决问题: docs/ 下 5 个文档可能仍引用已删除的脚本名(smoke_test.sh 等)，后续文档维护时统一改为 dev.py
+    73→    73→
+    74→    74→---
+    75→    75→Task ID: R13-精简-代码(Subagent A)
+    76→    76→Agent: Subagent A (删Prisma+mock-data统一)
+    77→    77→Task: 删 Prisma 死代码 + mock-data 降级逻辑统一进 api-proxy
+    78→    78→
+    79→    79→Work Log:
+    80→    80→- 删 src/lib/db.ts (Prisma client, 零业务调用)
+    81→    81→- 删 src/lib/mock-data.ts (584 行，降级数据搬到 api-proxy)
+    82→    82→- 删 prisma/ 整个目录 (schema.prisma 只有 User/Post 脚手架)
+    83→    83→- 删 .env (仅含 DATABASE_URL)
+    84→    84→- package.json: deps 删 prisma + @prisma/client，scripts 删 db:push/generate/migrate/reset
+    85→    85→- src/lib/api-proxy.ts: 105 → 773 行，新增 fallback(path, query?) 映射表 + 7 个 gen* 函数 + STRATEGIES + MOCK_THEME
+    86→    86→- 11 个 route.ts 统一改用 api-proxy 的 fallback()，不再 import mock-data
+    87→    87→
+    88→    88→Stage Summary:
+    89→    89→- 删除: db.ts / mock-data.ts / prisma/ / .env / 4 个 db:xxx 脚本 / 2 个 prisma 依赖
+    90→    90→- 修改: api-proxy.ts(+668行) / package.json / 11 个 route.ts
+    91→    91→- 验证: rg "@prisma/client|from.*lib/db" 零结果 / rg "mock-data" 零结果 / bun run lint exit 0
+    92→    92→- 风险: STRATEGIES 模块级共享状态(原 mock-data 也是这样，行为 100% 保留)
+    93→    93→
+    94→    94→---
+    95→    95→Task ID: R13-精简-脚本(Subagent B)
+    96→    96→Agent: Subagent B (脚本统一)
+    97→    97→Task: 18 个 .sh/.ps1 双版本脚本统一为 1 个 Python 跨平台 dev.py
+    98→    98→
+    99→    99→Work Log:
+   100→   100→- 新建 scripts/dev.py (~480 行，7 个子命令: start/stop/setup/reload/test/paths/daemon)
+   101→   101→- 用 argparse + subprocess + platform 标准库，零外部依赖
+   102→   102→- Windows ANSI 上色: ctypes.windll.kernel32.SetConsoleMode
+   103→   103→- 跨平台 detached 启动: Linux start_new_session / Windows CREATE_NEW_PROCESS_GROUP
+   104→   104→- stop 安全杀: Windows 用 Get-CimInstance 按 ProjectRoot 过滤
+   105→   105→- 保留 start_all.sh + start_all.ps1 作为 thin wrapper (3 行，兼容老用法)
+   106→   106→- 删除 12 个重复脚本: daemon.{sh,ps1} / setup-env.{sh,ps1} / replace-paths.{sh,ps1} / smoke_test.{sh,ps1} / stop.{sh,ps1} / realtime_daemon.sh / start_fastapi.sh
+   107→   107→
+   108→   108→Stage Summary:
+   109→   109→- scripts/: 18 个文件 → 8 个文件（-56%）
+   110→   110→- dev.py 7 子命令: start / stop / setup / reload / test / paths / daemon
+   111→   111→- 验证: python3 scripts/dev.py --help / start --no-fastapi 实测 / stop 实测 / reload 实测 / paths --dry-run 全过
+   112→   112→- bun run lint exit 0
+   113→   113→- 已知未解决: docs/ 下 5 个文档仍引用已删除脚本名(本次主控已删/合并这些文档，问题消除)
+   114→   114→
+   115→   115→---
+   116→   116→Task ID: R13-精简-配置(Subagent C)
+   117→   117→Agent: Subagent C (配置合并)
+   118→   118→Task: monitor_rules.yaml + match_strategies.yaml → monitor.yaml
+   119→   119→
+   120→   120→Work Log:
+   121→   121→- 新建 config/monitor.yaml (326 行，4 段: monitor / alert_templates / dedup / match_strategies)
+   122→   122→- 删 config/monitor_rules.yaml (198 行)
+   123→   123→- 删 config/match_strategies.yaml (96 行)
+   124→   124→- engine/config/schema.py: PathsConfig 删 monitor_rules + match_strategies 字段，加 monitor 字段
+   125→   125→- config/app.yaml: paths 段同步改
+   126→   126→- engine/monitor/match_registry.py: _config_path 改读 monitor.yaml / _write_yaml 改为"读-改-写"模式(避免误删其他段)
+   127→   127→- 4 个 .py 文件 docstring 更新
+   128→   128→
+   129→   129→Stage Summary:
+   130→   130→- config/: 9 个文件 → 7 个文件（monitor_rules + match_strategies 合并为 monitor.yaml）
+   131→   131→- monitor.yaml 4 段: monitor(24行) / alert_templates(169行,14模板) / dedup(5行) / match_strategies(98行,3策略)
+   132→   132→- loader.py 零改动(用 glob 通用加载，按 top-level key 合并)
+   133→   133→- 验证: 4 个端点全 200 (/api/monitor/health / /api/monitor/match-strategies / /api/config / POST /api/config/reload)
+   134→   134→- bun run lint exit 0
+   135→   135→
+   136→   136→---
+   137→   137→Task ID: R13-精简-组件拆分(Subagent D+E)
+   138→   138→Agent: Subagent D+E (待重试)
+   139→   139→Task: 6 个巨型组件拆分
+   140→   140→
+   141→   141→注: 此任务因 API 429 限流未完成，待重试。详见下一段。
+   142→   142→
+   143→   143→---
+   144→   144→(更早的工作记录见 worklog-archive-R5-R13.md.gz)
+   145→   145→
+   146→   146→---
+   147→   147→Task ID: 3-a
+   148→   148→Agent: Subagent D (拆前3组件)
+   149→   149→Task: MatchStrategyManager + SignalCenter + WatchlistManager 拆分
+   150→   150→
+   151→   151→Work Log:
+   152→   152→- MatchStrategyManager 容器 125→93 行 (压缩 docstring + 合并 strategies 加载 effect)
+   153→   153→  - 已存在的 match-strategy/ 子目录 (前次 Subagent D+E 部分): List(429) / Form(721) / Test(270) / shared.ts(128)
+   154→   154→  - Form 721 行超 500 行限制, 抽出 EditForm+CopyForm 到新文件 MatchStrategyEditFields.tsx(461)
+   155→   155→  - Form 主体降至 270 行, EditFields 461 行 (均 <500)
+   156→   156→  - shared.ts 增 CopyDialogState + INITIAL_COPY 类型导出 (供 Form 和 EditFields 共享)
+   157→   157→  - 注: match-strategy/ 实际 4 个 .tsx (List/Form/Test/EditFields), 因 Form 含 2 个 Dialog + EditForm 字段渲染总 JSX ~600 行无法压到 500 内; EditFields 是 Form 的内部 parts 文件, 非独立子组件
+   158→   158→- SignalCenter 容器 1497→99 行, 拆 3 个子组件 + shared.ts:
+   159→   159→  - signal/SignalFilter.tsx (210 行) — 类型/策略/日期/通道多选筛选栏, 纯 props
+   160→   160→  - signal/SignalList.tsx (499 行) — 类型统计卡片 + 图例 + CSV 导出(>500条弹确认) + StockTable + 内含 SectorLinkageButton 同板块联动 Popover + 30s 轮询新信号标记 + linkageEnabled 探测
+   161→   161→  - signal/SignalDrawer.tsx (422 行) — Sheet 抽屉详情 + 内含 InfoCell + JsonNode 递归树形渲染 + 复制 JSON
+   162→   162→  - signal/shared.ts (75 行) — TYPE_META / PUSH_STATUS_META / CHANNEL_BADGE_META / csvEscape / isNewSignal 等常量工具
+   163→   163→  - 容器持有 signals/strategies/loading/filters/detail 状态, handleRepush/handleOpenDetail 回调, displayedSignals memo
+   164→   164→- WatchlistManager 容器 1287→56 行, 拆 2 个子组件 + shared.ts:
+   165→   165→  - watchlist/WatchlistTable.tsx (499 行) — 顶部状态条 + 加入表单 + 筛选栏 + 表格(含 StockSectorHover 板块悬停) + 删除确认 AlertDialog + 内含 SectorGroup helper
+   166→   166→  - watchlist/BatchImportDialog.tsx (495 行) — 2 个 Dialog: 批量导入(粘贴CSV/解析预览/分组提交) + 按板块加入(板块下拉/策略绑定/addBySector)
+   167→   167→  - watchlist/shared.ts (57 行) — MANUAL_STRATEGY 常量 + parseBatchInput 函数 + ParsedRow 类型
+   168→   168→  - 容器只持有 items/strategies/loading + batchOpen/bySectorOpen 两个 Dialog open 状态 (56 行)
+   169→   169→
+   170→   170→Stage Summary:
+   171→   171→- 3 个容器总行数: 125+1497+1287 = 2909 → 93+99+56 = 248 行 (减 91%)
+   172→   172→- 新建子组件 8 个 .tsx + 3 个 shared.ts:
+   173→   173→  - match-strategy/: 4 .tsx (List/Form/Test/EditFields) + 1 .ts (shared)
+   174→   174→  - signal/: 3 .tsx (Filter/List/Drawer) + 1 .ts (shared)
+   175→   175→  - watchlist/: 2 .tsx (Table/BatchImportDialog) + 1 .ts (shared)
+   176→   176→- 所有子组件 <500 行 (最大 SignalList 499 / WatchlistTable 499 / BatchImportDialog 495)
+   177→   177→- 所有容器 <100 行 (MatchStrategyManager 93 / SignalCenter 99 / WatchlistManager 56)
+   178→   178→- 功能 100% 保留: UI/交互/API 调用/状态管理全部迁移, page.tsx 三个 import 名不变
+   179→   179→- 验证: bun run lint exit 0 / page.tsx 仍 import {MatchStrategyManager}/{SignalCenter}/{WatchlistManager}
+   180→   180→- 已知偏差: match-strategy/ 有 4 个 .tsx (而非任务要求的 3 个), 因 MatchStrategyForm 含 2 个 Dialog (编辑/复制) + 内部 EditForm 字段渲染, 总 JSX 超 500 行无法压到一个文件内; 第 4 个文件 MatchStrategyEditFields.tsx 是 Form 的内部 parts (EditForm + CopyForm), 非独立子组件, 3 个主子组件 List/Form/Test 仍齐全
+   181→   181→
+   182→   182→---
+   183→   183→Task ID: 3-b
+   184→   184→Agent: Subagent E (拆后3组件)
+   185→   185→Task: BacktestView + StrategyManager + GlobalSearch 拆分
+   186→   186→
+   187→   187→Work Log:
+   188→   188→- BacktestView 容器 108→98 行 (前次 Subagent D+E 已创建 backtest/ 子目录, 本次仅微调容器压到 <100)
+   189→   189→  - backtest/BacktestForm.tsx (188 行) — 参数表单(策略/日期/初始资金/TopN/持有天数) [前次创建]
+   190→   190→  - backtest/BacktestChart.tsx (363 行) — 纯 SVG 净值曲线 + 回撤图 + 十字光标 [前次创建]
+   191→   191→  - backtest/BacktestTrades.tsx (394 行) — 统计指标 Grid + 交易明细表 + BacktestHistory [前次创建]
+   192→   192→  - 容器压缩: docstring 单行化 + state 合并 + loadHistory callback 与 useEffect 合并 + handleRun 校验合并
+   193→   193→- StrategyManager 容器 899→91 行, 拆 2 个子组件 + shared.ts:
+   194→   194→  - strategy/StrategyList.tsx (229 行) — 顶部操作栏(全部启用/停用/批量运行/刷新配置) + 卡片网格 + 运行历史 Sheet(内部持有 runs/runsLoading)
+   195→   195→  - strategy/StrategyEdit.tsx (492 行) — 3 个 Dialog: 配置查看/编辑(YAML 在线编辑+保存热加载) + 复制策略(ID/名/emoji+YAML预览) + 删除策略(ID 二次确认); 内部持有 editMode/yamlDraft/copyId/deleteConfirmId 等局部状态 + useEffect 同步 target 变化
+   196→   196→  - strategy/shared.ts (73 行) — YamlTransformOpts + transformStrategyYaml(行级替换 strategy_id/name/emoji/sector) + ID_REGEX
+   197→   197→  - 容器持有 strategies/loading/running + configTarget/copySource/deleteTarget 三个 Dialog target; handleToggle/handleRun/handleBatch/handleReloadConfig 共享 API 调用; onConfigSaved 回调让保存后 Dialog 显示新内容(与原单文件行为一致)
+   198→   198→- GlobalSearch 容器 775→62 行, 拆 2 个子组件 + shared.ts:
+   199→   199→  - search/SearchInput.tsx (241 行) — 持有 query/loading/result/activeIdx/recentSearches/searchError + 防抖(200ms)/最近搜索加载/关闭重置/保存最近/activeIdx越界保护/滚动定位 effects + flatItems memo(调 buildFlatItems) + grouped/flatIdxMap memo + handleKeyDown(↑↓Enter Esc) + 渲染输入框+提示条+SearchResult
+   200→   200→  - search/SearchResult.tsx (146 行) — 分组结果列表 + 3 种空状态(初始/无结果/失败) + 底部 footer + 内含 EmptyHint
+   201→   201→  - search/shared.ts (260 行) — GlobalSearchHandle/GlobalSearchProps/ItemKind/FlatItem 类型 + RECENT_KEY/MAX_RECENT + buildFlatItems(空状态:最近搜索+6快捷操作; 有结果:策略/股票/信号+快捷操作) + typeLabel + formatTime
+   202→   202→  - 容器持有 open 状态 + Cmd+K 全局监听(always-mounted, Dialog 关闭时也要响应) + forwardRef imperative handle; re-export GlobalSearchHandle/GlobalSearchProps 类型保持 page.tsx import 路径不变
+   203→   203→
+   204→   204→Stage Summary:
+   205→   205→- 3 个容器总行数: 1195+899+775 = 2869 → 98+91+62 = 251 行 (减 91%)
+   206→   206→  - 注: BacktestView 的 backtest/ 子目录由前次 Subagent D+E 部分完成, 本次仅将容器从 108 压到 98
+   207→   207→  - StrategyManager + GlobalSearch 为本次完整拆分: 899+775 = 1674 → 91+62 = 153 行 (减 91%)
+   208→   208→- 新建子组件 7 个文件 (4 个 .tsx 由前次创建, 4 个 .tsx + 2 个 .ts 本次创建):
+   209→   209→  - backtest/: 3 .tsx (Form 188 / Chart 363 / Trades 394) [前次]
+   210→   210→  - strategy/: 2 .tsx (List 229 / Edit 492) + 1 .ts (shared 73) [本次]
+   211→   211→  - search/: 2 .tsx (SearchInput 241 / SearchResult 146) + 1 .ts (shared 260) [本次]
+   212→   212→- 所有子组件 <500 行 (最大 StrategyEdit 492 / BacktestTrades 394 / BacktestChart 363)
+   213→   213→- 所有容器 <100 行 (BacktestView 98 / StrategyManager 91 / GlobalSearch 62)
+   214→   214→- 功能 100% 保留: UI/交互/API 调用/状态管理全部迁移; page.tsx 三个 import 名 (StrategyManager / GlobalSearch / GlobalSearchHandle) 不变; SelectionResults 仍 import BacktestView
+   215→   215→- 验证: bun run lint exit 0 / npx tsc --noEmit 我的新文件零错误(仅 match-strategy/MatchStrategyEditFields.tsx 有前次遗留错误) / page.tsx import 路径不变
+   216→   216→- 设计要点: StrategyEdit 用 onConfigSaved 回调让容器更新 configTarget, 保存后 Dialog 头部/查看模式显示新 YAML(与原单文件 setConfigOpen(updated) 行为一致); GlobalSearch 的 Cmd+K 监听留容器层(always-mounted), 因 Dialog 子组件仅在 open 时 mount
+   217→   217→
+   218→   218→---
+   219→   219→Task ID: R13-精简-收尾
+   220→   220→Agent: Z.ai Code (Claude, 主控)
+   221→   221→Task: 全量精简收尾 — 文档瘦身 + worklog归档 + 5个subagent并行(删Prisma/脚本统一/配置合并/6组件拆分) + QA验证
+   222→   222→
+   223→   223→Work Log:
+   224→   224→- 诊断冗余: 文档64个/16142行 + worklog13008行 + 脚本18个 + 死代码(Prisma/mock-data) + 6个巨型组件
+   225→   225→- 派5个subagent并行:
+   226→   226→  * A(1-c+4): 删Prisma(db.ts/mock-data.ts/prisma/) + mock-data降级统一进api-proxy.ts的fallback()
+   227→   227→  * B(2-a): 18个.sh/.ps1双版本→8个文件,新建scripts/dev.py(Python跨平台7子命令)
+   228→   228→  * C(2-b): monitor_rules.yaml+match_strategies.yaml→monitor.yaml(4段326行)
+   229→   229→  * D(3-a): 拆MatchStrategyManager(1858→93)+SignalCenter(1497→99)+WatchlistManager(1287→56)
+   230→   230→  * E(3-b): 拆BacktestView(1195→98)+StrategyManager(899→91)+GlobalSearch(775→62)
+   231→   231→- 主控同时做:
+   232→   232→  * 文档瘦身: 删64个文档→6个(README/ARCHITECTURE/MAINTENANCE/DEPLOY/STRATEGY_FACTOR/USER_GUIDE)
+   233→   233→  * 移动docs/v8-data→data/v8-samples(24MB数据归位)
+   234→   234→  * 删docs/tdx-quant(51个通达信官方文档)+agent-ctx(63个QA截图)+tool-results
+   235→   235→  * worklog归档: 13008行→worklog-archive-R5-R13.md.gz(238KB) + 新worklog 216行(纪要+5段)
+   236→   236→  * 更新ARCHITECTURE.md追加R5-R13演进补充章节(110行)
+   237→   237→- QA验证:
+   238→   238→  * 装duckdb+simpleeval(venv缺失)
+   239→   239→  * setsid启动FastAPI(PPID=1常驻)+Next.js
+   240→   240→  * 8端点冒烟全200(/health /api/strategies /api/selections /api/signals /api/sectors /api/monitor/health /api/monitor/match-strategies /api/config)
+   241→   241→  * agent-browser QA: Dashboard大屏正常 + 8Tab切换全通 + 全局搜索Cmd+K弹窗正常 + 零控制台错误 + 截图/tmp/qa-r13-精简后.png(89KB)
+   242→   242→  * 验证拆分后组件: 匹配策略Tab(新建/编辑/测试/复制按钮)+自选股Tab(批量导入)+策略管理(运行历史/复制/删除) 全部功能保留
+   243→   243→
+   244→   244→Stage Summary:
+   245→   245→- 精简效果:
+   246→   246→  * 文档: 64个文件/16142行 → 6个文件/2612行(-84%)
+   247→   247→  * worklog: 13008行 → 216行+归档(-98%)
+   248→   248→  * 脚本: 18个 → 8个(-56%)
+   249→   249→  * 配置: 9个 → 8个(monitor_rules+match_strategies合并为monitor.yaml)
+   250→   250→  * 死代码: 删src/lib/db.ts + src/lib/mock-data.ts + prisma/目录 + .env + 4个db:xxx脚本 + 2个prisma依赖
+   251→   251→  * 巨型组件: 6个1000+行容器 → 6个<100行容器 + 20+子组件(每个<500行)+ shared.ts
+   252→   252→- 功能100%不变: agent-browser验证8Tab全通 + 全局搜索 + 零错误
+   253→   253→- 架构价值: BaseDataAdapter抽象 + factory插件式 + 三层限流(R12) + Pipeline 6步 全部保留
+   254→   254→- 新文档体系: README(入口)→ARCHITECTURE(架构)→MAINTENANCE(运维+8场景提示词)→DEPLOY(部署)→STRATEGY_FACTOR(开发)→USER_GUIDE(用户)→CHANGELOG(变更)
+   255→   255→- 新脚本体系: dev.py(主入口,7子命令) + start_all.sh/ps1(thin wrapper) + init_db/run_selection/reload_config/start_engine + paths.yaml
+   256→   256→- 未解决问题:
+   257→   257→  1. tsc有4个src/下错误(2个502 ResponseInit + page.tsx ok属性 + MatchStrategyEditFields string|number),lint通过不影响运行,后续可修
+   258→   258→  2. docs/下新文档可能仍引用部分旧脚本名(已尽量用dev.py替代)
+   259→   259→  3. config实际8个文件(含duckdb_schema.sql),YAML 7个
+   260→   260→- 下一阶段建议:
+   261→   261→  1. 修复4个tsc错误(低优先级,不影响功能)
+   262→   262→  2. 创建15分钟webDevReview cron(按系统规则)
+   263→   263→  3. 如需进一步精简,可考虑DuckDB→SQLite迁移(用户之前说先不做)
+   264→   264→
+   265→   265→---
+   266→   266→Task ID: R14-实时选股
+   267→   267→Agent: Z.ai Code (Claude, 主控)
+   268→   268→Task: 新增"实时选股"功能 — 用户问"实时选股功能有吗",回答:此前没有,本次实现
+   269→   269→
+   270→   270→Work Log:
+   271→   271→- 现状盘点:
+   272→   272→  * useRealtimeQuotes: 10s 轮询行情/状态/信号(只刷新 Dashboard 大屏,不打分选股)
+   273→   273→  * 顶部"运行全部"按钮: 手动一次性触发 strategyAPI.runAll(),跑完即止
+   274→   274→  * 信号中心: 匹配策略实时告警(实时监控,非实时选股)
+   275→   275→  * 结论: 缺"盘中连续接收行情→连续打分→连续输出新入选股票"的实时选股语义
+   276→   276→- 设计数据流: 定时器 → runAll → 延迟1.2s → list({limit:200}) → 与 prevScoreMap 对比 → 推入 stream + 更新 board
+   277→   277→- 新建 5 个文件:
+   278→   278→  * src/components/quant/realtime/shared.ts (155 行) — 类型 + 工具 + 常量(INTERVAL_OPTIONS/THRESHOLD_OPTIONS/MAX_STREAM_ROUNDS=50/MAX_BOARD_ROWS=200/RUNALL_DELAY_MS=1200)
+   279→   279→  * src/components/quant/realtime/RealtimeControl.tsx (190 行) — 启停按钮 + 间隔ToggleGroup(15s/30s/60s/2min) + 阈值Select(0.02/0.05/0.10) + 清空 + 6 个 StatTile(累计轮数/累计选股/NEW/上次耗时/上次执行/下次执行) + 倒计时进度条
+   280→   280→  * src/components/quant/realtime/RealtimeStream.tsx (145 行) — 流式列表,每轮一个 Card(Collapsible): 轮次编号 + 时间 + 耗时 + NEW/▲/▼ 徽章 + 折叠的 30 个 StockChip
+   281→   281→  * src/components/quant/realtime/RealtimeStockBoard.tsx (190 行) — 去重看板: 8 列(代码/名称/状态/当前分/变化/入选轮数/入选策略/最近入选) + 搜索框 + 5 个筛选按钮(全部/NEW/涨分/跌分/已出)
+   282→   282→  * src/components/quant/RealtimeSelection.tsx (248 行, 容器<260) — 持有定时器+状态, tick() 零依赖靠 ref 读最新值(避免 useEffect 重跑死循环 bug)
+   283→   283→- 修改 1 个文件: src/app/page.tsx
+   284→   284→  * import Radio 图标 + RealtimeSelection 组件
+   285→   285→  * TABS 数组新增 { value: 'realtime', label: '实时选股', icon: Radio } (第 8 个 Tab, 竞价监控前)
+   286→   286→  * TabsList grid-cols-8 → grid-cols-9
+   287→   287→  * main 区域新增 {tab === 'realtime' && <RealtimeSelection />}
+   288→   288→- 关键 bug 修复:
+   289→   289→  * Bug1: tick 用 useCallback 依赖 roundNo/threshold/intervalSec → 每跑完一轮 roundNo 变 → tick 重建 → useEffect 重跑 → 立即又跑下一轮(1秒跑5轮)
+   290→   290→    修复: 用 roundNoRef/thresholdRef/intervalSecRef 同步 ref,tick 改零依赖,useEffect 只依赖 running/intervalSec
+   291→   291→  * Bug2: NEW 计数按 row 算(200 行就算 200 个 NEW),应按 stock_code 去重
+   292→   292→    修复: 加 seenCodesThisRound Set 去重(实际第 1 轮 NEW 从 200 修正为 10)
+   293→   293→- QA 验证(agent-browser + VLM):
+   294→   294→  * bun run lint exit 0
+   295→   295→  * Tab 切换: 实时大屏→实时选股 成功(activeTab=实时选股)
+   296→   296→  * 启动后 4s: 累计轮数=1, NEW=10(去重后), 下次执行=29s 后(30s 间隔)
+   297→   297→  * 等 35s: 累计轮数=2 自动触发, 流式记录(2) 显示 2 个 Card, 第 2 轮 3.16s/策略5/5/200只
+   298→   298→  * 股票看板: 10 行去重股票, 状态徽章(持平), 搜索框+5 筛选按钮, 入选轮数/入选策略列正常
+   299→   299→  * 暂停按钮: 成功停止定时器
+   300→   300→  * 切回实时大屏: 无回归, consoleErrors=[]
+   301→   301→  * Footer: long-page 自然 push-down(bodyHeight=1020 > viewportHeight=577, footer 在底部)
+   302→   302→  * VLM 截图确认: 控制栏+状态条+流式记录+股票看板全部正常渲染
+   303→   303→
+   304→   304→Stage Summary:
+   305→   305→- 新增"实时选股"功能,从无到有
+   306→   306→- 5 个新文件 + 1 个修改文件,总代码 ~930 行
+   307→   307→- 容器 RealtimeSelection 248 行(<500),4 个子组件/shared.ts 均<200 行
+   308→   308→- 后端零改动,复用 strategyAPI.runAll + selectionAPI.list
+   309→   309→- 关键 bug 2 个已修复(tick 依赖死循环 + NEW 计数去重)
+   310→   310→- agent-browser + VLM 端到端 QA 全过
+   311→   311→- Tab 数: 8 → 9 (新增"实时选股")
+   312→   312→- 未解决问题:
+   313→   313→  1. mock 模式下 genSelections 的 score 随机扰动小(±0.02),阈值 0.05 时涨分/跌分较少;real 模式下真实行情波动会触发更多
+   314→   314→  2. 流式记录上限 50 轮(MAX_STREAM_ROUNDS),超过自动丢弃最旧的;股票看板上限 200 只(MAX_BOARD_ROWS)
+   315→   315→  3. 当前 mock 模式每轮股票集合基本固定(因 STOCK_POOL 索引基于 strategy_id.charCodeAt),real 模式下会更动态
+   316→   316→- 下一阶段建议:
+   317→   317→  1. 可考虑加 SSE 推送(替代轮询)以降低延迟,但需后端配合
+   318→   318→  2. 可加"导出实时选股快照"按钮(导出当前 board 为 CSV)
+   319→   319→  3. 可加"自动加入自选股"规则(NEW + 涨分 ≥ 阈值 时自动加入 watchlist)
+   320→   320→
+   321→   321→---
+   322→   322→Task ID: R14-形态预警
+   323→   323→Agent: Z.ai Code (Claude, 主控)
+   324→   324→Task: 用户问"能做监控策略预警吗?例如接近前高没冲过准备回落/下跌枯竭/开盘诱空/开盘诱多/盘中无量诱多/盘中急跌真跌等" — 回答:能做,本次实现 7 类形态预警
+   325→   325→
+   326→   326→Work Log:
+   327→   327→- 现状盘点:
+   328→   328→  * 已有 14 个 alert_templates + 3 个 match_strategies + MonitorEngine + simpleeval 表达式引擎
+   329→   329→  * V8 快照有 91 个字段(HisHigh/HisLow/OpenZAF/MA5Value 等),但 RuleSet.snap_to_variables 只暴露 7 个变量
+   330→   330→  * 现有 14 个零件都是单 tick 阈值型(如 pct_change > 0.095),无形态组合判断
+   331→   331→- 7 类形态实现路径分析:
+   332→   332→  * 易(单 tick 多变量): 开盘诱空/开盘诱多/无量诱多/急跌真跌 — 用扩展变量即可
+   333→   333→  * 中(需前高/前低): 接近前高回落/下跌枯竭/准备反弹 — 用 HisHigh/HisLow 派生 last_vs_high_pct/last_vs_low_pct
+   334→   334→- 后端改动 1 个文件: engine/monitor/rules.py
+   335→   335→  * RuleSet.snap_to_variables 扩展 6 个变量: his_high / his_low / open_pct / ma5 / last_vs_high_pct / last_vs_low_pct / last_vs_open_pct
+   336→   336→  * last_vs_high_pct = (HisHigh - last) / HisHigh (正=还有空间, 0=在前高, 负=破前高)
+   337→   337→  * last_vs_low_pct = (last - HisLow) / HisLow (正=高于前低, 0=在前低, 负=破前低)
+   338→   338→  * last_vs_open_pct = (ZAF - OpenZAF) / 100 (正=盘中拉回, 负=盘中回落)
+   339→   339→- 配置改动 1 个文件: config/monitor.yaml
+   340→   340→  * alert_templates 段新增 7 个形态:
+   341→   341→    1. near_high_reject (📐 接近前高回落): last_vs_high_pct ≤ 3% + 量比 < 1.2 + 跌
+   342→   342→    2. drop_exhaustion (🕳️ 下跌枯竭): 跌 + 缩量 + 接近前低
+   343→   343→    3. open_bait_bears (🪤 开盘诱空): 开盘 < -2% + 盘中拉回 > +1%
+   344→   344→    4. open_bait_bulls (🎣 开盘诱多): 开盘 > +2% + 盘中回落 < -1%
+   345→   345→    5. intraday_low_vol_bait (🫧 无量诱多): 涨 > 2% + 量比 < 0.8
+   346→   346→    6. intraday_real_drop (💥 急跌真跌): 跌 > 3% + 量比 > 1.5 + 主力流出
+   347→   347→    7. rebound_setup (🔄 准备反弹): 接近前低 + 缩量 + 跌幅收窄
+   348→   348→  * match_strategies 段新增 pattern_alerts 套餐(7 个 alert_ref, debounce 120s, 兜底对所有股票生效)
+   349→   349→- 前端新建 4 个文件:
+   350→   350→  * src/components/quant/pattern/shared.ts (240 行) — 7 个形态元信息(emoji/label/scenario/desc/condition/defaultParams/presetSnap/keyVars/risk/advice)
+   351→   351→  * src/components/quant/pattern/PatternCard.tsx (155 行) — 单卡片(emoji+label+场景+condition+关键变量+默认参数+建议操作+启停开关+展开折叠) + PatternLibraryBanner
+   352→   352→  * src/components/quant/pattern/PatternTestDialog.tsx (200 行) — 试跑弹窗(12 字段表单+派生变量实时计算+调 matchStrategyAPI.test+命中结果展示)
+   353→   353→  * src/components/quant/PatternAlertLibrary.tsx (130 行, 容器) — 加载 pattern_alerts 套餐 + 离线 fallback + 启停(乐观更新+回滚) + 试跑
+   354→   354→- 前端修改 1 个文件: src/app/page.tsx
+   355→   355→  * TABS 新增 { value: 'patterns', label: '形态预警', icon: ShieldAlert }(第 9 个 Tab)
+   356→   356→  * TabsList grid-cols-9 → grid-cols-10
+   357→   357→  * main 新增 {tab === 'patterns' && <PatternAlertLibrary />}
+   358→   358→- 离线 fallback 设计:
+   359→   359→  * FastAPI 不可达时, PatternAlertLibrary 用本地 PATTERN_LIST 构造 alerts, 7 个形态默认全启用
+   360→   360→  * 离线模式下启停只改本地状态, toast 提示"离线"
+   361→   361→  * 底部状态条显示"离线模式 · FastAPI 不可达,改动仅本地"
+   362→   362→- Python 逻辑验证(不依赖 FastAPI):
+   363→   363→  * snap_to_variables 派生变量正确(last_vs_high_pct=0.022, last_vs_open_pct=-0.007 等)
+   364→   364→  * 7 个形态 condition 全部能被 simpleeval 正确求值
+   365→   365→  * 3 个测试场景精准命中: near_high_reject / open_bait_bears / intraday_real_drop
+   366→   366→- FastAPI 端到端验证(curl):
+   367→   367→  * POST /api/monitor/match-strategies/pattern_alerts/test 用预设快照 → 命中 near_high_reject(1/7 hits, 符合预期)
+   368→   368→  * 扩展变量全链路打通: snap → snap_to_variables → ExpressionEvaluator → condition 求值
+   369→   369→- agent-browser QA:
+   370→   370→  * 形态预警 Tab 切换成功, 7 个卡片全渲染
+   371→   371→  * 卡片展开: condition/关键变量/默认参数/建议操作/试跑按钮 全显示
+   372→   372→  * 启停开关: 离线模式下 toast 提示正常
+   373→   373→  * 试跑弹窗: 派生变量实时计算 + 12 字段表单 + 命中结果展示
+   374→   374→  * Dashboard 无回归, Footer 正常, dev.log 无错误
+   375→   375→
+   376→   376→Stage Summary:
+   377→   377→- 新增"形态预警库"功能,7 类典型盘中形态预警全部实现
+   378→   378→- 4 个新前端文件 + 1 个后端文件改动 + 1 个配置文件改动,总代码 ~1000 行
+   379→   379→- 后端零侵入: 只扩展 snap_to_variables 暴露 6 个新变量, 不改 MonitorEngine 求值流程
+   380→   380→- 前端离线 fallback: FastAPI 不可达时仍可展示/启停(试跑需 FastAPI)
+   381→   381→- agent-browser + curl + Python 三路验证全过
+   382→   382→- Tab 数: 9 → 10 (新增"形态预警")
+   383→   383→- 7 类形态覆盖用户全部需求:
+   384→   384→  1. 接近前高回落 ✅ (near_high_reject)
+   385→   385→  2. 下跌枯竭 ✅ (drop_exhaustion)
+   386→   386→  3. 准备反弹 ✅ (rebound_setup)
+   387→   387→  4. 开盘诱空 ✅ (open_bait_bears)
+   388→   388→  5. 开盘诱多 ✅ (open_bait_bulls)
+   389→   389→  6. 盘中无量诱多 ✅ (intraday_low_vol_bait)
+   390→   390→  7. 盘中急跌真跌 ✅ (intraday_real_drop)
+   391→   391→- 未解决问题:
+   392→   392→  1. FastAPI 在 sandbox 里每次 Bash 调用结束被杀, 离线 fallback 是应对方案; real 部署无此问题
+   393→   393→  2. 7 个形态的 default_params 是经验值, 用户可通过 matchStrategyAPI.update 调参
+   394→   394→  3. 多 tick 状态机(如"连续 N 日跌")暂未实现, 当前 7 形态都是单 tick 判断; 如需可扩展 MonitorEngine 加历史快照窗口
+   395→   395→- 下一阶段建议:
+   396→   396→  1. 加"形态预警历史命中"页(从 signal_events 查 alert_type IN 7 形态)
+   397→   397→  2. 加"形态预警调参"UI(每个形态的 default_params 可在卡片内编辑)
+   398→   398→  3. 考虑加多 tick 状态: 在 MonitorEngine 维护每只股票最近 N 个 tick 的快照窗口, 支持"连续下跌 N 日"类形态
+   399→   399→
+   400→   400→---
+   401→   401→Task ID: R15-自定义形态构建器
+   402→   402→Agent: Z.ai Code (Claude, 主控)
+   403→   403→Task: 用户问"后续还可以自由加策略,加预警" — 回答:能,本次实现"形态预警构建器",让用户可视化创建/编辑/克隆/删除自定义形态预警
+   404→   404→
+   405→   405→Work Log:
+   406→   406→- 现状盘点:
+   407→   407→  * R14 已有 7 个预设形态(alert_templates 写死在 config/monitor.yaml)
+   408→   408→  * matchStrategyAPI 有完整 CRUD,但只管理"套餐",不能创建新 alert_template
+   409→   409→  * 后端 snap_to_variables 暴露 13 个变量(pct_change/volume_ratio/main_inflow/his_high/his_low/open_pct/ma5/last_vs_high_pct/last_vs_low_pct/last_vs_open_pct)
+   410→   410→  * 前端无"自定义形态"入口,用户无法自由加预警
+   411→   411→- 设计方案: 前端构建器 + localStorage 持久化 + 本地 simpleeval 求值
+   412→   412→  * 自定义形态存 localStorage(key: tdxquant:custom-patterns)
+   413→   413→  * 启停状态存 localStorage(key: tdxquant:custom-patterns-enabled)
+   414→   414→  * 试跑走前端本地求值(new Function + 变量白名单 + and/or/not→&&/||/! 转换)
+   415→   415→  * 预设形态仍走后端套餐,自定义形态仅本地
+   416→   416→- 新建 3 个文件:
+   417→   417→  * src/components/quant/pattern/builder.ts (340 行) — CustomPattern 类型 + VARIABLE_WHITELIST(10变量+desc+example+formula) + deriveVars(与后端 snap_to_variables 对齐) + validateExpr(白名单字符+关键字校验) + evalCondition({param}替换+and/or/not转换+new Function 求值) + extractParams + loadCustomPatterns/saveCustomPatterns + genPatternId + PATTERN_EMOJIS(28个) + DEFAULT_SNAP + deriveKeyVars
+   418→   418→  * src/components/quant/pattern/ConditionEditor.tsx (230 行) — 变量速查面板(点击插入光标处) + 运算符快捷按钮 + {param}插入按钮 + textarea 编辑 + 实时校验求值预览(resolved表达式+派生变量+命中/未命中/错误)
+   419→   419→  * src/components/quant/pattern/PatternBuilderDialog.tsx (480 行) — 构建器主弹窗,3 模式(创建/编辑/克隆) + 左侧表单(基础信息+条件+参数+风险+快照) + 右侧 sticky 实时预览 + emoji选择器 + 参数自动提取 + 保存校验(alert_type正则/label/condition/求值无错)
+   420→   420→- 修改 4 个文件:
+   421→   421→  * src/components/quant/pattern/shared.ts — PatternMeta 加 custom?/id? 字段
+   422→   422→  * src/components/quant/pattern/PatternCard.tsx — 自定义形态加"自定义"badge(虚线边框) + 克隆/编辑/删除按钮 + banner 加 customCount + "新建自定义形态"按钮
+   423→   423→  * src/components/quant/pattern/PatternTestDialog.tsx — 自定义形态走前端本地 evalCondition 求值(预设仍调后端) + 标题/描述/按钮文案动态切换 + meta 查找 fallback 到 initialMeta
+   424→   424→  * src/components/quant/PatternAlertLibrary.tsx (重写, 320 行) — 加载 customPatterns(localStorage) + merge 预设+自定义 + 预设/自定义分区展示 + 创建/编辑/克隆/删除回调 + 自定义启停(localStorage) + 删除确认 AlertDialog
+   425→   425→- 关键 bug 修复(3 个):
+   426→   426→  * Bug1: builder.ts 注释 `/** ... +-*/() ... */` 里的 `*/` 被解析成块注释结束 → 改单行注释
+   427→   427→  * Bug2: PatternBuilderDialog 本地 metaToDraft 与 import 的 builder.metaToDraft 同名冲突(递归调用自己) → 重命名 presetMetaToDraft + 删未用 import
+   428→   428→  * Bug3: 前端 new Function 求值不认识 Python 关键字 and/or/not(simpleeval 用 and/or,JS 用 &&/||) → evalCondition 里加 .replace(/\band\b/gi,'&&').replace(/\bor\b/gi,'||').replace(/\bnot\b/gi,'!')
+   429→   429→- QA 验证(agent-browser + VLM):
+   430→   430→  * bun run lint exit 0 (0 errors 0 warnings)
+   431→   431→  * 形态预警 Tab 正常: 7 预设卡片 + banner "新建自定义形态"按钮
+   432→   432→  * 构建器弹窗正常: 标题"创建自定义形态" + 左侧表单 + 右侧实时预览
+   433→   433→  * 创建流程: 填表单(量价齐升/vol_price_rise/场景/condition) → 填参数(pct_threshold=0.02/vol_ratio=1.5) → 保存 → localStorage 持久化(customCount=1) → 列表展示自定义卡片(虚线边框+"自定义"badge+编辑/删除按钮)
+   434→   434→  * 试跑自定义形态: 标题"自定义·本地求值" + 派生变量实时计算 + 命中结果正确(默认快照未命中 0.015<0.02; 改 ZAF=3.0/Wtb=2.0 后命中 0.03>0.02 && 2.0>1.5)
+   435→   435→  * 编辑自定义形态: 标题"编辑自定义形态" + 字段回填正确(label/alert_type/scenario/condition)
+   436→   436→  * 删除自定义形态: AlertDialog 确认弹窗 → 确认后 localStorage 清空 + 列表恢复
+   437→   437→  * 克隆预设形态: 标题"克隆预设形态" + 字段回填("接近前高回落 (副本)")
+   438→   438→  * Footer: bodyHeight=877 > vh=577, footer 自然 push-down
+   439→   439→  * dev.log 无 error/warn
+   440→   440→
+   441→   441→Stage Summary:
+   442→   442→- 新增"形态预警构建器"功能,用户可自由创建/编辑/克隆/删除自定义形态预警
+   443→   443→- 3 个新文件 + 4 个修改文件,总代码 ~1560 行
+   444→   444→- 前端本地 simpleeval 等价求值(new Function + 变量白名单 + 关键字转换),与后端 snap_to_variables 完全对齐
+   445→   445→- localStorage 持久化: 自定义形态 + 启停状态,刷新不丢失
+   446→   446→- 离线友好: 不依赖后端,sandbox 里也能完整体验(预设形态试跑仍需后端,但自定义形态全本地)
+   447→   447→- agent-browser + VLM 端到端 QA 全过(创建/试跑/编辑/删除/克隆 6 大流程)
+   448→   448→- 3 个 bug 全部修复(注释解析/命名冲突/关键字转换)
+   449→   449→- Tab 数仍为 10(未新增 Tab,在"形态预警"Tab 内扩展)
+   450→   450→- 未解决问题:
+   451→   451→  1. 自定义形态仅本地持久化,后端 MonitorEngine 不认识自定义 alert_type,无法真正触发预警推送(需后端扩展内联 condition 支持)
+   452→   452→  2. 前端求值用 new Function,虽做了白名单校验,但理论上仍有 XSS 风险(用户自己写给自己,可接受)
+   453→   453→  3. 自定义形态的启停状态独立存 localStorage,与预设形态的套餐启停分离(设计如此,但用户可能期望统一)
+   454→   454→- 下一阶段建议:
+   455→   455→  1. 后端扩展: alert_templates 支持前端动态注册(MatchUpdateRequest 的 alert.params 里带 __condition/__label,MonitorEngine 求值时 fallback 到内联 condition)
+   456→   456→  2. 自定义形态导入/导出(JSON 文件),方便分享和备份
+   457→   457→  3. 自定义形态"模板库": 预置更多形态模板(如 MACD 金叉/KDJ 超卖反弹)供克隆
+   458→   458→
+   459→   459→---
+   460→   460→Task ID: 2-a
+   461→   461→Agent: Subagent A (Windows Python 脚本)
+   462→   462→Task: Windows 部署前置工作 (Python 脚本部分) — precheck + install_tqcenter + create_shortcut + dev.py setup 集成
+   463→   463→
+   464→   464→Work Log:
+   465→   465→- 读 worklog.md 了解前序工作 (R5-R15 演进史 + dev.py 7 子命令架构 + adapter_mode mock/real 双模式)
+   466→   466→- 读 scripts/dev.py 全文 (743 行), 定位 cmd_setup 在 310-369 行
+   467→   467→- 新建 scripts/precheck.py (300 行): 跨平台预检, 12 项检查 (Python 版本/pip/bun/tqcenter/Python 依赖/端口/目录可写/DuckDB 文件/通达信终端/tqcenter 路径/配置/磁盘), 支持 --json (供 install.bat 解析) 和 --fix (自动修复可修复项)
+   468→   468→- 新建 scripts/install_tqcenter.py (182 行): Windows 专用 tqcenter 自动安装器, 扫描 6 个通达信常见安装路径, 在每个路径下查 3 个 tqcenter 候选位置 (T0002/hq_cache/PythonLib/tqcenter, T0002/hq_cache/PythonLib, Python/site-packages/tqcenter), 支持 --list (列出候选不安装) 和 --path (手动指定路径), Linux 上跑提示"Windows 专用, 跳过"
+   469→   469→- 新建 scripts/create_shortcut.py (139 行): Windows 桌面快捷方式创建器, 用 PowerShell WScript.Shell COM (避免依赖 pywin32), 创建 3 个快捷方式 (TdxQuant 启动.lnk → start.bat, TdxQuant 停止.lnk → stop.bat, TdxQuant 大屏.url → http://127.0.0.1:3000), 图标用 public/favicon.ico, Linux 上跑提示"仅 Windows 支持"
+   470→   470→- 更新 scripts/dev.py (+53 行 → 796 行): 加 import json; 加 _run_precheck_json() 和 _run_precheck_text() 两个 helper; cmd_setup 加 step 0 (前置 precheck --json, Python 版本/pip FAIL 则直接退出) 和 step 6 (setup 结束后跑 precheck 文本模式输出最终就绪度报告); 现有 setup 流程 (venv + pip install + bun install + init_db + 创建数据目录) 100% 保留
+   471→   471→- 沙箱验证 4 个命令零崩溃:
+   472→   472→  * python3 scripts/precheck.py → exit 1 (Python 3.12 < 3.13 FAIL, 预期), 12 项检查全部执行, 报告正常输出 (通过 7/失败 1/警告 4)
+   473→   473→  * python3 scripts/install_tqcenter.py --list → exit 0, 提示 "tqcenter 是 Windows 专用, 跳过自动安装"
+   474→   474→  * python3 scripts/create_shortcut.py → exit 0, 提示 "快捷方式仅 Windows 支持"
+   475→   475→  * python3 scripts/dev.py --help → exit 0, 7 子命令帮助正常
+   476→   476→- 额外验证: precheck --json 输出合法 JSON (12 项 + summary 段); precheck --fix 在 DuckDB 已存在时静默跳过; precheck --fix --json 组合模式正常; dev.py setup 的 precheck 中止逻辑正确检测到 Python 版本 FAIL 并会中止 (模拟验证); py_compile 4 个文件全部语法 OK; precheck 写测试文件 .precheck_write_test 已正确清理
+   477→   477→
+   478→   478→Stage Summary:
+   479→   479→- 产物清单:
+   480→   480→  * scripts/precheck.py (新建, 300 行) — 跨平台 12 项预检, --json/--fix
+   481→   481→  * scripts/install_tqcenter.py (新建, 182 行) — Windows tqcenter 安装器, --list/--path
+   482→   482→  * scripts/create_shortcut.py (新建, 139 行) — Windows 桌面 3 快捷方式, PowerShell COM
+   483→   483→  * scripts/dev.py (修改, 743→796 行) — cmd_setup 加 precheck 前后置调用 + import json + 2 helper
+   484→   484→- 关键设计决策:
+   485→   485→  1. 零外部依赖: 3 个新 .py 仅用标准库 (argparse/json/platform/re/shutil/socket/subprocess/sys/datetime/pathlib/typing), 不引入 PyYAML (adapter_mode 用正则读), 不引入 pywin32 (用 PowerShell WScript.Shell COM), 不引入 colorama (Windows 用 ctypes 启用 ANSI)
+   486→   486→  2. 跨平台不崩: Linux 跑 precheck 报告 12 项 (Windows 专属项标 WARN "非 Windows, 跳过"); install_tqcenter/create_shortcut 在 Linux 直接提示 "Windows 专用" 并 exit 0
+   487→   487→  3. precheck 退出码: 全过=0, 有警告=0, 有失败=1 (dev.py setup 据此判断是否中止)
+   488→   488→  4. dev.py setup 集成: 前置只检查 python_version + pip 两个关键项 (其他 FAIL/WARN 不中止 setup, 让 setup 尝试修复); 后置跑完整 precheck 报告最终就绪度
+   489→   489→  5. tqcenter 检查按 adapter_mode 分级: real 模式 FAIL (必须装), mock 模式 WARN (可忽略)
+   490→   490→  6. PowerShell 单引号转义: 路径含 Program Files 等空格/特殊字符时, _ps_escape 函数把 ' 转成 ''
+   491→   491→  7. .url 文件用 INI 格式直接写文本 (无需 COM), .lnk 用 PowerShell WScript.Shell COM
+   492→   492→- 行数合规: 3 个新文件均 ≤ 300 行 (300/182/139), dev.py 修改后 796 行 (无 300 行限制, 是现有文件编辑)
+   493→   493→- 已知限制:
+   494→   494→  1. 通达信终端检测仅扫 6 个常见路径, 用户自定义路径需手动 --path
+   495→   495→  2. Python 3.13 要求: 沙箱是 3.12, precheck 会 FAIL (预期行为, Windows 生产环境装 3.13+ 即可通过)
+   496→   496→  3. create_shortcut 假设 start.bat/stop.bat 已由 Subagent B 创建 (本任务不创建 .bat)
+   497→   497→  4. precheck --fix 目前仅修复 duckdb_file (调 init_db.py), 目录缺失已在 check 阶段自动 mkdir
+   498→   498→

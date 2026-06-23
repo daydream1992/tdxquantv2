@@ -455,3 +455,162 @@ Stage Summary:
   1. 后端扩展: alert_templates 支持前端动态注册(MatchUpdateRequest 的 alert.params 里带 __condition/__label,MonitorEngine 求值时 fallback 到内联 condition)
   2. 自定义形态导入/导出(JSON 文件),方便分享和备份
   3. 自定义形态"模板库": 预置更多形态模板(如 MACD 金叉/KDJ 超卖反弹)供克隆
+
+---
+Task ID: 2-a
+Agent: Subagent A (Windows Python 脚本)
+Task: Windows 部署前置工作 (Python 脚本部分) — precheck + install_tqcenter + create_shortcut + dev.py setup 集成
+
+Work Log:
+- 读 worklog.md 了解前序工作 (R5-R15 演进史 + dev.py 7 子命令架构 + adapter_mode mock/real 双模式)
+- 读 scripts/dev.py 全文 (743 行), 定位 cmd_setup 在 310-369 行
+- 新建 scripts/precheck.py (300 行): 跨平台预检, 12 项检查 (Python 版本/pip/bun/tqcenter/Python 依赖/端口/目录可写/DuckDB 文件/通达信终端/tqcenter 路径/配置/磁盘), 支持 --json (供 install.bat 解析) 和 --fix (自动修复可修复项)
+- 新建 scripts/install_tqcenter.py (182 行): Windows 专用 tqcenter 自动安装器, 扫描 6 个通达信常见安装路径, 在每个路径下查 3 个 tqcenter 候选位置 (T0002/hq_cache/PythonLib/tqcenter, T0002/hq_cache/PythonLib, Python/site-packages/tqcenter), 支持 --list (列出候选不安装) 和 --path (手动指定路径), Linux 上跑提示"Windows 专用, 跳过"
+- 新建 scripts/create_shortcut.py (139 行): Windows 桌面快捷方式创建器, 用 PowerShell WScript.Shell COM (避免依赖 pywin32), 创建 3 个快捷方式 (TdxQuant 启动.lnk → start.bat, TdxQuant 停止.lnk → stop.bat, TdxQuant 大屏.url → http://127.0.0.1:3000), 图标用 public/favicon.ico, Linux 上跑提示"仅 Windows 支持"
+- 更新 scripts/dev.py (+53 行 → 796 行): 加 import json; 加 _run_precheck_json() 和 _run_precheck_text() 两个 helper; cmd_setup 加 step 0 (前置 precheck --json, Python 版本/pip FAIL 则直接退出) 和 step 6 (setup 结束后跑 precheck 文本模式输出最终就绪度报告); 现有 setup 流程 (venv + pip install + bun install + init_db + 创建数据目录) 100% 保留
+- 沙箱验证 4 个命令零崩溃:
+  * python3 scripts/precheck.py → exit 1 (Python 3.12 < 3.13 FAIL, 预期), 12 项检查全部执行, 报告正常输出 (通过 7/失败 1/警告 4)
+  * python3 scripts/install_tqcenter.py --list → exit 0, 提示 "tqcenter 是 Windows 专用, 跳过自动安装"
+  * python3 scripts/create_shortcut.py → exit 0, 提示 "快捷方式仅 Windows 支持"
+  * python3 scripts/dev.py --help → exit 0, 7 子命令帮助正常
+- 额外验证: precheck --json 输出合法 JSON (12 项 + summary 段); precheck --fix 在 DuckDB 已存在时静默跳过; precheck --fix --json 组合模式正常; dev.py setup 的 precheck 中止逻辑正确检测到 Python 版本 FAIL 并会中止 (模拟验证); py_compile 4 个文件全部语法 OK; precheck 写测试文件 .precheck_write_test 已正确清理
+
+Stage Summary:
+- 产物清单:
+  * scripts/precheck.py (新建, 300 行) — 跨平台 12 项预检, --json/--fix
+  * scripts/install_tqcenter.py (新建, 182 行) — Windows tqcenter 安装器, --list/--path
+  * scripts/create_shortcut.py (新建, 139 行) — Windows 桌面 3 快捷方式, PowerShell COM
+  * scripts/dev.py (修改, 743→796 行) — cmd_setup 加 precheck 前后置调用 + import json + 2 helper
+- 关键设计决策:
+  1. 零外部依赖: 3 个新 .py 仅用标准库 (argparse/json/platform/re/shutil/socket/subprocess/sys/datetime/pathlib/typing), 不引入 PyYAML (adapter_mode 用正则读), 不引入 pywin32 (用 PowerShell WScript.Shell COM), 不引入 colorama (Windows 用 ctypes 启用 ANSI)
+  2. 跨平台不崩: Linux 跑 precheck 报告 12 项 (Windows 专属项标 WARN "非 Windows, 跳过"); install_tqcenter/create_shortcut 在 Linux 直接提示 "Windows 专用" 并 exit 0
+  3. precheck 退出码: 全过=0, 有警告=0, 有失败=1 (dev.py setup 据此判断是否中止)
+  4. dev.py setup 集成: 前置只检查 python_version + pip 两个关键项 (其他 FAIL/WARN 不中止 setup, 让 setup 尝试修复); 后置跑完整 precheck 报告最终就绪度
+  5. tqcenter 检查按 adapter_mode 分级: real 模式 FAIL (必须装), mock 模式 WARN (可忽略)
+  6. PowerShell 单引号转义: 路径含 Program Files 等空格/特殊字符时, _ps_escape 函数把 ' 转成 ''
+  7. .url 文件用 INI 格式直接写文本 (无需 COM), .lnk 用 PowerShell WScript.Shell COM
+- 行数合规: 3 个新文件均 ≤ 300 行 (300/182/139), dev.py 修改后 796 行 (无 300 行限制, 是现有文件编辑)
+- 已知限制:
+  1. 通达信终端检测仅扫 6 个常见路径, 用户自定义路径需手动 --path
+  2. Python 3.13 要求: 沙箱是 3.12, precheck 会 FAIL (预期行为, Windows 生产环境装 3.13+ 即可通过)
+  3. create_shortcut 假设 start.bat/stop.bat 已由 Subagent B 创建 (本任务不创建 .bat)
+  4. precheck --fix 目前仅修复 duckdb_file (调 init_db.py), 目录缺失已在 check 阶段自动 mkdir
+
+---
+Task ID: 2-b
+Agent: Subagent B (Windows 启动器+文档)
+Task: Windows 部署前置工作 (启动器脚本+文档部分) — 9 个文件: 5 .bat + 1 .vbs + 1 XML + 1 README + 1 example.yaml + 更新 DEPLOY.md
+
+Work Log:
+- 读 worklog.md 了解前序工作: R5-R15 演进史 + Subagent A (Task 2-a) 已创建 scripts/precheck.py (300 行) + scripts/install_tqcenter.py (182 行) + scripts/create_shortcut.py (139 行) + 更新 scripts/dev.py (集成 precheck)
+- 读 config/app.yaml (85 行) 了解配置结构 (app/server/paths/tqcenter/api/mock 6 段)
+- 读 docs/DEPLOY.md (247 行) 定位 Windows 章节 (第 56-124 行), 了解现有"前置检查/步骤/常见问题"结构
+- 新建 install.bat (98 行): 一键安装 5 步 (precheck → dev.py setup → install_tqcenter → create_shortcut → precheck 最终报告), 每步分隔线+状态, 失败即 exit, 完成 banner 提示双击 start.bat
+- 新建 start.bat (28 行): banner "TdxQuant 启动中..." → dev.py start → 打印服务地址 http://127.0.0.1:3000 + API http://127.0.0.1:8000/health
+- 新建 stop.bat (22 行): 简洁停止 + 状态打印
+- 新建 restart.bat (28 行): stop → 等 3 秒 → start, 避免端口未释放
+- 新建 tdxquant-launcher.vbs (53 行, UTF-8 with BOM): WScript.Shell 后台 Run (mode 0 隐藏), 弹 MsgBox "5 秒后打开浏览器", Sleep 5000 后 Run http://127.0.0.1:3000, On Error Resume Next 错误兜底
+- 新建 tdxquant-healthcheck.bat (38 行): curl :8000/health + curl :3000/ 各打 HTTP 状态码, 结束 start http://127.0.0.1:3000 开浏览器
+- 新建 windows/TdxQuantAutoStart.xml (83 行): Task Scheduler Schema v1.3, BootTrigger Delay=PT30S, Principal=Users 组 SID S-1-5-32-545, RestartOnFailure 3 次/PT1M 间隔, Exec wscript.exe "%USERPROFILE%\tdxquant\tdxquant-launcher.vbs", 顶部 HTML 注释 + 导入命令说明
+- 新建 WINDOWS_README.md (273 行): 10 节 (前置条件/3 步开箱/验证/Real 模式切换/日常使用/预检脚本/FAQ/文件清单/更多文档/进阶提示), 含性能调优表+自定义策略示例, emoji 友好
+- 新建 config/app.windows.example.yaml (127 行): 复制 app.yaml 结构, adapter_mode=real, paths 用 Windows \\ 反斜杠, tqcenter.global_qps 调保守 (8), mock 段注释掉, channels 段留 # 填你的 webhook 占位
+- 更新 docs/DEPLOY.md (247→252 行): 在 "## 🪟 Windows 生产部署" 章节顶部插入 3 行提示框 (引用 WINDOWS_README.md + 一键安装/启动/静默后台 一句话), 现有内容 100% 保留
+- 验证:
+  * 9 个文件全部创建 (ls 确认)
+  * 5 个 .bat 顶部一致: @echo off + chcp 65001 >nul + cd /d "%~dp0" + setlocal EnableDelayedExpansion
+  * VBS 文件头 3 字节 = EF BB BF (UTF-8 BOM), Windows Notepad/WScript 友好, 中文不乱码
+  * XML 用 xml.dom.minidom 解析通过 (root=Task, BootTrigger×1, Exec×1)
+  * YAML 用 PyYAML safe_load 通过 (adapter_mode=real, paths.duckdb=data\\duckdb\\quant.db, mock 段不存在)
+  * WINDOWS_README.md 273 行 (在 250-350 范围内)
+- 已知限制:
+  1. .bat 用 %ERRORLEVEL%+EnableDelayedExpansion 做错误处理, Windows 7+ 都支持
+  2. VBS 的 objShell.Run(cmdLine, 0, False) 第三参 False 表示不等待,适合后台启动;但若 dev.py start 本身需要轮询健康检查,则 VBS 会立即返回(用户已看到 MsgBox)
+  3. XML 用 %USERPROFILE%\tdxquant\ 作为通用路径占位, Task Scheduler 不会自动展开环境变量,用户必须手动替换为实际路径(已在文件顶部 HTML 注释和 WINDOWS_README.md 中说明)
+  4. install.bat 第 3 步 install_tqcenter.py 失败不退出 (tqcenter 可能用户已手动装),仅警告;第 4 步 create_shortcut.py 失败也不退出 (不影响主功能)
+  5. healthcheck.bat 用 curl,Windows 10 1803+ 自带 curl.exe,旧版 Windows 需手动装 curl 或改用 PowerShell Invoke-WebRequest
+
+Stage Summary:
+- 产物清单:
+  * install.bat (新建, 98 行) — 一键安装器, 5 步串行 + 状态/错误处理
+  * start.bat (新建, 28 行) — 启动 + 打印服务地址
+  * stop.bat (新建, 22 行) — 停止
+  * restart.bat (新建, 28 行) — stop→等3秒→start
+  * tdxquant-launcher.vbs (新建, 53 行, UTF-8 BOM) — VBScript 静默后台启动 + 5 秒后开浏览器
+  * tdxquant-healthcheck.bat (新建, 38 行) — curl 双端口 + 开浏览器
+  * windows/TdxQuantAutoStart.xml (新建, 83 行) — Task Scheduler 开机自启模板
+  * WINDOWS_README.md (新建, 273 行) — Windows 5 分钟开箱即用指南
+  * config/app.windows.example.yaml (新建, 127 行) — Windows Real 模式配置示例
+  * docs/DEPLOY.md (修改, +5 行) — Windows 章节顶部加新手提示框
+- 关键设计决策:
+  1. 所有 .bat 顶部一致: @echo off + chcp 65001 >nul (UTF-8) + cd /d "%~dp0" (切到脚本所在目录,关键!不依赖用户双击位置) + setlocal EnableDelayedExpansion (支持 !VAR! 延迟展开)
+  2. install.bat 错误处理分级: precheck FAIL 直接退出 (环境不达标), setup FAIL 直接退出 (依赖装不上), install_tqcenter/create_shortcut FAIL 仅警告不退出 (非关键)
+  3. VBS 用 UTF-8 with BOM (EF BB BF), 解决中文 MsgBox 在中文 Windows (默认 GBK ANSI) 下的乱码问题; 用 Write 写纯文本后用 bash printf 追加 BOM
+  4. VBS 用 WScript.Shell.Run(cmd, 0, False) 三参: 0=隐藏窗口, False=不等待; 适合开机自启场景, 无 cmd 黑窗
+  5. XML 用 %USERPROFILE%\tdxquant\ 作为通用路径占位, 因 Task Scheduler 不展开环境变量, 用户必须手动替换; 顶部 HTML 注释 + WINDOWS_README.md 双重说明
+  6. XML 用 Users 组 SID (S-1-5-32-545) 而非具体用户名, 通用性更强; RunLevel=LeastPrivilege 不需要管理员
+  7. XML RestartOnFailure: 3 次/PT1M 间隔, 配合 BootTrigger PT30S 延迟, 给网络/通达信足够启动时间
+  8. app.windows.example.yaml 与 app.yaml 同结构, 但 adapter_mode=real + paths 用 Windows \\ + tqcenter.global_qps 调保守 (8) + mock 段注释掉, 用户复制即用
+  9. WINDOWS_README.md 用 emoji + 表格 + 代码块 + 引用块, 让新手看着舒服; 含性能调优表 + 自定义策略示例, 不仅是部署指南还是入门手册
+  10. docs/DEPLOY.md 仅在 Windows 章节顶部插 5 行提示框, 不破坏原有内容 (前置检查/步骤 1-7/常见问题 全保留)
+- 与 Subagent A 协作:
+  * install.bat 调用 Subagent A 的 3 个脚本: scripts/precheck.py + scripts/install_tqcenter.py + scripts/create_shortcut.py
+  * install.bat 还调用更新后的 scripts/dev.py setup (含 precheck 前后置)
+  * start/stop/restart.bat 调用 scripts/dev.py 的 start/stop 子命令 (7 个子命令的 2 个)
+  * WINDOWS_README.md 引用 scripts/precheck.py --fix 作为自动修复工具
+  * 0 冲突: 启动器/文档 与 Python 脚本 职责清晰分离, 接口稳定 (命令行参数)
+
+---
+Task ID: 3
+Agent: Z.ai Code (Claude, 主控)
+Task: Windows 部署前置工作主控收尾 — 验收两个 subagent 产物 + requirements.txt 加 tqcenter 注释 + 全量 lint + 沙箱预演 precheck + 给用户列出"还需要提供什么"
+
+Work Log:
+- 盘点项目 Windows 就绪度: dev.py 已跨平台 / requirements.txt 已拆 uvloop / next.config.ts 已 standalone / 配置路径全相对 / real_adapter 已容错导入 tqcenter — 底子已具备, 缺"开箱即用"层
+- 派 2 个 subagent 并行:
+  * Subagent A (Task 2-a): 创建 3 个 Python 脚本 (precheck/install_tqcenter/create_shortcut) + 更新 dev.py setup 集成 precheck
+  * Subagent B (Task 2-b): 创建 9 个 Windows 文件 (5 .bat + 1 .vbs + 1 XML + 1 README + 1 example.yaml) + 更新 DEPLOY.md
+- 主控收尾改动:
+  * 更新 requirements.txt (+10 行): tqcenter 段加详细注释 (不在 PyPI/通达信终端附带/自动安装命令/手动安装命令/详见 WINDOWS_README.md), 不取消注释 (避免 Linux/macOS pip install 失败)
+  * 沙箱跑 precheck.py 验证: 12 项检查全执行, 通过 7/失败 1 (Python 3.12<3.13 预期)/警告 4 (tqcenter/端口 3000 占用/通达信终端/tqcenter 路径 — 后 3 项 Linux 跳过)
+  * 沙箱跑 install_tqcenter.py --list / create_shortcut.py: 都正确提示 "Windows 专用, 跳过" 并 exit 0
+  * bun run lint exit 0 (零 ESLint 错误/警告)
+  * py_compile 4 个 .py 文件全过 (dev.py/precheck/install_tqcenter/create_shortcut)
+- 文件清单最终验收 (ls 确认):
+  * 根目录 5 .bat + 1 .vbs: install.bat / start.bat / stop.bat / restart.bat / tdxquant-healthcheck.bat / tdxquant-launcher.vbs
+  * windows/: TdxQuantAutoStart.xml (Task Scheduler 开机自启模板)
+  * WINDOWS_README.md (273 行, 5 分钟开箱即用指南)
+  * scripts/: precheck.py (300) / install_tqcenter.py (182) / create_shortcut.py (139) — 3 个新 Python 脚本
+  * scripts/dev.py (743→796, +53 行 setup 集成 precheck)
+  * config/app.windows.example.yaml (127 行, Real 模式配置示例)
+  * requirements.txt (+10 行 tqcenter 注释)
+  * docs/DEPLOY.md (+5 行, Windows 章节顶部插新手提示框)
+- 总计: 12 个新文件 + 3 个修改文件
+
+Stage Summary:
+- Windows 部署"开箱即用"套件交付完成, 用户在 Windows 上的体验:
+  1. 解压项目 → 双击 install.bat → 一键装齐 (Python venv + pip + bun + DuckDB + tqcenter + 桌面快捷方式)
+  2. 双击 start.bat (或桌面"TdxQuant 启动") → 浏览器自动打开大屏
+  3. 切 Real 模式: 改 config/app.yaml 一行 + restart.bat
+  4. 静默后台启动: tdxquant-launcher.vbs (无 cmd 黑窗)
+  5. 开机自启: 导入 windows/TdxQuantAutoStart.xml 到 Task Scheduler
+  6. 出问题: python scripts/precheck.py 一键诊断 + --fix 自动修复
+- 跨平台兼容验证: Linux 沙箱跑 precheck/install_tqcenter/create_shortcut 三脚本都正确"降级提示", 零崩溃
+- 零外部依赖: 3 个新 Python 脚本仅用标准库 (不引入 PyYAML/pywin32/colorama), 与 dev.py 风格一致
+- 文档闭环: WINDOWS_README.md (新手入口) → docs/DEPLOY.md (详细部署) → docs/MAINTENANCE.md (运维) 三层文档体系
+- 未解决问题:
+  1. 通达信终端检测仅扫 6 个常见路径 (C:\new_tdx / D:\new_tdx / C:\通达信 / D:\通达信 / C:\Program Files\通达信 / D:\Program Files\通达信), 用户自定义路径需手动 python scripts/install_tqcenter.py --path <path>
+  2. Task Scheduler XML 用 %USERPROFILE%\tdxquant\ 作为占位, 用户必须手动替换为实际路径 (Task Scheduler 不展开环境变量)
+  3. tdxquant-healthcheck.bat 用 curl, Windows 10 1803+ 自带 curl.exe, 旧版需手动装 curl 或改 PowerShell Invoke-WebRequest
+  4. create_shortcut.py 假设 public/favicon.ico 存在 (项目已有), 若用户换图标需改 .ico 路径
+  5. Real 模式实际可用性依赖通达信终端 API 稳定性, sandbox 无法验证 (Linux 没 tqcenter)
+- 给用户的"还需要提供什么"清单 (见下方主消息):
+  1. 通达信金融终端安装路径 (用于 tqcenter 自动安装)
+  2. Windows 安装目标路径 (建议 D:\tdxquant, 避免中文/空格)
+  3. (可选) 飞书/钉钉 webhook URL (用于预警推送)
+  4. (可选) 是否需要开机自启 (yes 则导入 Task Scheduler XML)
+  5. (可选) 是否需要换桌面图标 (默认用 public/favicon.ico)
+- 下一阶段建议:
+  1. 用户拿到 Windows 机器后, 双击 install.bat 跑一遍, 反馈 precheck 报告
+  2. 如 tqcenter 自动安装失败, 提供 --path 参数手动指定
+  3. Real 模式连真机后, 跑一遍 smoke test (curl /api/monitor?action=status 看 adapter=real)
+  4. 长期: 可考虑打包成 .zip 一键发行包 (含 venv 离线依赖), 当前是源码部署

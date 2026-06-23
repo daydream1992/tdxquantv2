@@ -20,6 +20,15 @@ openpyxl>=3.1
 # 表达式引擎（评分公式 / 预警条件）
 simpleeval>=1.0
 
+# =====================================================================
+# tqcenter (通达信官方 Python API) - Windows 生产环境必装, Linux/macOS 跳过
+# =====================================================================
+# tqcenter 不在 PyPI 公开仓库, 由通达信终端安装目录附带.
+# 自动安装 (推荐): python scripts/install_tqcenter.py
+# 手动安装: pip install --no-index --find-links="<通达信>\T0002\hq_cache\PythonLib" tqcenter
+# 详见: WINDOWS_README.md 第 3 步 / docs/DEPLOY.md §Windows
+# tqcenter>=1.0; sys_platform == "win32"  # 取消注释并指定路径后启用
+
 # 可选（生产环境才需要）
 # pydantic>=2.0  # FastAPI 已自带
 # httpx>=0.27    # 测试客户端

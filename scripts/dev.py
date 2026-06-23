@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import platform
 import re
@@ -148,6 +149,35 @@ def _http_status(url: str, timeout: float = 2.0) -> Optional[int]:
         return e.code
     except Exception:
         return None
+
+
+def _run_precheck_json() -> Optional[dict]:
+    """运行 precheck.py --json, 返回解析后的 dict (失败返回 None).
+
+    用于 cmd_setup 前置检查: 若 precheck.py 不存在或 JSON 解析失败返回 None,
+    调用方应跳过 precheck 流程 (不阻塞 setup).
+    """
+    precheck = PROJECT_ROOT / "scripts" / "precheck.py"
+    if not precheck.exists():
+        return None
+    r = _run([sys.executable, str(precheck), "--json"],
+             capture_output=True, text=True)
+    if not r.stdout:
+        return None
+    try:
+        return json.loads(r.stdout)
+    except Exception:
+        return None
+
+
+def _run_precheck_text() -> int:
+    """运行 precheck.py (文本模式), 输出最终就绪度报告. 返回 precheck 退出码."""
+    precheck = PROJECT_ROOT / "scripts" / "precheck.py"
+    if not precheck.exists():
+        warn("precheck.py 不存在, 跳过最终就绪度检查")
+        return 0
+    r = _run([sys.executable, str(precheck)])
+    return r.returncode
 
 
 # ─── 1. start ──────────────────────────────────────────────────
@@ -312,6 +342,24 @@ def cmd_setup(args) -> int:
     """venv + 装依赖 + 初始化 DuckDB."""
     info("环境初始化开始 ...")
 
+    # 0. 前置预检: Python 版本/pip 失败则直接退出 (避免无谓的 venv/依赖安装)
+    info("运行预检 (precheck --json) ...")
+    pre = _run_precheck_json()
+    if pre:
+        critical_fail = False
+        for chk in pre.get("checks", []):
+            if chk.get("id") in ("python_version", "pip") and chk.get("status") == "FAIL":
+                err(f"预检关键失败: {chk['name']} — {chk.get('detail', '')}")
+                if chk.get("fix"):
+                    err(f"修复建议: {chk['fix']}")
+                critical_fail = True
+        if critical_fail:
+            err("setup 已中止 (请先修复上述关键问题, 再重试 setup)")
+            return 1
+        ok("前置预检通过 (Python 版本 + pip 可用)")
+    else:
+        warn("precheck.py 不可用或 JSON 解析失败, 跳过前置预检")
+
     # 1. 创建 venv
     venv_dir = PROJECT_ROOT / ".venv"
     if venv_dir.exists():
@@ -363,6 +411,11 @@ def cmd_setup(args) -> int:
     # 5. 创建数据目录
     for d in ("data/logs", "data/csv", "data/excel", "data/duckdb"):
         (PROJECT_ROOT / d).mkdir(parents=True, exist_ok=True)
+
+    # 6. 最终就绪度报告 (precheck 文本模式)
+    print()
+    info("最终就绪度检查 (precheck) ...")
+    _run_precheck_text()
 
     print()
     ok("环境就绪! 下一步: python scripts/dev.py start")

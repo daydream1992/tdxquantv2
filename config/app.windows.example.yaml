@@ -1,0 +1,127 @@
+# TdxQuant Engine Windows 生产环境配置示例
+# ============================================================
+# 用途: Windows + 通达信终端 + Real 模式 的开箱即用配置
+#
+# 使用方法:
+#   1. 复制本文件为 app.yaml:  copy app.windows.example.yaml app.yaml
+#   2. 按需修改:
+#      - paths 段: 路径用 Windows 反斜杠(\\ 转义)
+#      - tqcenter 段: 调整 global_qps / burst 适配你的终端响应速度
+#      - channels 段: 填飞书/钉钉 webhook(见 config\channels.yaml)
+#   3. 启动通达信终端并登录
+#   4. 双击 start.bat
+#
+# 与 app.yaml(默认 mock 模式) 的差异:
+#   - adapter_mode: real
+#   - paths 全用 Windows 反斜杠
+#   - tqcenter.global_qps 调保守(8, 默认是 10),保护终端 GUI 线程
+#   - mock 段注释掉(real 模式不用)
+# ============================================================
+
+app:
+  name: TdxQuant Engine
+  version: "1.0"
+  # 数据适配器模式: real (Windows + 通达信终端已登录)
+  # - mock : 沙箱开发,基于 V8 CSV 样本(默认 app.yaml 用这个)
+  # - real : Windows 生产,调用 tqcenter API 拉真实行情(本配置)
+  adapter_mode: real
+  log_level: INFO
+
+server:
+  # Windows 本地访问,绑 127.0.0.1 即可(如需局域网访问改 0.0.0.0)
+  host: 127.0.0.1
+  port: 8000
+
+paths:
+  # Windows 路径用双反斜杠 \\ 转义,或用单正斜杠 / (Python pathlib 都支持)
+  # 这里统一用 \\ 与 Windows 习惯一致
+
+  # DuckDB 单文件数据库
+  duckdb: data\\duckdb\\quant.db
+  # CSV 导出根目录(选股结果/信号日志)
+  csv_output: data\\csv
+  # Excel 导出根目录(批量导出)
+  excel_output: data\\excel
+  # 运行日志目录
+  logs: data\\logs
+  # 策略 YAML 目录(热加载扫描,改完跑 dev.py reload 即生效)
+  strategies_dir: strategies
+  # 监控配置统一入口(含 monitor/alert_templates/dedup/match_strategies 4 段)
+  monitor: config\\monitor.yaml
+  # 通道配置(飞书/钉钉/webhook)
+  channels: config\\channels.yaml
+
+tqcenter:
+  # tq.initialize(__file__) 入参,传 __file__ 字符串占位(代码内自动替换)
+  initialize_file: __file__
+  # subscribe_hq 单次最多 100 只,分批 50(可配置,默认 50 是平衡值)
+  # Windows 终端响应慢时可降到 20-30
+  subscribe_batch_size: 50
+  # get_market_data 单次最大 K 线条数,超出自动分批续传
+  kline_max_count: 24000
+  # Windows Real 模式核心限流参数(令牌桶)
+  # - 保护通达信终端 GUI 线程,避免被 FastAPI 高频请求拖慢
+  # - Mock 模式不调 acquire_or_skip,本配置不生效
+  # - 配置变更通过 POST /api/config/reload 热加载(reset_limiter 重建)
+  # - acquire_or_skip 警告频繁时,降到 5;终端响应快可调到 12-15
+  global_qps: 8
+  burst: 16
+  acquire_timeout: 5
+
+# FastAPI 端点限流(Mock/Real 都生效,保护 Next 代理层 CPU)
+api:
+  rate_limit:
+    enabled: true
+    rules:
+      # /health 是 FastAPI 根健康端点;/api/monitor/health 是引擎健康度(前端高频轮询)
+      - path_prefix: "/health"
+        qpm: 120
+      - path_prefix: "/api/monitor/health"
+        qpm: 120
+      # 个股板块归属(hover 高频,缓存兜底)
+      - path_prefix: "/api/stocks"
+        qpm: 30
+      # 板块查询 GET 宽松,POST refresh 重操作严格
+      - path_prefix: "/api/sectors"
+        qpm: 60
+        methods: ["GET"]
+      - path_prefix: "/api/sectors"
+        qpm: 3
+        methods: ["POST"]
+      # 监控/信号常规轮询
+      - path_prefix: "/api/monitor"
+        qpm: 60
+      - path_prefix: "/api/signals"
+        qpm: 60
+    default_qpm: 60
+    cleanup_interval: 300
+
+# Mock 段: Real 模式不用,注释掉
+# mock:
+#   data_dir: ./data/v8-samples/data
+#   push_interval: 3
+
+# ============================================================
+# 通道配置入口(实际内容在 config\channels.yaml)
+# ============================================================
+# 飞书/钉钉 webhook 在 config\channels.yaml 里配置:
+#
+# feishu:
+#   enabled: true
+#   webhook: https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx     # 填你的 webhook
+#   secret: ""                                                          # (可选)签名校验密钥
+#
+# dingtalk:
+#   enabled: false
+#   webhook: https://oapi.dingtalk.com/robot/send?access_token=xxxxx   # 填你的 webhook
+#   secret: ""                                                          # (可选)加签密钥
+#
+# tdx_warn:
+#   enabled: false
+#   # 通达信客户端弹窗(Windows only,Real 模式生效)
+#   terminal_path: C:\new_tdx\TDXW.exe                                  # 填你的通达信安装路径
+#
+# csv_log:
+#   enabled: true
+#   path: data\\logs\\signals.csv
+# ============================================================

@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ============================================================
+  TdxQuant 开机自启任务计划模板
+  ============================================================
+  功能: Windows 开机后 30 秒自动后台启动 TdxQuant 服务
+  方式: 调用 wscript.exe 执行 tdxquant-launcher.vbs (静默,无 cmd 黑窗)
+
+  导入命令 (管理员 cmd 运行):
+    schtasks /create /tn "TdxQuant" /xml windows\TdxQuantAutoStart.xml /f
+
+  查看任务:
+    schtasks /query /tn "TdxQuant" /v
+
+  立即运行(测试):
+    schtasks /run /tn "TdxQuant"
+
+  删除任务:
+    schtasks /delete /tn "TdxQuant" /f
+
+  使用前请把 %USERPROFILE%\tdxquant 替换为你的实际项目路径
+  例如: C:\Users\john\tdxquant
+  ============================================================
+-->
+<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>TdxQuant Engine 开机自启: 开机后 30 秒后台启动 FastAPI + Next.js 服务</Description>
+    <URI>\TdxQuant</URI>
+  </RegistrationInfo>
+
+  <Triggers>
+    <BootTrigger>
+      <Enabled>true</Enabled>
+      <!-- 开机后延迟 30 秒启动,给网络/通达信终端留出启动时间 -->
+      <Delay>PT30S</Delay>
+    </BootTrigger>
+  </Triggers>
+
+  <Principals>
+    <!-- Users 组 (SID: S-1-5-32-545),任何登录用户都能触发,无需管理员 -->
+    <Principal id="Author">
+      <GroupId>S-1-5-32-545</GroupId>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <!-- 单次任务执行时间上限: 1 天(避免异常卡死) -->
+    <ExecutionTimeLimit>P1D</ExecutionTimeLimit>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+
+    <!-- 失败重试: 最多 3 次,每次间隔 60 秒 -->
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+
+    <IdleSettings>
+      <Duration>PT10M</Duration>
+      <WaitTimeout>PT1H</WaitTimeout>
+      <StopOnIdleEnd>true</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+  </Settings>
+
+  <Actions Context="Author">
+    <Exec>
+      <Command>wscript.exe</Command>
+      <Arguments>"%USERPROFILE%\tdxquant\tdxquant-launcher.vbs"</Arguments>
+      <WorkingDirectory>%USERPROFILE%\tdxquant</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
