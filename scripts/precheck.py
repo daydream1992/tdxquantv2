@@ -27,6 +27,14 @@ from typing import Any, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 IS_WINDOWS = platform.system() == "Windows"
+
+# Windows 控制台默认 GBK，强制 stdout/stderr UTF-8，避免 emoji/中文 UnicodeEncodeError
+# （print_report 打印 ✅/❌，在非 start.bat 启动的纯命令行会因 GBK 崩溃）
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        pass
 # 通达信终端常见安装路径 (Windows), 含用户实际路径 K:\txdlianghua
 TDX_COMMON_PATHS = [
     r"C:\new_tdx", r"D:\new_tdx", r"E:\new_tdx", r"F:\new_tdx",

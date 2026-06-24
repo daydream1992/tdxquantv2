@@ -68,6 +68,7 @@ import json
 import logging
 import os
 import random
+import re
 import threading
 import time
 from contextlib import contextmanager
@@ -117,15 +118,19 @@ def _gen_id() -> int:
 
 
 def _convert_sql(sql: str) -> str:
-    """把 DuckDB 风格 ``?`` 占位符转换为 PG 风格 ``$1, $2, ...``。
+    """把 DuckDB/PG 风格 SQL 归一为 psycopg2 + QuestDB 9.x 方言。
 
-    QuestDB PG wire 只支持 ``$N`` 参数化（不支持 ``?``）。
-    简单解析：跳过字符串字面量内的 ``?``，按出现顺序替换。
+    两步处理：
+    1. **方言归一**：PG 标准函数 → QuestDB 等价物（QuestDB 9.x 不识别
+       ``CURRENT_DATE`` / ``CURRENT_TIMESTAMP``，报 ``Invalid column``）。
+    2. **占位符转换**：DuckDB 风格 ``?`` → psycopg2 风格 ``%s``（psycopg2 在
+       ``execute(sql, params)`` 时按 ``%s`` 经 PG wire bind 下发；直接用 ``$N``
+       会报 ``undefined bind variable: 0``）。
     """
+    sql = _PG_DIALECT_RE.sub(lambda m: _PG_DIALECT_MAP[m.group(1)], sql)
     out: list[str] = []
     i = 0
     n = len(sql)
-    idx = 1
     in_single = False
     in_double = False
     while i < n:
@@ -137,12 +142,22 @@ def _convert_sql(sql: str) -> str:
             in_double = not in_double
             out.append(ch)
         elif ch == "?" and not in_single and not in_double:
-            out.append(f"${idx}")
-            idx += 1
+            out.append("%s")
         else:
             out.append(ch)
         i += 1
     return "".join(out)
+
+
+# QuestDB 9.x 不支持的 PG 标准函数 → 等价物
+# - CURRENT_DATE 返回 DATE，与 TIMESTAMP 列做 ``>=`` 会 "Invalid date"，
+#   故用 timestamp_floor('d', now()) 取「今天零点」的 TIMESTAMP
+# - CURRENT_TIMESTAMP → now()
+_PG_DIALECT_MAP: dict[str, str] = {
+    "CURRENT_TIMESTAMP": "now()",
+    "CURRENT_DATE": "timestamp_floor('d', now())",
+}
+_PG_DIALECT_RE = re.compile(r"\b(" + "|".join(_PG_DIALECT_MAP) + r")\b")
 
 
 # ----------------------------------------------------------------------------
@@ -246,6 +261,13 @@ class QuestDBStore:
                 dbname=self._database,
                 connect_timeout=self._connect_timeout,
                 application_name="tdxquant-engine",
+                # TCP keepalive：长连接空闲时主动探测，避免被中间层 / QuestDB idle
+                # 超时断开（10053 Software caused connection abort，日志里 11 次）。
+                # _exec_retry 已能断线重连自愈，此处从源头减少断连次数。
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=3,
             )
             # QuestDB PG wire 不支持事务，设 autocommit
             self._conn.autocommit = True
@@ -305,6 +327,40 @@ class QuestDBStore:
         self.close()
         self._connect()
 
+    @staticmethod
+    def _conn_error(exc: Exception) -> bool:
+        """判断是否为连接级错误（应触发重连而非直接失败）。"""
+        s = str(exc).lower()
+        return any(k in s for k in ("connection", "closed", "abort", "reset", "eof", "broken pipe"))
+
+    def _exec_retry(self, op: Any, label: str) -> Any:
+        """执行 ``op(conn) -> result``；连接断开时自动重连并重试一次。
+
+        长耗时操作（如 real 模式全市场选股 ~9 分钟）期间 psycopg2 连接会被
+        QuestDB / 网络闲置关闭，若不重连，后续写入会连续 ``connection already closed``。
+        ``op`` 接收 psycopg2 connection，自行管理 cursor（含 close）。
+        """
+        if not self._available or self._conn is None:
+            self._connect()
+        if not self._available:
+            raise RuntimeError("QuestDB 不可用")
+        for attempt in (1, 2):
+            try:
+                with self._lock:
+                    return op(self._conn)
+            except Exception as exc:  # noqa: BLE001
+                if attempt == 1 and self._conn_error(exc):
+                    logger.warning("QuestDB %s 连接断开，重连后重试: %s", label, exc)
+                    self._available = False
+                    self._conn = None
+                    try:
+                        self._connect()
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("QuestDB 重连失败: %s", e)
+                    if self._available:
+                        continue
+                raise
+
     @property
     def connection(self) -> Any:
         """底层 psycopg2 连接（用于高级用法）。"""
@@ -327,9 +383,11 @@ class QuestDBStore:
 
         url = f"http://{self._host}:{self._http_port}/exec"
         try:
-            resp = requests.post(
+            # QuestDB 9.x 的 /exec 只接受 GET（query 在 URL）；8.x 时代 GET/POST 均可
+            # 改用 GET 保证 8.x/9.x 双兼容（POST 在 9.x 返回 405 Method Not Allowed）
+            resp = requests.get(
                 url,
-                data={"query": sql},
+                params={"query": sql},
                 timeout=self._connect_timeout * 2,
             )
             resp.raise_for_status()
@@ -420,26 +478,30 @@ class QuestDBStore:
             受影响行数（QuestDB PG wire 不返回精确 rowcount，固定 ``-1``）。
         """
         if not self._available:
-            logger.debug("QuestDB 不可用，execute 跳过: %s", sql[:80])
-            return -1
-        with self._lock:
+            self._connect()
+            if not self._available:
+                logger.debug("QuestDB 不可用，execute 跳过: %s", sql[:80])
+                return -1
+        pg_sql = _convert_sql(sql)
+
+        def _op(conn: Any) -> int:
+            cur = conn.cursor()
             try:
-                pg_sql = _convert_sql(sql)
-                cur = self._conn.cursor()
                 if params is not None:
                     cur.execute(pg_sql, params)
                 else:
                     cur.execute(pg_sql)
+            finally:
                 cur.close()
-                return -1
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "execute 失败: %s\nSQL: %s\nparams: %s", exc, sql[:200], params
-                )
-                # 连接断开时标记不可用，下次自动重连
-                if "connection" in str(exc).lower() or "closed" in str(exc).lower():
-                    self._available = False
-                raise
+            return -1
+
+        try:
+            return self._exec_retry(_op, "execute")
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "execute 失败: %s\nSQL: %s\nparams: %s", exc, sql[:200], params
+            )
+            raise
 
     def executemany(self, sql: str, params_list: list[tuple | list | dict]) -> int:
         """批量执行（用于 INSERT 多行）。
@@ -448,18 +510,25 @@ class QuestDBStore:
             受影响行数（固定 ``-1``）。
         """
         if not self._available:
-            logger.debug("QuestDB 不可用，executemany 跳过: %d 行", len(params_list))
-            return -1
-        with self._lock:
-            try:
-                pg_sql = _convert_sql(sql)
-                cur = self._conn.cursor()
-                cur.executemany(pg_sql, params_list)
-                cur.close()
+            self._connect()
+            if not self._available:
+                logger.debug("QuestDB 不可用，executemany 跳过: %d 行", len(params_list))
                 return -1
-            except Exception as exc:  # noqa: BLE001
-                logger.error("executemany 失败: %s\nSQL: %s", exc, sql[:200])
-                raise
+        pg_sql = _convert_sql(sql)
+
+        def _op(conn: Any) -> int:
+            cur = conn.cursor()
+            try:
+                cur.executemany(pg_sql, params_list)
+            finally:
+                cur.close()
+            return -1
+
+        try:
+            return self._exec_retry(_op, "executemany")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("executemany 失败: %s\nSQL: %s", exc, sql[:200])
+            raise
 
     def query(self, sql: str, params: tuple | list | dict | None = None) -> pd.DataFrame:
         """查询并返回 DataFrame。
@@ -472,63 +541,87 @@ class QuestDBStore:
             ``pd.DataFrame``，空结果也有正确列名；QuestDB 不可用时返回空 DataFrame。
         """
         if not self._available:
-            logger.debug("QuestDB 不可用，query 返回空: %s", sql[:80])
-            return pd.DataFrame()
-        with self._lock:
+            self._connect()
+            if not self._available:
+                logger.debug("QuestDB 不可用，query 返回空: %s", sql[:80])
+                return pd.DataFrame()
+        pg_sql = _convert_sql(sql)
+
+        def _op(conn: Any) -> pd.DataFrame:
+            cur = conn.cursor()
             try:
-                pg_sql = _convert_sql(sql)
-                cur = self._conn.cursor()
                 if params is not None:
                     cur.execute(pg_sql, params)
                 else:
                     cur.execute(pg_sql)
                 cols = [d[0] for d in cur.description] if cur.description else []
                 rows = cur.fetchall()
+            finally:
                 cur.close()
-                return pd.DataFrame(rows, columns=cols)
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "query 失败: %s\nSQL: %s\nparams: %s", exc, sql[:200], params
-                )
-                return pd.DataFrame()
+            df = pd.DataFrame(rows, columns=cols)
+            # SQL NULL 经 psycopg2→None，pandas 建 float 列时被转成 np.nan；
+            # 统一回转为 None，避免下游 ``x or default`` 守卫对 nan 失效
+            # （bool(np.nan)==True）导致 JSON 序列化报 "nan not JSON compliant" 500
+            df = df.astype(object).where(pd.notna(df), None)
+            return df
+
+        try:
+            return self._exec_retry(_op, "query")
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "query 失败: %s\nSQL: %s\nparams: %s", exc, sql[:200], params
+            )
+            return pd.DataFrame()
 
     def fetchone(self, sql: str, params: tuple | list | dict | None = None) -> tuple | None:
         """查询单行。"""
         if not self._available:
-            return None
-        with self._lock:
+            self._connect()
+            if not self._available:
+                return None
+        pg_sql = _convert_sql(sql)
+
+        def _op(conn: Any) -> tuple | None:
+            cur = conn.cursor()
             try:
-                pg_sql = _convert_sql(sql)
-                cur = self._conn.cursor()
                 if params is not None:
                     cur.execute(pg_sql, params)
                 else:
                     cur.execute(pg_sql)
-                row = cur.fetchone()
+                return cur.fetchone()
+            finally:
                 cur.close()
-                return row
-            except Exception as exc:  # noqa: BLE001
-                logger.error("fetchone 失败: %s\nSQL: %s", exc, sql[:200])
-                return None
+
+        try:
+            return self._exec_retry(_op, "fetchone")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("fetchone 失败: %s\nSQL: %s", exc, sql[:200])
+            return None
 
     def fetchall(self, sql: str, params: tuple | list | dict | None = None) -> list[tuple]:
         """查询所有行（list of tuple）。"""
         if not self._available:
-            return []
-        with self._lock:
+            self._connect()
+            if not self._available:
+                return []
+        pg_sql = _convert_sql(sql)
+
+        def _op(conn: Any) -> list[tuple]:
+            cur = conn.cursor()
             try:
-                pg_sql = _convert_sql(sql)
-                cur = self._conn.cursor()
                 if params is not None:
                     cur.execute(pg_sql, params)
                 else:
                     cur.execute(pg_sql)
-                rows = cur.fetchall()
+                return cur.fetchall()
+            finally:
                 cur.close()
-                return rows
-            except Exception as exc:  # noqa: BLE001
-                logger.error("fetchall 失败: %s\nSQL: %s", exc, sql[:200])
-                return []
+
+        try:
+            return self._exec_retry(_op, "fetchall")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("fetchall 失败: %s\nSQL: %s", exc, sql[:200])
+            return []
 
     # ------------------------------------------------------------------
     # 事务（QuestDB PG wire 无事务，这里保持接口兼容，实际 no-op）

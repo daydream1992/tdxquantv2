@@ -206,8 +206,9 @@ def cmd_start(args) -> int:
     (PROJECT_ROOT / "data" / "logs").mkdir(parents=True, exist_ok=True)
 
     # 0. 先停旧服务 (避免端口冲突, 与原 start_all.sh 行为一致)
+    # --no-fastapi/--no-next 时保留未重启的服务，避免误杀在跑的另一半
     info("停旧服务 ...")
-    _stop_services()
+    _stop_services(keep_fastapi=args.no_fastapi, keep_next=args.no_next)
     time.sleep(1)
 
     # 1. 启动 FastAPI
@@ -270,12 +271,17 @@ def cmd_start(args) -> int:
 
 
 # ─── 2. stop ───────────────────────────────────────────────────
-def _stop_services() -> int:
-    """跨平台杀进程, 返回杀掉的进程数. 仅匹配本项目相关进程."""
+def _stop_services(*, keep_fastapi: bool = False, keep_next: bool = False) -> int:
+    """跨平台杀进程, 返回杀掉的进程数. 仅匹配本项目相关进程.
+
+    keep_fastapi/keep_next 为 True 时跳过对应端口（供 ``start --no-fastapi``/
+    ``--no-next`` 保留未重启的服务，避免误杀）。
+    """
     stopped = 0
+    ports = [p for p, keep in ((8000, keep_fastapi), (3000, keep_next)) if not keep]
     if IS_LINUX_LIKE:
         # 按端口 (8000/3000) 精准停
-        for port in (8000, 3000):
+        for port in ports:
             try:
                 r = subprocess.run(["lsof", "-ti", f":{port}"],
                                    capture_output=True, text=True, timeout=5)
@@ -318,32 +324,42 @@ def _stop_services() -> int:
             except Exception:
                 pass
     elif IS_WINDOWS:
-        # PowerShell: 匹配 commandline 含项目目录 + uvicorn/next/bun 的进程
-        root = str(PROJECT_ROOT).replace("'", "''")
-        ps_script = (
-            f"$root = '{root}';\n"
-            "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {\n"
-            "  $_.CommandLine -and\n"
-            "  ($_.CommandLine -match 'uvicorn|next-server|next dev|bun run') -and\n"
-            "  $_.CommandLine -match [regex]::Escape($root)\n"
-            "} | ForEach-Object {\n"
-            "  Write-Output ($_.ProcessId.ToString() + '|' + $_.Name);\n"
-            "  Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue\n"
-            "}"
-        )
-        try:
-            r = subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
-                capture_output=True, text=True, timeout=30,
-            )
-            for line in r.stdout.strip().splitlines():
-                line = line.strip()
-                if "|" in line:
-                    pid, name = line.split("|", 1)
-                    ok(f"停止 PID {pid} ({name})")
-                    stopped += 1
-        except Exception as e:
-            warn(f"PowerShell 停止失败: {e}")
+        # Windows: 按监听端口精准杀进程。
+        # 旧实现靠 PowerShell 匹配 commandline+项目根路径，但 uvicorn/bun 命令行不含
+        # 项目根（K:\tdxquantv2），导致漏杀 → 重启时旧进程占端口、新进程起不来。
+        # 改用 netstat 定位监听端口的 PID（与 Linux lsof 同思路），最可靠。
+        for port in ports:
+            try:
+                r = subprocess.run(
+                    ["netstat", "-ano"], capture_output=True, text=True, timeout=15,
+                    # Windows netstat 输出含 GBK 字节；PYTHONUTF8=1 下 text=True 默认
+                    # utf-8 解码会 UnicodeDecodeError → r.stdout=None → splitlines 崩，
+                    # 导致 stop 静默失效（杀不掉旧进程，重启时端口冲突）。
+                    # errors="replace" 容错坏字节（PID/端口为 ASCII，解析不受影响）
+                    encoding="utf-8", errors="replace",
+                )
+                seen: set[str] = set()
+                for line in r.stdout.splitlines():
+                    upper = line.upper()
+                    if f":{port} " in line and "LISTENING" in upper:
+                        m = re.search(r"\s+(\d+)\s*$", line.strip())
+                        if not m:
+                            continue
+                        pid = m.group(1)
+                        if pid in seen or pid == "0":
+                            continue
+                        seen.add(pid)
+                        try:
+                            subprocess.run(
+                                ["taskkill", "/F", "/PID", pid],
+                                capture_output=True, timeout=10,
+                            )
+                            ok(f"停止端口 {port} PID {pid}")
+                            stopped += 1
+                        except Exception:
+                            pass
+            except Exception as e:
+                warn(f"停止端口 {port} 失败: {e}")
     return stopped
 
 

@@ -257,7 +257,17 @@ class CleanDataStep(PipelineStep):
             try:
                 # P1-3 真实接口: evaluate(formula, variables_dict)
                 # 此处公式可能引用 df 列, 用 df 列构造 variables
-                variables = {col: df[col] for col in df.columns if col != field}
+                # tqcenter 部分字段（如 SCancel）声明为 str 但参与算术公式，
+                # 统一 to_numeric 归一，避免 str+int 拼接报 "can only concatenate
+                # str (not int) to str"；errors='coerce' 保留非数值列原样
+                variables = {}
+                for col in df.columns:
+                    if col == field:
+                        continue
+                    s = df[col]
+                    if s.dtype == object:
+                        s = pd.to_numeric(s, errors="coerce")
+                    variables[col] = s
                 result = evaluator.evaluate(formula, variables)
                 if isinstance(result, pd.Series):
                     df[field] = result

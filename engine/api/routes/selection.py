@@ -25,6 +25,31 @@ from engine.api.schemas import (
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_float(v: Any, default: float = 0.0) -> float:
+    """float 转换，容忍 None / np.nan。
+
+    QuestDBStore 出口已把 np.nan 清成 None，此处为 JSON 序列化前的防御性守卫：
+    ``bool(np.nan) is True`` 会使 ``x or default`` 失效，导致 NaN 泄漏进响应触发 500。
+    """
+    if v is None or pd.isna(v):
+        return default
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(v: Any, default: int = 0) -> int:
+    """int 转换，容忍 None / np.nan（``int(np.nan)`` 会抛 ValueError）。"""
+    if v is None or pd.isna(v):
+        return default
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
 router = APIRouter(tags=["selection"])
 
 
@@ -304,8 +329,8 @@ def _rows_from_df(df: pd.DataFrame, cfg: Any = None) -> list[SelectionRowRespons
                 strategy_name=strategy_name,
                 stock_code=str(row.get("stock_code", "")),
                 stock_name=str(row.get("stock_name", "")),
-                score=float(row.get("total_score") or 0.0),
-                rank=int(row.get("rank") or 0),
+                score=_safe_float(row.get("total_score")),
+                rank=_safe_int(row.get("rank")),
                 factors=factors_list,
                 run_at=_to_str(row.get("created_at")) or _to_str(row.get("run_date")) or "",
             )
