@@ -18,7 +18,7 @@ import yaml
 
 from engine.channels.base import BaseChannel, ChannelPayload, ChannelResult
 from engine.channels.csv_log import CsvLogChannel
-from engine.channels.feishu import FeishuChannel
+from engine.channels.feishu_v2 import FeishuChannel
 from engine.channels.tdx_warn import TdxWarnChannel
 from engine.channels.websocket import WebSocketChannel
 
