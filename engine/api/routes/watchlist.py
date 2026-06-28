@@ -73,20 +73,54 @@ class WatchlistAddResponse(BaseModel):
 @router.get("", response_model=list[WatchlistItem], summary="列出当前监控池")
 async def list_watchlist(
     state: Any = Depends(get_state),
+    storage: Any = Depends(get_storage),
 ) -> list[WatchlistItem]:
-    """列出 ``EngineState`` 中所有活跃订阅（含 strategy_id 归属）。"""
+    """列出当前监控池。
+
+    活跃订阅来自 ``EngineState`` 内存；退订(active=false)历史来自
+    ``monitor_subscriptions`` 表，使前端"退订"筛选与 inactive 统计可用
+    (此前 list 只返回活跃，导致 inactive 恒 0、退订筛选永远空)。
+    """
     subs = state.list_subscriptions()
-    return [
-        WatchlistItem(
-            stock_code=str(s.get("stock_code", "")),
-            strategy_id=str(s.get("strategy_id", "")),
-            subscriber=str(s.get("subscriber", "")),
-            subscribed_at=str(s.get("subscribed_at", "")),
-            active=bool(s.get("active", True)),
-            batch_no=int(s.get("batch_no", 0) or 0),
+    active_codes: set[str] = set()
+    out: list[WatchlistItem] = []
+    for s in subs:
+        code = str(s.get("stock_code", ""))
+        active_codes.add(code)
+        out.append(
+            WatchlistItem(
+                stock_code=code,
+                strategy_id=str(s.get("strategy_id", "")),
+                subscriber=str(s.get("subscriber", "")),
+                subscribed_at=str(s.get("subscribed_at", "")),
+                active=True,
+                batch_no=int(s.get("batch_no", 0) or 0),
+            )
         )
-        for s in subs
-    ]
+    # 追加 monitor_subscriptions 表的退订记录 (active=false 且不在当前活跃列表)
+    if storage is not None:
+        try:
+            if storage.table_exists("monitor_subscriptions"):
+                df = storage.query(
+                    "SELECT stock_code, strategy_id, subscriber, subscribed_at, batch_no "
+                    "FROM monitor_subscriptions WHERE active = false"
+                )
+                for _, r in df.iterrows():
+                    code = str(r.get("stock_code", ""))
+                    if code and code not in active_codes:
+                        out.append(
+                            WatchlistItem(
+                                stock_code=code,
+                                strategy_id=str(r.get("strategy_id", "") or ""),
+                                subscriber=str(r.get("subscriber", "") or ""),
+                                subscribed_at=str(r.get("subscribed_at", "") or ""),
+                                active=False,
+                                batch_no=int(r.get("batch_no", 0) or 0),
+                            )
+                        )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("查 monitor_subscriptions 退订记录失败: %s", exc)
+    return out
 
 
 @router.post("", response_model=WatchlistAddResponse, summary="批量加入监控")
@@ -252,9 +286,10 @@ def _persist_subscription(
     try:
         if not storage.table_exists("monitor_subscriptions"):
             return
-        # 同 stock_code 旧记录先 DELETE，再插新记录
+        # 同 stock_code 旧 active 记录先软删除（QuestDB 无 DELETE，用 UPDATE 归档）
         storage.execute(
-            "DELETE FROM monitor_subscriptions WHERE stock_code = ?",
+            "UPDATE monitor_subscriptions SET active = false, unsubscribed_at = now() "
+            "WHERE stock_code = ? AND active = true",
             [code],
         )
         storage.execute(
@@ -270,50 +305,22 @@ def _persist_subscription(
 
 
 def _deactivate_subscription(storage: Any, code: str) -> None:
-    """移除监控时把 monitor_subscriptions 中该 code 的 active=true 记录置为 active=false。
+    """移除监控时把 monitor_subscriptions 中该 code 的 active=true 记录归档为 active=false。
 
-    保留行做历史归档（unsubscribed_at 标记退订时间），与
-    ``engine/monitor/engine.py:_on_new_day`` 的 ``DELETE FROM monitor_subscriptions
-    WHERE active = false`` 形成闭环（每日跨日才真正清理归档行）。
-
-    实现采用 DELETE-then-INSERT 而非 UPDATE，规避 DuckDB 索引下 UPDATE 的
-    "Failed to delete all rows from index" bug（与 _persist_subscription 同模式）。
+    原地 UPDATE（保留 strategy_id/subscriber/subscribed_at/batch_no，补 unsubscribed_at）。
+    QuestDB 是 append-only 列存，不支持 ``DELETE FROM``（9.x 报 ``unexpected token [FROM]``），
+    故退订用 ``UPDATE active = false`` 软删除；归档行查询按 ``active = true`` 过滤，互不影响。
     """
     if storage is None or not hasattr(storage, "table_exists"):
         return
     try:
         if not storage.table_exists("monitor_subscriptions"):
             return
-        # 读现有 active=true 行（保留 strategy_id/subscriber/subscribed_at）
-        df = storage.query(
-            "SELECT strategy_id, subscriber, subscribed_at, batch_no "
-            "FROM monitor_subscriptions WHERE stock_code = ? AND active = true",
-            [code],
-        )
-        if df.empty:
-            return
-        # 删旧 active=true 行
+        # QuestDB 无 DELETE：原地软删除（归档），保留原订阅信息
         storage.execute(
-            "DELETE FROM monitor_subscriptions WHERE stock_code = ? AND active = true",
+            "UPDATE monitor_subscriptions SET active = false, unsubscribed_at = now() "
+            "WHERE stock_code = ? AND active = true",
             [code],
         )
-        # 插入 active=false 归档行（保留原订阅信息 + unsubscribed_at）
-        for _, row in df.iterrows():
-            storage.execute(
-                """
-                INSERT INTO monitor_subscriptions
-                    (id, strategy_id, stock_code, subscriber, subscribed_at,
-                     unsubscribed_at, active, batch_no)
-                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, false, ?)
-                """,
-                [
-                    _gen_id(),
-                    str(row.get("strategy_id") or ""),
-                    code,
-                    str(row.get("subscriber") or ""),
-                    row.get("subscribed_at"),
-                    int(row.get("batch_no") or 0),
-                ],
-            )
     except Exception as exc:  # noqa: BLE001
         logger.debug("deactivate monitor_subscriptions 失败: %s", exc)

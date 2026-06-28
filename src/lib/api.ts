@@ -294,7 +294,7 @@ export const strategyAPI = {
       body: JSON.stringify({ action: 'disable_all' }),
     }),
   runAll: () =>
-    fetchAPI<{ ok: boolean; results: Array<{ id: string; count: number }> }>('/api/strategies', {
+    fetchAPI<{ ok: boolean; results: Array<{ id: string; count: number; ok: boolean; error?: string }> }>('/api/strategies', {
       method: 'POST',
       body: JSON.stringify({ action: 'run_all' }),
     }),

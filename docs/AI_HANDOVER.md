@@ -6,8 +6,12 @@
 > **核心目标**：让接手的 AI 能在 30 分钟内理解项目全貌，并按「实盘接入流程」章节
 > 快速把项目从 Mock 模式切换到 Real 模式（通达信实盘数据）。
 >
-> **最后更新**：R20（2026-06-23）
-> **当前状态**：R19 验收完成，tqcenter 29 API 全覆盖，QuestDB 迁移完成
+> **最后更新**：R21（2026-06-24）
+> **当前状态**：R19 验收 + **R21 实盘真机验证通过（real 模式端到端打通，24 只选股落库）**；
+> tqcenter 29 API 全覆盖，QuestDB 迁移完成
+>
+> ⚠️ **改存储层 / 升级 QuestDB / 排查 real 模式前，先读 [`docs/QUESTDB9_REALMODE_FIXES.md`](QUESTDB9_REALMODE_FIXES.md)**
+> （R21 实战经验：QuestDB 9.x 方言兼容清单 + 11 个修复 + 维护 SOP + 经验教训）。
 
 ---
 
@@ -317,13 +321,17 @@ curl http://127.0.0.1:9000/    :: 应返回 200 (Web 控制台)
 docker logs tdxquant-questdb --tail 20
 ```
 
-**方式 B: 原生二进制（无 Docker 时用）**
+**方式 B: 原生二进制（无 Docker / Docker Hub 不可达时用，国内推荐）**
 ```cmd
-:: 下载 questdb-windows-amd64.zip 解压到 K:\questdb\
-K:\questdb\questdb.exe start -d K:\questdb\data
+:: 下载 questdb-*-rt-windows-x86-64.tar.gz（-rt 自带 JRE，无需另装 Java）解压到 K:\questdb\
+::   https://github.com/questdb/questdb/releases
+
+:: 启动（questdb.exe install 需管理员；非管理员用 java -m 直跑，最稳）
+cd K:\questdb\bin
+java -m io.questdb/io.questdb.ServerMain -d K:\questdb\bin\qdbroot
 
 :: 验证
-curl http://127.0.0.1:9000/
+curl http://127.0.0.1:9000/exec?query=SELECT%201    :: 应返回 JSON
 ```
 
 **或双击 `start-questdb.bat`**（自动检测 docker，无 docker 时打印下载指南）。
@@ -383,8 +391,8 @@ python scripts\dev.py daemon
 ### Step 5 — 验证实盘接入成功（1 分钟）
 
 ```cmd
-:: 1. 引擎状态应显示 adapter_mode=real
-curl http://127.0.0.1:8000/api/monitor?action=status
+:: 1. 引擎状态应显示 adapter_mode=real（注意路由是 /api/monitor/status）
+curl http://127.0.0.1:8000/api/monitor/status
 :: 期望: {"engine_status":"running","adapter_mode":"real",...}
 
 :: 2. 查看启动日志，应出现:
@@ -533,6 +541,12 @@ missing = [a for a in API_REGISTRY if a not in real_m]
 ---
 
 ## 七、QuestDB 存储层（R18 迁移）
+
+> ⚠️ **R21 实测补充（重要）**：R18 迁移代码按 PostgreSQL 方言写，**在真实 QuestDB 9.x 上有
+> 6 类不兼容**（`/exec` 只接受 GET、占位符需 `%s` 非 `$1`、不支持 `CURRENT_DATE`/
+> `CURRENT_TIMESTAMP`/`DELETE FROM`、designated timestamp 列 INSERT 必填）。这些已在 R21 集中
+> 修复并兜底（见 `questdb_store._convert_sql` / `_http_exec`），**新写 SQL 勿再用 PG 方言**。
+> 完整清单见 [`docs/QUESTDB9_REALMODE_FIXES.md` §二](QUESTDB9_REALMODE_FIXES.md)。
 
 ### 7.1 为什么从 DuckDB 迁移到 QuestDB
 
@@ -791,6 +805,10 @@ curl -X POST http://127.0.0.1:8000/api/config/reload
 6. **`send_user_block` 是追加非覆盖** — 更新板块前必须先 `clear_sector`
 7. **`subscribe_hq` 上限 100 只** — 自动分批 50（可配置 `tqcenter.subscribe_batch_size`）
 8. **`get_market_data` 单次最多 24000 条** — 自动分批续传（按 end_time 倒推）
+9. **QuestDB 9.x 不支持 `DELETE FROM`**（R21）— 退订/清理一律 `UPDATE active=false` 软删除；归档行按 `active=true` 过滤隔离
+10. **designated timestamp 列 INSERT 必填**（R21）— `selection_results.created_at` 等时序列每次 INSERT 必须显式赋值，否则报 `insert statement must populate timestamp`
+11. **`get_market_data` 的 `count` 不可传 -1**（R21）— 无界拉取会 hang；`real_adapter` 已在 `count<=0` 时兜底 250
+12. **选股 endpoint 必须 `asyncio.to_thread`**（R21）— `run_strategy` 同步且 real 模式耗时数分钟，直接调会阻塞整个事件循环
 
 ### 11.2 设计约束
 
@@ -945,6 +963,7 @@ Stage Summary:
 | 文档 | 用途 | 何时读 |
 |---|---|---|
 | **本文档 (AI_HANDOVER.md)** | AI 交接总览 + 实盘接入流程 | **新会话第一份必读** |
+| `docs/QUESTDB9_REALMODE_FIXES.md` | **R21 实战**：QuestDB 9.x 方言清单 + 11 修复 + 维护 SOP + 经验教训 | 改存储层 / 升级 QuestDB / 排查 real 模式时读 |
 | `worklog.md` | 工作日志（最近 5 段 + 项目纪要） | 改代码前必读 |
 | `docs/maintenance/ARCHITECTURE.md` | 5 层架构详解 + R5-R18 演进 | 改 engine/ 代码前读 |
 | `docs/CHANGELOG.md` | 变更日志（R5-R18） | 了解历史迭代 |
@@ -975,4 +994,4 @@ Stage Summary:
 ---
 
 **本文档随项目演进持续更新。每次重大修改后，维护者需更新对应章节。**
-**最后更新**：R20（2026-06-23）· **当前状态**：R19 验收完成，tqcenter 29/29 API 全覆盖
+**最后更新**：R21（2026-06-24）· **当前状态**：R19 验收 + R21 实盘真机验证通过，tqcenter 29/29 API 全覆盖

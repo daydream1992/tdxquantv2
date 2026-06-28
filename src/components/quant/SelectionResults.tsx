@@ -351,9 +351,9 @@ export function SelectionResults() {
             <Label className="text-xs text-muted-foreground">最低得分</Label>
             <Input
               type="number"
-              step="0.1"
+              step="1"
               min="0"
-              max="1"
+              max="100"
               value={minScore}
               onChange={(e) => setMinScore(e.target.value)}
               className="h-8 w-24 border-quant"

@@ -7,7 +7,9 @@
 import { NextResponse } from 'next/server'
 
 const FASTAPI_PORT = '8000'
-const FASTAPI_TIMEOUT_MS = 3_000
+// 5s 超时：engine 健康 <200ms，3s 在 Node→127.0.0.1:8000 偶发抖动时会误触发 mock 降级
+// (signals 曾 3 次调用 1 次静默返回假数据)。5s 显著减少误降级，降级时仍由各 route 调 fallback。
+const FASTAPI_TIMEOUT_MS = 5_000
 
 /** 尝试转发到 FastAPI；超时/不可达返回 null（由调用方降级） */
 export async function tryFastAPI(
@@ -550,7 +552,7 @@ export function genSelections(strategyId?: string, limit = 20): SelectionRow[] {
     const count = Math.min(s.last_run_stocks || 8, 10)
     for (let i = 0; i < count; i++) {
       const stock = STOCK_POOL[(s.strategy_id.charCodeAt(0) + i) % STOCK_POOL.length]
-      const score = +(0.95 - i * 0.025 - Math.random() * 0.02).toFixed(3)
+      const score = +(90 - i * 2.5 - Math.random() * 2).toFixed(1)
       rows.push({
         run_id: `R${s.strategy_id.toUpperCase()}20260616`,
         strategy_id: s.strategy_id,

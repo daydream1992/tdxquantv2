@@ -410,41 +410,48 @@ def _query_snapshot_stocks(storage: Any, code: str) -> list[SectorStockResponse]
         return []
 
     # 联表查 selection_results 取 stock_name + total_score
+    # 注: QuestDB 9.x 不支持 `run_id = (SELECT ... ORDER BY ... LIMIT 1)` 标量子查询比较
+    # (报 "left operand must be a TIMESTAMP, found: SYMBOL")，改为两步查询避免子查询。
     code_to_info: dict[str, dict[str, Any]] = {}
     if codes and _table_exists(storage, "selection_results") and snap_strategy_id:
         try:
-            # 取该策略最近一次 run 的全部选股结果
-            placeholders = ", ".join(["?"] * len(codes))
-            sql = (
-                "SELECT stock_code, stock_name, total_score, rank "
-                "FROM selection_results "
-                f"WHERE strategy_id = ? AND stock_code IN ({placeholders}) "
-                "AND run_id = ("
-                "  SELECT run_id FROM selection_results "
-                "  WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1"
-                ") "
-                "ORDER BY rank ASC"
+            # 第 1 步: 单独取该策略最近一次 run_id (ORDER BY created_at 单查可正常工作)
+            run_df = storage.query(
+                "SELECT run_id FROM selection_results "
+                "WHERE strategy_id = ? ORDER BY created_at DESC LIMIT 1",
+                [snap_strategy_id],
             )
-            params = [snap_strategy_id, *codes, snap_strategy_id]
-            df = storage.query(sql, params)
-            for _, r in df.iterrows():
-                code_to_info[str(r["stock_code"])] = {
-                    "name": str(r.get("stock_name", "") or ""),
-                    "score": float(r.get("total_score") or 0.0),
-                    "rank": int(r.get("rank") or 0),
-                }
+            if run_df is not None and not run_df.empty:
+                latest_run_id = str(run_df.iloc[0]["run_id"])
+                # 第 2 步: 用 run_id + stock_code IN 取详情
+                placeholders = ", ".join(["?"] * len(codes))
+                sql = (
+                    "SELECT stock_code, stock_name, total_score, rank "
+                    "FROM selection_results "
+                    f"WHERE strategy_id = ? AND stock_code IN ({placeholders}) AND run_id = ? "
+                    "ORDER BY rank ASC"
+                )
+                params = [snap_strategy_id, *codes, latest_run_id]
+                df = storage.query(sql, params)
+                for _, r in df.iterrows():
+                    code_to_info[str(r["stock_code"])] = {
+                        "name": str(r.get("stock_name", "") or ""),
+                        "score": float(r.get("total_score") or 0.0),
+                        "rank": int(r.get("rank") or 0),
+                    }
         except Exception as exc:  # noqa: BLE001
             logger.warning("联表查 selection_results 失败: %s", exc)
 
     out: list[SectorStockResponse] = []
-    for i, c in enumerate(codes, start=1):
+    for c in codes:
         info = code_to_info.get(str(c), {})
         out.append(
             SectorStockResponse(
                 stock_code=str(c),
                 stock_name=str(info.get("name", "")),
                 added_at=snap_at or "",
-                score=float(info.get("score", 0.0)) or round(max(0.0, 100.0 - i * 2.0), 3),
+                # 联表查到真实 total_score 用之；查不到为 0.0（诚实），不再造假分 100-i*2
+                score=float(info.get("score", 0.0)),
             )
         )
     return out

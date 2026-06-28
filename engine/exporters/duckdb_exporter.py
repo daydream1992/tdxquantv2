@@ -119,6 +119,9 @@ class DuckDBExporter(DataExporter):
                     "started_at": context.started_at.isoformat(),
                     "duration_sec": context.duration_sec,
                 }, ensure_ascii=False),
+                # QuestDB 要求 designated timestamp (created_at) 在 INSERT 中显式提供
+                # 值，否则报 "insert statement must populate timestamp"
+                "created_at": datetime.now(),
             })
         return records
 

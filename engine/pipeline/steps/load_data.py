@@ -62,7 +62,8 @@ class LoadDataStep(PipelineStep):
         self.logger.info("股票列表: %d 只", len(stock_list_df))
 
         # 2. 加载 L2 快照
-        snapshot_df = self._load_snapshot(data_cfg)
+        # 若配置了 universe.include_only 白名单，仅拉这些代码，避免逐只拉全市场（real 模式约 9 分钟）。
+        snapshot_df = self._load_snapshot(data_cfg, universe_cfg)
         context.data["snapshot"] = snapshot_df
         self.logger.info("L2 快照: %d 条", len(snapshot_df))
 
@@ -106,8 +107,8 @@ class LoadDataStep(PipelineStep):
         except Exception as exc:  # noqa: BLE001
             raise StepExecutionError(self.step_id, f"加载股票列表失败: {exc}", exc) from exc
 
-    def _load_snapshot(self, data_cfg: dict[str, Any]) -> pd.DataFrame:
-        """加载 L2 快照（全市场）。
+    def _load_snapshot(self, data_cfg: dict[str, Any], universe_cfg: dict[str, Any] | None = None) -> pd.DataFrame:
+        """加载 L2 快照。
 
         P1-3 真实接口无批量快照方法，本步骤尝试以下顺序:
         1. ``adapter.get_snapshot_batch()`` (Mock 自定义批量接口，如有)
@@ -116,10 +117,23 @@ class LoadDataStep(PipelineStep):
         4. ``adapter.get_market_snapshot(code)`` 逐只调用 (慢，仅小盘)
 
         Mock 适配器（P1-3 完成后）应实现 1/2 之一以支持批量。
+
+        白名单优化（real 模式）：
+        当 ``universe.include_only`` 非空时，绕过全市场批量接口（real 模式下
+        ``get_market_snapshot_all`` 逐只拉 ~5535 只、qps=10 ≈ 9 分钟），改为仅拉
+        白名单内的代码（逐只 ``get_more_info``，约 N 次 API 调用）。拉取结果仍会
+        进入 ``_apply_universe`` 做后续过滤（ST/停牌/代码正则等），与全市场路径一致。
         """
         adapter = self._safe_adapter()
         if adapter is None:
             return pd.DataFrame()
+
+        # 白名单路径：仅拉 include_only 列出的代码
+        include_only = (universe_cfg or {}).get("include_only") or []
+        if include_only:
+            self.logger.info("include_only 白名单: %d 只，仅拉这些代码（跳过全市场批量）", len(include_only))
+            return self._load_snapshot_whitelist(adapter, include_only)
+
         try:
             for method_name in (
                 "get_snapshot_batch",
@@ -244,6 +258,33 @@ class LoadDataStep(PipelineStep):
             return pd.DataFrame()
         except Exception as exc:  # noqa: BLE001
             raise StepExecutionError(self.step_id, f"加载财务数据失败: {exc}", exc) from exc
+
+    # ---- 白名单快照（real 模式省 API）----
+    def _load_snapshot_whitelist(self, adapter: Any, include_only: list[str]) -> pd.DataFrame:
+        """仅拉白名单代码的 L2 快照，避免逐只拉全市场。
+
+        优先用 ``get_more_info``（V8 快照源，字段最全），逐只调用；
+        结果统一带 ``code`` 列，供后续 ``_apply_universe`` / 因子步骤复用。
+        单只失败返回 ``{}`` 自动跳过，不影响整体。
+        """
+        rows: list[dict] = []
+        for code in include_only:
+            code_s = str(code).strip()
+            if not code_s:
+                continue
+            try:
+                # get_more_info: V8 88 字段快照源（与 get_market_snapshot_all 同源）
+                info = adapter.get_more_info(code_s)
+                if isinstance(info, dict) and info:
+                    info.setdefault("code", code_s)
+                    rows.append(info)
+            except (AttributeError, NotImplementedError):
+                self.logger.warning("adapter 无 get_more_info，白名单快照中止，返回空")
+                return pd.DataFrame(rows) if rows else pd.DataFrame()
+            except Exception as exc:  # noqa: BLE001
+                self.logger.warning("get_more_info(%s) 失败，跳过: %s", code_s, exc)
+        self.logger.info("白名单快照完成: %d / %d 只", len(rows), len(include_only))
+        return pd.DataFrame(rows) if rows else pd.DataFrame()
 
     # ---- universe 过滤 ----
     def _apply_universe(self, snapshot_df: pd.DataFrame, universe_cfg: dict[str, Any]) -> pd.DataFrame:

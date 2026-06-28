@@ -556,7 +556,7 @@ def _batch_more_info(adapter: Any, codes: list[str]) -> dict[str, dict]:
     return out
 
 
-def _extract_flow_fields(code: str, info: dict) -> tuple[float, float, float]:
+def _extract_flow_fields(code: str, info: dict) -> tuple[float | None, float | None, float | None]:
     """从 more_info dict 提取 (main_inflow, big_buy_ratio, turnover_rate)。
 
     字段来源 (V8 快照 / RealAdapter tq.get_more_info):
@@ -565,31 +565,36 @@ def _extract_flow_fields(code: str, info: dict) -> tuple[float, float, float]:
     - ``TotalBVol``: 总买量 (手), ``TotalSVol``: 总卖量 (手)
     - ``fHSL``: 换手率% (已经是百分数)
 
-    字段缺失时用基于 code hash 的确定性 mock:
-    - main_inflow: -5000 ~ +10000 万元
-    - big_buy_ratio: 0.20 ~ 0.60
-    - turnover_rate: 0.5 ~ 10.0 %
+    字段缺失时返回 ``None`` (前端标灰 "--"), 不再用 hash mock 伪装真实数据 ——
+    避免大屏出现"看起来真实实为主力净流入假值"的误导 (tqcenter get_more_info
+    88 字段无 Zjl 时, 旧逻辑会返回基于 code hash 的 -5000~10000 假值)。
+
+    注意: ``code`` 参数保留用于签名兼容与日志, 不再参与 mock 生成。
     """
-    # Zjl - 主力净流入 (万元)
+    # Zjl - 主力净流入 (万元) — 缺失(0.0 视为缺失)返回 None
     main_inflow = _safe_float(info.get("Zjl"))
     if main_inflow == 0.0:
-        main_inflow = _deterministic_hash_float(code, salt="inflow", lo=-5000.0, hi=10000.0)
+        main_inflow = None
 
-    # big_buy_ratio = TotalBVol / (TotalBVol + TotalSVol)
+    # big_buy_ratio = TotalBVol / (TotalBVol + TotalSVol) — 分母缺失返回 None
     total_b = _safe_float(info.get("TotalBVol"))
     total_s = _safe_float(info.get("TotalSVol"))
     denom = total_b + total_s
     if denom > 0:
         big_buy_ratio = max(0.0, min(1.0, total_b / denom))
     else:
-        big_buy_ratio = _deterministic_hash_float(code, salt="bigbuy", lo=0.20, hi=0.60)
+        big_buy_ratio = None
 
-    # turnover_rate from fHSL (already in %)
+    # turnover_rate from fHSL (already in %) — 缺失返回 None
     turnover_rate = _safe_float(info.get("fHSL"))
     if turnover_rate == 0.0:
-        turnover_rate = _deterministic_hash_float(code, salt="hsl", lo=0.5, hi=10.0)
+        turnover_rate = None
 
-    return round(main_inflow, 2), round(big_buy_ratio, 4), round(turnover_rate, 3)
+    return (
+        round(main_inflow, 2) if main_inflow is not None else None,
+        round(big_buy_ratio, 4) if big_buy_ratio is not None else None,
+        round(turnover_rate, 3) if turnover_rate is not None else None,
+    )
 
 
 # ----------------------------------------------------------------------------

@@ -160,7 +160,7 @@ export default function Home() {
                   TdxQuant <span className="text-quant-primary">量化交易系统</span>
                 </div>
                 <div className="text-[10px] text-muted-foreground leading-tight">
-                  P1 阶段 · Mock 模式
+                  {status?.adapter_mode === 'real' ? 'Real · 实盘模式' : 'Mock · 模拟模式'}
                 </div>
               </div>
             </div>
@@ -323,7 +323,7 @@ export default function Home() {
         <div className="container mx-auto max-w-[1600px] px-4 py-3">
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
             <div className="flex items-center gap-2">
-              <span className="font-mono">TdxQuant v0.1.0 (P1)</span>
+              <span className="font-mono">TdxQuant v1.0</span>
               <span>·</span>
               <span>Next.js 16 + FastAPI + QuestDB</span>
               <span>·</span>

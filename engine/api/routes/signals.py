@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -20,6 +21,27 @@ from engine.api.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 系统时区 Asia/Shanghai (QuestDB QDB_TIMEZONE)，triggered_at 从 QuestDB 读出为 naive ISO，
+# 补 +08:00 避免与 mock 降级数据(带 Z) 时间基准不一致导致前端显示跳变。
+_CN_TZ = timezone(timedelta(hours=8))
+
+
+def _iso_with_tz(val: Any) -> str:
+    """naive ISO 时间补 +08:00 时区；已带时区或解析失败则原样返回。"""
+    if val is None:
+        return ""
+    s = str(val)
+    if not s:
+        return ""
+    try:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_CN_TZ)
+        return dt.isoformat()
+    except (ValueError, TypeError):
+        return s
+
 
 router = APIRouter(tags=["signals"])
 
@@ -236,7 +258,7 @@ def _row_to_signal(row: Any, smap: dict[str, dict[str, str]] | None = None) -> S
 
     return SignalEventResponse(
         id=str(row.get("event_id", "")),
-        time=_to_str(row.get("triggered_at")) or "",
+        time=_iso_with_tz(row.get("triggered_at")),
         type=frontend_type,
         strategy_id=sid,
         strategy_name=strategy_name,

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import time
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -185,7 +186,8 @@ async def run_strategy(
 
     start = time.time()
     try:
-        ctx = runner.run_strategy(strategy_id)
+        # real 模式全市场选股耗时较长（~9 分钟），放线程池执行避免阻塞事件循环
+        ctx = await asyncio.to_thread(runner.run_strategy, strategy_id)
     except Exception as exc:  # noqa: BLE001
         logger.exception("策略 %s 执行失败", strategy_id)
         return StrategyRunResponse(
@@ -406,7 +408,7 @@ async def _run_all_enabled(cfg: Any, runner: Any) -> StrategyBatchRunResponse:
         if not getattr(sc, "enabled", True):
             continue
         try:
-            ctx = runner.run_strategy(sid)
+            ctx = await asyncio.to_thread(runner.run_strategy, sid)
             n_final = 0 if ctx.final is None else len(ctx.final)
             # 副作用：写 selection 信号 + 自动订阅 Top 20 到监控
             try:

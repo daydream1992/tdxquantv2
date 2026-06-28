@@ -228,6 +228,9 @@ class QuoteSnapshot(BaseModel):
       与 ``pct`` 同为小数形式, 缺失返回 0.0。
 
     所有新字段默认 0.0, 兼容旧调用方。
+
+    资金流字段 (main_inflow/big_buy_ratio/turnover_rate) 在数据源缺失时为 ``None``,
+    前端据此标灰 "--", 不再返回基于 hash 的假值。
     """
 
     code: str
@@ -238,9 +241,9 @@ class QuoteSnapshot(BaseModel):
     volume: float = 0.0
     amount: float = 0.0
     ts: int = 0
-    main_inflow: float = 0.0
-    big_buy_ratio: float = 0.0
-    turnover_rate: float = 0.0
+    main_inflow: float | None = None
+    big_buy_ratio: float | None = None
+    turnover_rate: float | None = None
     auction_pct: float = 0.0
 
 
@@ -255,9 +258,9 @@ class FlowRankingItem(BaseModel):
     name: str = ""
     last: float = 0.0
     pct: float = 0.0
-    main_inflow: float = 0.0
-    big_buy_ratio: float = 0.0
-    turnover_rate: float = 0.0
+    main_inflow: float | None = None
+    big_buy_ratio: float | None = None
+    turnover_rate: float | None = None
     amount: float = 0.0
 
 

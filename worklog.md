@@ -1261,3 +1261,59 @@ Stage Summary:
   2. 验证 Real 模式: curl /api/monitor?action=status 应显示 adapter_mode=real
   3. 验证 tqcenter 连接: 日志应出现 "tqcenter API 覆盖完整：说明书 29 个 API 全部就绪"
   4. 可选: 清理 engine/factors/ 和 engine/pipeline/ 下的 TODO 注释 (P1-2/P1-3 已完成)
+
+---
+Task ID: R21-QuestDB9-RealMode-Fixes
+Agent: Claude (Opus 4.8)
+Task: 按 AI_HANDOVER.md §五 6 步流程切换 Real 模式；修复实际跑通时暴露的 QuestDB 9.x 与 RealAdapter 兼容性 bug
+
+Work Log:
+- Step 0 环境: Python 3.13.8 (D:\veighna_studio) + 依赖齐全 (fastapi/uvicorn/psycopg2/pandas) + 通达信 tdxw.exe 运行 + tqcenter.py 在 K:\txdlianghua\PYPlugins\user
+- Step 1 QuestDB: Docker Hub 不可达(网络)，改原生二进制。从 GitHub 下载 QuestDB 9.4.3-rt-windows-x86-64 到 K:\questdb\，用 java -m io.questdb/...ServerMain -d qdbroot 启动 (PID 18200, 8812/9000/9009)。questdb.exe install 需管理员(错误 1783)故改 java 直跑。
+- Step 2/3: config/app.yaml adapter_mode mock→real, tqcenter.python_path 设为 K:\txdlianghua\PYPlugins\user
+- Step 4: dev.py start 启 FastAPI(8000)+Next.js(3000)；bun install 装前端 812 包
+- Step 5 验证暴露并修复 9 个 bug (R18 QuestDB 迁移 + RealAdapter 集成从未在真机验证过):
+  1. questdb_store._http_exec: POST→GET (/exec 在 9.x 只接受 GET，POST 返 405，8 表建不出)
+  2. _convert_sql: $1→%s 占位符 (psycopg2 经 %s 下发 bind，$1 报 undefined bind variable)
+  3. 方言归一: CURRENT_DATE→timestamp_floor('d',now()), CURRENT_TIMESTAMP→now() (9.x 报 Invalid column)
+  4. 4 处 DELETE FROM monitor_subscriptions→UPDATE 软删除 (QuestDB append-only 不支持 DELETE，报 unexpected token [FROM])
+  5. _exec_retry 重连重试 (长时选股 psycopg2 连接闲置被关→connection already closed)
+  6. RealAdapter 新增 get_market_snapshot_all/get_snapshot_batch/get_snapshot/get_all_snapshots (load_data 找的批量快照方法 RealAdapter 原本没有→选股拿不到数据)
+  7. scripts/dev.py Windows _stop_services: 改按端口(netstat+taskkill)杀进程 (原 PowerShell 按 commandline+root 匹配，uvicorn 命令行不含项目根→漏杀→重启失败)
+  8. real_adapter.get_market_data: count<=0 兜底 250 (原直接传 -1 给 tqcenter→无界拉取全部 K 线→选股 hang)
+  9. strategies.py run_strategy/run_all: await asyncio.to_thread(runner.run_strategy) (原同步调用阻塞事件循环，选股期间 FastAPI 全卡死)
+- 验证: get_more_info 返回 88 真实字段/只 (0.01s) ✓; get_stock_list 5535 只 ✓; selection_results 写读往返 ✓; 3 只小范围 pipeline 3.7s 跑通 6 步+导出+strategy_runs ✓; 全市场选股后台运行中(~9min, 限流 qps=10)
+
+Stage Summary:
+- 修改文件: engine/storage/questdb_store.py (POST→GET/$1→%s/方言/_exec_retry 重连) + engine/data_adapter/real_adapter.py (批量快照方法+count 兜底) + engine/api/routes/watchlist.py (DELETE→UPDATE 软删除) + engine/pipeline/runner.py (DELETE→UPDATE) + engine/monitor/engine.py (DELETE 清理→no-op) + engine/api/routes/strategies.py (to_thread) + scripts/dev.py (Windows 按端口停) + config/app.yaml (real+tqcenter 路径)
+- 新增方法: QuestDBStore._conn_error/_exec_retry; RealAdapter.get_market_snapshot_all + 3 别名
+- 已知限制: QuestDB append-only 无法物理 DELETE (退订/清理用 active=false 软删除，归档行累积但不影响 active=true 查询); 全市场选股~9min (tqcenter 逐只+qps=10 限流，保护终端 GUI 线程)
+- 未解决: 旧 DuckDB 残留描述仍在部分文档; strategy YAML 无 data.kline_count (已用代码层 250 兜底，建议后续在 YAML 显式配置)
+
+---
+R21 补记: 第 10 个 bug
+- duckdb_exporter._insert_records: selection_results 记录缺 created_at 列 → QuestDB 报 "insert statement must populate timestamp" → 选股结果 0 行落库。修复: 记录补 "created_at": datetime.now()。其它 timestamp 表 (signal_events/sector_snapshots/monitor_subscriptions) 已正确包含时间列，无需改。
+- 最终验证: POST /api/strategies/dbqzt/run → ok=true, count=24, 247s, 24 行真实落库 selection_results ✓。Real 模式端到端打通。
+- 次要: selection_results.stock_name 为空 (get_more_info 88 字段无中文 name 列，exporter 映射 key 不匹配)，纯显示问题，不影响选股。
+
+---
+Task ID: R21-Feishu-App-Channel
+Agent: Claude (Opus 4.8)
+Task: 配置飞书推送（用户提供 App ID cli_aaa6b49dd5f81cbc + App Secret）
+
+Work Log:
+- 现状: feishu.py 原仅支持「自定义机器人 Webhook」模式；用户提供的是「开放平台 App」凭证（App ID/Secret），是不同接入模型
+- 新增 engine/utils/env.py: 零依赖 .env 加载器（无 python-dotenv），匹配项目 os.environ.get(X) or cfg 模式
+- 扩展 engine/channels/feishu.py: 双模式（按 app_id 是否存在自动选）：
+  - App 模式: app_id/secret → tenant_access_token（缓存2h）→ POST /im/v1/messages?receive_id_type= → interactive 卡片
+  - Webhook 模式: 保留原逻辑（webhook_url + sign）
+  - app_id/app_secret 留空则读 env FEISHU_APP_ID/SECRET（避免密钥进 git 追踪的 channels.yaml）
+- 安全: 凭证放 .env（.gitignore 已含 .env*，git check-ignore 确认）；channels.yaml 无 secret；附 .env.example
+- config/channels.yaml: feishu enabled=true, App 模式, receive_id_type=chat_id, receive_id="" (待填群 chat_id)
+- 验证: token 交换 code=0 ✓；FeishuChannel App 模式 token 获取成功 ✓；/api/channels 显示 enabled + 校验提示缺 receive_id ✓
+- 待用户: 飞书开放平台加权限 im:message (+可选 im:chat:readonly) → 把应用机器人加入群 → 填 chat_id 到 receive_id → POST /api/config/reload
+
+Stage Summary:
+- 新增文件: engine/utils/env.py, .env (gitignored), .env.example
+- 修改: engine/channels/feishu.py (双模式), config/channels.yaml (feishu 段)
+- 安全: Secret 仅在 .env，未进 git；建议用户在飞书后台重置 Secret（已在对话明文出现）

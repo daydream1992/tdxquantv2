@@ -373,6 +373,11 @@ def _parse_factor_scores(raw: Any, factor_weights: dict[str, float] | None = Non
     weights = factor_weights or {}
     out: list[SelectionFactorScore] = []
     for k, v in d.items():
+        # 过滤内部计算字段 (base_score/formula_score/penalty_log 等):
+        # 若 factor_weights 已提供 (真实因子清单), 只保留其中的 key, 剔除非真实因子,
+        # 避免选股详情把内部字段当真实因子渲染成卡片 (QA 发现 weight=0 伪因子混入)
+        if weights and str(k) not in weights:
+            continue
         try:
             val = float(v) if v is not None else 0.0
         except (TypeError, ValueError):

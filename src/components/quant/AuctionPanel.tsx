@@ -9,7 +9,7 @@
  *
  * 功能:
  *  1. 顶部状态条: 竞价状态 Badge (绿/灰) + 股票数 + 自动刷新 Switch + 手动刷新 + 自定义代码
- *  2. 竞价强弱排行表: 排名 / 代码 / 竞价涨幅 / 竞价金额 / 涨停买单 / 量比同比 / L2委托数 / 综合评分(进度条)
+ *  2. 竞价强弱排行表: 排名 / 代码 / 竞价涨幅 / 竞价金额 / 涨停买单 / 额比同比 / L2委托数 / 综合评分(进度条)
  *     - 评分进度条: <40 红 / 40-70 黄 / 70-100 绿
  *     - 竞价涨幅 >3% 标红加粗 (抢筹)
  *     - 涨停买单 >0 显示 "涨停买单" Badge
@@ -293,7 +293,7 @@ export function AuctionPanel() {
                     <TableHead className="text-right">竞价涨幅</TableHead>
                     <TableHead className="text-right">竞价金额 (万)</TableHead>
                     <TableHead className="text-right">涨停买单 (万)</TableHead>
-                    <TableHead className="text-right">量比同比</TableHead>
+                    <TableHead className="text-right">额比同比</TableHead>
                     <TableHead className="text-right">L2委托数</TableHead>
                     <TableHead className="text-right min-w-[140px]">综合评分</TableHead>
                   </TableRow>
@@ -437,7 +437,7 @@ function AuctionRow({
   const tier = scoreTier(item.auction_score)
   const surgeHigh = item.auction_pct > 3
   const hasZt = item.auction_zt_buy > 0
-  // 量比同比: auction_amount / open_amount_pre (倍)
+  // 额比同比: auction_amount / open_amount_pre (倍)
   const volRatio =
     item.open_amount_pre > 0 ? item.auction_amount / item.open_amount_pre : 0
 

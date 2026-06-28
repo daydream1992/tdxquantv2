@@ -36,7 +36,7 @@ import {
 export function RealtimeSelection() {
   const [running, setRunning] = React.useState(false)
   const [intervalSec, setIntervalSec] = React.useState(30)
-  const [threshold, setThreshold] = React.useState(0.05)
+  const [threshold, setThreshold] = React.useState(5)
   const [rounds, setRounds] = React.useState<RoundSnapshot[]>([])
   const [boardRows, setBoardRows] = React.useState<StockBoardRow[]>([])
   const [expandedId, setExpandedId] = React.useState<string | null>(null)
@@ -71,7 +71,8 @@ export function RealtimeSelection() {
     const currentThreshold = thresholdRef.current
     try {
       const r = await strategyAPI.runAll()
-      const okCount = r.results?.length ?? 0
+      const okCount = r.results?.filter((x) => x.ok).length ?? 0
+      const totalCount = r.results?.length ?? 0
       // 等后端落库
       await new Promise((res) => setTimeout(res, RUNALL_DELAY_MS))
       const rows = await selectionAPI.list({ limit: 200 })
@@ -112,7 +113,7 @@ export function RealtimeSelection() {
         upCount,
         downCount,
         strategyOk: okCount,
-        strategyTotal: okCount,
+        strategyTotal: totalCount,
       }
       setRounds((prev) => [snapshot, ...prev].slice(0, MAX_STREAM_ROUNDS))
       setRoundNo(thisRoundNo)

@@ -1,23 +1,3 @@
-# TdxQuant 监控配置（合并自 monitor_rules.yaml + match_strategies.yaml）
-#
-# 4 段结构：
-#   1. monitor           —— 监控运行参数（订阅/轮询/防抖/聚合/交易时段/健康度/板块热度/同板块联动）
-#   2. alert_templates   —— L1 零件库：告警模板（condition + channels + default_params）
-#   3. dedup             —— 告警去重配置（key_fields + bypass_priority）
-#   4. match_strategies  —— L2 装配单：将 alert_templates 按 strategy_id 装配成套餐
-#
-# 三层模型（PLAN §14.2）：
-#   L1 alert_templates   → 零件库（本文件 alert_templates 段，RuleSet 加载）
-#   L2 match_strategies  → 装配单（本文件 match_strategies 段，MatchRegistry 加载）
-#   L3 MonitorEngine     → 执行手（on_quote 按 snap.strategy_id 取 match）
-#
-# ConfigLoader 按 alphabetical 加载 config/*.yaml，本文件（monitor.yaml）后于 app.yaml
-# 加载，故 monitor.* 配置不会被 app.yaml 覆盖。
-# 修改后调 POST /api/config/reload 热加载，前端按 enabled 字段决定是否显示。
-
-# ============================================================================
-# 1. monitor 段：监控运行参数
-# ============================================================================
 monitor:
   subscribe_batch_size: 50
   poll_interval_seconds: 10
@@ -25,7 +5,7 @@ monitor:
   alert_aggregate_window_seconds: 60
   alert_aggregate_max_size: 10
   trading_hours:
-    morning_start: 09:25
+    morning_start: 09:15
     morning_end: '11:30'
     afternoon_start: '13:00'
     afternoon_end: '15:00'
@@ -42,10 +22,6 @@ monitor:
     enabled: true
     top_n: 5
     cache_ttl: 30
-
-# ============================================================================
-# 2. alert_templates 段：L1 零件库（告警模板）
-# ============================================================================
 alert_templates:
   limit_up:
     condition: pct_change > {pct_threshold}
@@ -215,12 +191,9 @@ alert_templates:
     description: 主力自救资金入场
     default_params:
       inflow_threshold: 1000
-
-  # ============================================================================
-  # R14 形态预警零件（基于扩展变量 his_high/his_low/open_pct/last_vs_high_pct 等）
-  # ============================================================================
   near_high_reject:
-    condition: last_vs_high_pct > 0 and last_vs_high_pct <= {high_proximity} and volume_ratio < {vol_ratio_threshold} and pct_change < {pct_threshold}
+    condition: last_vs_high_pct > 0 and last_vs_high_pct <= {high_proximity} and volume_ratio
+      < {vol_ratio_threshold} and pct_change < {pct_threshold}
     alert_type: near_high_reject
     emoji: 📐
     label: 接近前高回落
@@ -234,7 +207,8 @@ alert_templates:
       vol_ratio_threshold: 1.2
       pct_threshold: 0.0
   drop_exhaustion:
-    condition: pct_change < 0 and volume_ratio < {vol_ratio_threshold} and last_vs_low_pct < {low_proximity} and last_vs_low_pct > 0
+    condition: pct_change < 0 and volume_ratio < {vol_ratio_threshold} and last_vs_low_pct
+      < {low_proximity} and last_vs_low_pct > 0
     alert_type: drop_exhaustion
     emoji: 🕳️
     label: 下跌枯竭
@@ -285,7 +259,8 @@ alert_templates:
       pct_threshold: 0.02
       vol_ratio_threshold: 0.8
   intraday_real_drop:
-    condition: pct_change < -{pct_threshold} and volume_ratio > {vol_ratio_threshold} and main_inflow < 0
+    condition: pct_change < -{pct_threshold} and volume_ratio > {vol_ratio_threshold}
+      and main_inflow < 0
     alert_type: intraday_real_drop
     emoji: 💥
     label: 急跌真跌
@@ -298,7 +273,8 @@ alert_templates:
       pct_threshold: 0.03
       vol_ratio_threshold: 1.5
   rebound_setup:
-    condition: last_vs_low_pct < {low_proximity} and last_vs_low_pct > 0 and volume_ratio < {vol_ratio_threshold} and pct_change > -{pct_threshold}
+    condition: last_vs_low_pct < {low_proximity} and last_vs_low_pct > 0 and volume_ratio
+      < {vol_ratio_threshold} and pct_change > -{pct_threshold}
     alert_type: rebound_setup
     emoji: 🔄
     label: 准备反弹
@@ -311,20 +287,50 @@ alert_templates:
       low_proximity: 0.03
       vol_ratio_threshold: 1.0
       pct_threshold: 0.01
-
-# ============================================================================
-# 3. dedup 段：告警去重配置
-# ============================================================================
 dedup:
   key_fields:
   - stock_code
   - alert_type
   bypass_priority: high
-
-# ============================================================================
-# 4. match_strategies 段：L2 装配单（匹配策略）
-# ============================================================================
 match_strategies:
+- match_id: dbqzt_default
+  name: 打板求涨停监控(含竞价)
+  enabled: true
+  strategy_id: dbqzt
+  scope:
+    markets:
+    - SH
+    - SZ
+    - BJ
+    exclude_st: true
+    exclude_suspended: true
+    exclude_codes: []
+    include_only: []
+  alerts:
+  - alert_type: auction_surge
+    params:
+      pct_threshold: 0.03
+    channels:
+    - websocket
+    - feishu
+    priority: high
+  - alert_type: limit_up
+    params:
+      pct_threshold: 0.095
+    channels:
+    - tdx_warn
+    - websocket
+    - feishu
+    priority: high
+  - alert_type: drop_alert
+    params:
+      pct_threshold: 0.05
+    channels:
+    - websocket
+    - feishu
+    priority: medium
+  debounce_override: 60
+  trading_hours_override: null
 - match_id: rzq_default
   name: 弱转强默认监控
   enabled: true

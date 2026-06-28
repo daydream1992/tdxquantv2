@@ -91,9 +91,9 @@ export const INTERVAL_OPTIONS = [
 ] as const
 
 export const THRESHOLD_OPTIONS = [
-  { label: '0.02', value: 0.02 },
-  { label: '0.05', value: 0.05 },
-  { label: '0.10', value: 0.1 },
+  { label: '1', value: 1 },
+  { label: '2', value: 2 },
+  { label: '5', value: 5 },
 ] as const
 
 export const MAX_STREAM_ROUNDS = 50

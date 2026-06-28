@@ -5,6 +5,44 @@
 
 ---
 
+## R21 — QuestDB 9.x 实盘真机验证 + 11 修复 (2026-06-24)
+
+### 背景
+按 `AI_HANDOVER.md §五` 切 Real 模式，实测暴露 R18 迁移（DuckDB→QuestDB）与 RealAdapter 集成
+**从未在真机验证**的问题。修复后 real 模式端到端打通：`POST /api/strategies/dbqzt/run` 全市场
+5535 只 → **24 只选股结果真实落库 QuestDB**（~5–6 分钟）。
+
+### QuestDB 9.x 方言兼容性（6 类，集中兜底）
+- `/exec` 只接受 GET（9.x 砍 POST）→ `_http_exec` 改 GET
+- 占位符 `$1` → psycopg2 风格 `%s`（`_convert_sql`）
+- `CURRENT_DATE`/`CURRENT_TIMESTAMP` 不识别 → 归一为 `timestamp_floor('d',now())`/`now()`
+- **不支持 `DELETE FROM`** → 4 处改 `UPDATE active=false` 软删除
+- designated timestamp 列 INSERT 必填 → `selection_results` 导出补 `created_at`
+- 长时选股连接闲置断开 → `_exec_retry` 重连重试
+
+### RealAdapter / pipeline 集成
+- 新增 `RealAdapter.get_market_snapshot_all()`（逐只 `get_more_info` 拼接）+ 3 别名（原缺失→选股无数据）
+- `get_market_data` `count<=0` 兜底 250（原传 -1→无界拉 K 线→选股 hang）
+- `run_strategy` endpoint 改 `asyncio.to_thread`（原同步阻塞事件循环→选股时服务器全卡死）
+
+### 工具链
+- `scripts/dev.py` Windows `_stop_services` 改按端口杀 + 尊重 `--no-fastapi`/`--no-next`
+
+### 修改文件
+`engine/storage/questdb_store.py` · `engine/data_adapter/real_adapter.py` ·
+`engine/api/routes/{watchlist,strategies}.py` · `engine/pipeline/runner.py` ·
+`engine/monitor/engine.py` · `engine/exporters/duckdb_exporter.py` · `scripts/dev.py` ·
+`config/app.yaml`
+
+### 新增文档
+| 文件 | 用途 |
+|---|---|
+| `docs/QUESTDB9_REALMODE_FIXES.md` | R21 实战经验：9.x 方言清单 + 11 修复 + 维护 SOP + 经验教训 |
+
+详见 `worklog.md` Task ID `R21-QuestDB9-RealMode-Fixes`。
+
+---
+
 ## R18 — QuestDB 替代 DuckDB (2026-06-23)
 
 ### Breaking Change

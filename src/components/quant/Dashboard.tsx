@@ -226,7 +226,7 @@ export function Dashboard({ onNavigateToBacktest }: DashboardProps) {
                     return (
                       <tr key={q.code} className={dir === 'up' ? 'flash-up' : dir === 'down' ? 'flash-down' : ''}>
                         <td className="font-mono text-xs">{q.code}</td>
-                        <td className="text-xs">{q.name}</td>
+                        <td className="text-xs">{q.name || q.code}</td>
                         <td className="text-right tabular-nums">
                           <span className={dir === 'up' ? 'text-up' : dir === 'down' ? 'text-down' : 'text-flat'}>
                             {q.last.toFixed(2)}
@@ -239,8 +239,8 @@ export function Dashboard({ onNavigateToBacktest }: DashboardProps) {
                           {(q.volume / 10000).toFixed(0)}万
                         </td>
                         <td className="text-right tabular-nums text-xs text-muted-foreground">
-                          {(q.amount / 100000000).toFixed(2)}亿
-                        </td>
+                          {q.amount > 0 ? `${(q.amount / 100000000).toFixed(2)}亿` : '--'}
+</td>
                       </tr>
                     )
                   })}

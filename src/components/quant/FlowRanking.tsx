@@ -94,9 +94,11 @@ export function FlowRanking({ quotes, lastUpdated, loading, onRefresh }: FlowRan
     if (!quotes || quotes.length === 0) return out
     for (const m of METRICS) {
       const sorted = [...quotes]
-        .map((q) => ({ q, v: Number(q[m] ?? 0) || 0 }))
-        .filter((x) => x.v !== 0 || m === 'main_inflow') // inflow 允许 0 (有正有负)
-        .sort((a, b) => b.v - a.v)
+        .map((q) => ({ q, v: q[m.key] }))
+        // 仅保留有真实数值的股票 (后端 main_inflow 在 Zjl 缺失时返回 null, 不参与排行;
+        // 修复历史 bug: 此处曾误用 q[m]/m==='main_inflow' (m 是 MetricMeta 对象, 恒 undefined/false) → 三列全空)
+        .filter((x) => typeof x.v === 'number' && (x.v !== 0 || m.key === 'main_inflow'))
+        .sort((a, b) => (b.v as number) - (a.v as number))
         .slice(0, 5)
         .map((x) => x.q)
       out[m.key] = sorted
@@ -227,7 +229,8 @@ function FlowRow({
   meta: MetricMeta
   max: number
 }) {
-  const value = Number(quote[meta.key] ?? 0) || 0
+  const rawValue = quote[meta.key]
+  const value: number | null = typeof rawValue === 'number' ? rawValue : null
   const pct = quote.pct
   const isUp = pct > 0
   const isDown = pct < 0
@@ -237,8 +240,8 @@ function FlowRow({
 
   // 数值格式化
   const valueStr = formatValue(meta.key, value)
-  // 进度条宽度 (基于 max 归一化)
-  const progressPct = Math.max(2, Math.min(100, (Math.abs(value) / max) * 100))
+  // 进度条宽度 (基于 max 归一化); 无数据(value=null)时不显示进度
+  const progressPct = value == null ? 0 : Math.max(2, Math.min(100, (Math.abs(value) / max) * 100))
   // 涨跌幅颜色
   const pctColor = isUp
     ? 'var(--quant-up)'
@@ -283,7 +286,7 @@ function FlowRow({
         <div className="text-right shrink-0">
           <div
             className="text-xs font-mono tabular-nums font-semibold leading-tight"
-            style={{ color: meta.key === 'main_inflow' ? (value >= 0 ? 'var(--quant-up)' : 'var(--quant-down)') : meta.color }}
+            style={{ color: value == null ? 'var(--quant-flat)' : (meta.key === 'main_inflow' ? (value >= 0 ? 'var(--quant-up)' : 'var(--quant-down)') : meta.color) }}
           >
             {valueStr}
           </div>
@@ -320,7 +323,8 @@ function FlowRow({
 // 工具
 // ============================================================================
 
-function formatValue(metric: Metric, v: number): string {
+function formatValue(metric: Metric, v: number | null | undefined): string {
+  if (v == null) return '--'
   if (metric === 'main_inflow') {
     // 万元, 带 +/- 符号, 千位分隔
     const sign = v > 0 ? '+' : v < 0 ? '-' : ''

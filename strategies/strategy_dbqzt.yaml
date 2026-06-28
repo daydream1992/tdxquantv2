@@ -18,9 +18,7 @@ universe:
   - BJ
   exclude_codes: []
   include_only: []
-  next_day_confirm: '总分<35 跳过；否则按连板数 fLianB 分支: fLianB>=3: 竞价不低开(>0%)+竞价量放大  涨停 &
-    FCb>=0.2: 竞价涨幅>1.5%+不低开 涨停 & FCb>0: 竞价涨幅>2%+量比>1.5 涨停(其他): 竞价涨幅>2%+量比>1.5   非涨停:
-    竞价涨幅>3%+量比>2+5分钟涨>2% fLianB>=5 且 FCb<0.1: ⚠封板弱若低开放弃入场 '
+  next_day_confirm: '总分<35 跳过；否则按连板数 fLianB 分支: fLianB>=3: 竞价不低开(>0%)+竞价量放大  涨停 & FCb>=0.2: 竞价涨幅>1.5%+不低开 涨停 & FCb>0: 竞价涨幅>2%+量比>1.5 涨停(其他): 竞价涨幅>2%+量比>1.5   非涨停: 竞价涨幅>3%+量比>2+5分钟涨>2% fLianB>=5 且 FCb<0.1: ⚠封板弱若低开放弃入场 '
 pool:
   expression: is_limit_up or ZAF >= 7
   description: 涨停股 OR 当日涨幅≥7%
@@ -53,15 +51,7 @@ factors:
     field: Wtb
     invalid_to_nan: true
 scoring:
-  formula: clip((consecutive_limit>=1)*10 + (seal_ratio>=0.5)*20 + (seal_ratio>=0.2
-    and seal_ratio<0.5)*14 + (seal_ratio>=0.05 and seal_ratio<0.2)*8 + (seal_ratio>0
-    and seal_ratio<0.05)*3 + (seal_amount>=30000)*10 + (seal_amount>=10000 and seal_amount<30000)*8
-    + (seal_amount>=5000 and seal_amount<10000)*5 + (seal_amount>=1000 and seal_amount<5000)*2
-    + (seal_strength>=2)*5 + (seal_strength>=1.5 and seal_strength<2)*3, 0, 40) +
-    clip((consecutive_limit>=7)*30 + (consecutive_limit>=5 and consecutive_limit<7)*26
-    + (consecutive_limit>=4 and consecutive_limit<5)*22 + (consecutive_limit==3)*18
-    + (consecutive_limit==2)*12 + (consecutive_limit==1)*6, 0, 30) + clip(0, 0, 20)
-    + clip(0, -10, 0)
+  formula: clip((consecutive_limit>=1)*10 + (seal_ratio>=0.5)*20 + (seal_ratio>=0.2 and seal_ratio<0.5)*14 + (seal_ratio>=0.05 and seal_ratio<0.2)*8 + (seal_ratio>0 and seal_ratio<0.05)*3 + (seal_amount>=30000)*10 + (seal_amount>=10000 and seal_amount<30000)*8 + (seal_amount>=5000 and seal_amount<10000)*5 + (seal_amount>=1000 and seal_amount<5000)*2 + (seal_strength>=2)*5 + (seal_strength>=1.5 and seal_strength<2)*3, 0, 40) + clip((consecutive_limit>=7)*30 + (consecutive_limit>=5 and consecutive_limit<7)*26 + (consecutive_limit>=4 and consecutive_limit<5)*22 + (consecutive_limit==3)*18 + (consecutive_limit==2)*12 + (consecutive_limit==1)*6, 0, 30) + clip(0, 0, 20) + clip(0, -10, 0)
   normalization: none
   penalties:
   - condition: consecutive_limit < 1 and seal_ratio == 0

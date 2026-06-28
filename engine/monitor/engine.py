@@ -684,11 +684,15 @@ class MonitorEngine:
             return default
 
         # pct_change: 优先显式，其次 ZAF/100，否则 Now/LastClose-1
-        # bug #12: 原 `if not pct:` 把 0.0 当 falsy 跳过, 改为显式 None 判断
+        # bug #12 复发(R23): 原 `pct = zaf/100 if zaf else 0.0` 在 zaf=0 时把 pct
+        # 错误地赋成 0.0(非 NaN)，导致下一行 NaN 兜底 (Now/LastClose) 永远不进。
+        # 修复：ZAF 缺失时保持 NaN，让 Now/LastClose 分支接管。
         pct = _num("pct_change", default=float("nan"))
         if pct != pct:  # NaN 检查
             zaf = _num("ZAF")
-            pct = zaf / 100 if zaf else 0.0
+            if zaf:
+                pct = zaf / 100
+            # else: 保留 NaN，进入下一段 Now/LastClose 兜底
         if pct != pct:  # 仍 NaN, 走 Now/LastClose
             now = _num("Now", "MA5Value")
             last_close = _num("LastClose")
@@ -703,11 +707,17 @@ class MonitorEngine:
         # volume_ratio: Wtb
         volume_ratio = _num("volume_ratio", "Wtb")
 
-        # auction_pct: VOpenZAF/100
-        vopen = _num("VOpenZAF")
+        # auction_pct: 真实模式 tq.get_pricevol 不返回竞价字段(VOpenZAF/open_vol_pre
+        # 等需走 get_quote/get_more_info)，兜底用 pct_change。集合竞价期 pct_change
+        # 也是 0（撮合价未出来），auction_surge 规则不会乱触；开盘后 pct_change
+        # 等同"高开 %"，满足规则即触发推送。
         auction_pct = _num("auction_pct", default=float("nan"))
         if auction_pct != auction_pct:  # NaN
-            auction_pct = vopen / 100 if vopen else 0.0
+            vopen = _num("VOpenZAF")
+            if vopen:
+                auction_pct = vopen / 100  # 兼容 mock/旧数据
+            else:
+                auction_pct = pct if pct == pct else 0.0  # NaN safe
 
         last = _num("last", "Now", "MA5Value")
         volume = _num("volume", "Volume")
@@ -746,18 +756,9 @@ class MonitorEngine:
             self._debounce.clear()
         logger.info("跨日清理完成: 清零信号计数 + 清 %d 个 debounce key", n)
 
-        # 归档：把 monitor_subscriptions 表中 active=false 的记录补 unsubscribed_at
-        # 用 DELETE+INSERT 规避 DuckDB UPDATE 索引 bug；这里直接 DELETE active=false 旧记录
-        try:
-            from engine.storage.duckdb_store import DuckDBStore
-
-            store = DuckDBStore()
-            if store.table_exists("monitor_subscriptions"):
-                store.execute(
-                    "DELETE FROM monitor_subscriptions WHERE active = false"
-                )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("归档订阅失败（可忽略）: %s", exc)
+        # QuestDB 是 append-only 列存，不支持 DELETE FROM（9.x 报 unexpected token [FROM]），
+        # active=false 归档行无法物理清理。所有订阅查询均按 active=true 过滤，归档行
+        # 不影响业务，故此处跨日清理改为 no-op（原 DuckDB 时代的物理 DELETE 已废弃）。
 
     # ------------------------------------------------------------------
     # 文案 / 优先级

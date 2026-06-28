@@ -10,7 +10,7 @@ import { cn } from '@/lib/utils'
 
 export interface ScoreBadgeProps {
   score: number
-  /** 最大值（默认 1.0） */
+  /** 最大值（默认 100，engine total_score 为 0-100 量纲） */
   max?: number
   size?: 'sm' | 'md' | 'lg'
   showValue?: boolean
@@ -19,7 +19,7 @@ export interface ScoreBadgeProps {
 
 export function ScoreBadge({
   score,
-  max = 1.0,
+  max = 100,
   size = 'md',
   showValue = true,
   className,
@@ -46,7 +46,7 @@ export function ScoreBadge({
     <div className={cn('flex items-center gap-2', className)}>
       {showValue && (
         <span className={cn('tabular-nums font-medium', textClass)} style={{ color }}>
-          {score.toFixed(3)}
+          {score.toFixed(1)}
         </span>
       )}
       <div

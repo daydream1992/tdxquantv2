@@ -39,14 +39,23 @@ channels:
       max_queue_size: 1000       # 离线消息队列上限
 
   # ---- 飞书推送通道 ----
-  # 调用飞书机器人 webhook，支持 interactive 卡片消息
-  # 预留接口，后续填入 webhook_url + secret 后启用
+  # 支持两种模式（按 app_id 是否存在自动选择）：
+  #   - App 模式（推荐）：App ID/Secret → tenant_access_token → /im/v1/messages
+  #     app_id/app_secret 留空则读环境变量 FEISHU_APP_ID/FEISHU_APP_SECRET（放 .env，勿提交 git）
+  #     receive_id: 群 chat_id / 用户 open_id / 邮箱等（receive_id_type 决定）
+  #   - Webhook 模式：填 webhook_url（自定义机器人）
   - channel_id: feishu
     channel_name: 飞书推送
-    enabled: false                # 预留，后续开启
+    enabled: true
     config:
-      webhook_url: ""             # 飞书机器人 webhook URL
-      secret: ""                  # 签名密钥（启用签名校验时填）
+      # App 模式凭证（留空走 .env 的 FEISHU_APP_ID / FEISHU_APP_SECRET）
+      app_id: ""
+      app_secret: ""
+      receive_id_type: chat_id   # open_id / user_id / union_id / email / chat_id
+      receive_id: ""             # ⚠ 待填：把应用机器人加入飞书群后，填该群的 chat_id
+      # Webhook 模式（用 App 模式时留空即可）
+      webhook_url: ""
+      secret: ""
       msg_type: interactive       # text / interactive（卡片）
       # 消息模板（与 docs/maintenance/MAINTENANCE.md 中的飞书模板对齐）
       templates:

@@ -42,6 +42,7 @@ import math
 import os
 import platform
 import sys
+import threading
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -168,6 +169,11 @@ class RealAdapter(BaseDataAdapter):
         self._subscribe_batch_size: int = int(cfg.get("tqcenter.subscribe_batch_size", 50))
         self._kline_max_count: int = int(cfg.get("tqcenter.kline_max_count", 24000))
         self._initialized: bool = False
+        # initialize 互斥锁：tqcenter InitConnect 非线程安全，并发调用会触发
+        # "已有同名策略运行" (run_id<0)，被 _auto_initialize 误报成"连接路径为空"。
+        # FastAPI 异步环境下多个请求/监控循环会并发进入 _ensure_tq → initialize，
+        # 必须串行化，且第一个成功后其余直接复用（lazy singleton）。
+        self._init_lock = threading.Lock()
         # 已订阅 code -> callback 列表
         self._subscribers: dict[str, list[Callback]] = {}
 
@@ -219,30 +225,35 @@ class RealAdapter(BaseDataAdapter):
         """
         if not _tqcenter_available:
             return False
-        if self._initialized:
+        if self._initialized:  # fast path：已初始化直接返回，避免锁竞争
             return True
-        try:
-            init_arg: str = self._initialize_file
-            if init_arg == "__file__":
-                # 优先用 python_path 拼出 tqcenter.py 路径（用户示例：传 tqcenter.py 路径）
-                if self._python_path:
-                    init_arg = str(Path(self._python_path) / "tqcenter.py")
-                else:
-                    # 兜底环境变量
-                    env_init = os.environ.get("TQ_CENTER_INITIALIZE", "").strip()
-                    if env_init:
-                        init_arg = env_init
+        # 串行化初始化：tqcenter InitConnect 非线程安全，并发会触发 run_id<0
+        # ("已有同名策略运行") 被误报成"连接路径为空"，导致 self._initialized 永远卡 False。
+        with self._init_lock:
+            if self._initialized:  # double-check：等锁期间可能已被其他线程初始化成功
+                return True
+            try:
+                init_arg: str = self._initialize_file
+                if init_arg == "__file__":
+                    # 优先用 python_path 拼出 tqcenter.py 路径（用户示例：传 tqcenter.py 路径）
+                    if self._python_path:
+                        init_arg = str(Path(self._python_path) / "tqcenter.py")
                     else:
-                        init_arg = __file__
-            _tq.initialize(init_arg)
-            self._initialized = True
-            logger.info("RealAdapter tq.initialize 完成 (init_arg=%s)", init_arg)
-            # 诊断：核对 tqcenter 实际暴露的 API 与说明书字段目录的差异
-            self._probe_api_coverage()
-            return True
-        except Exception as exc:  # noqa: BLE001
-            logger.error("tq.initialize 失败 (init_arg=%s): %s", init_arg, exc)
-            return False
+                        # 兜底环境变量
+                        env_init = os.environ.get("TQ_CENTER_INITIALIZE", "").strip()
+                        if env_init:
+                            init_arg = env_init
+                        else:
+                            init_arg = __file__
+                _tq.initialize(init_arg)
+                self._initialized = True
+                logger.info("RealAdapter tq.initialize 完成 (init_arg=%s)", init_arg)
+                # 诊断：核对 tqcenter 实际暴露的 API 与说明书字段目录的差异
+                self._probe_api_coverage()
+                return True
+            except Exception as exc:  # noqa: BLE001
+                logger.error("tq.initialize 失败 (init_arg=%s): %s", init_arg, exc)
+                return False
 
     def _probe_api_coverage(self) -> None:
         """核对 tqcenter 模块实际暴露的 API 与 ``tqcenter_fields.API_REGISTRY`` 的差异。
@@ -326,10 +337,15 @@ class RealAdapter(BaseDataAdapter):
         try:
             codes = [normalize(c) for c in stock_list]
             n_codes = len(codes)
+            # count<=0 表示"不限"，但直接传 -1 给 tq.get_market_data 会无界拉取
+            # 全部历史 K 线（数十年日线），导致卡死/超时。此处兜底为安全默认值
+            # 250 个交易日（约 1 年），足以覆盖动量/突破/错杀类因子窗口。
+            if count is None or count <= 0:
+                count = 250
             single_call_max = max(self._kline_max_count // max(n_codes, 1), 1)
 
             # 不需要分批
-            if count is None or count <= 0 or count <= single_call_max:
+            if count <= single_call_max:
                 return self._call_market_data(
                     tq, codes, period, start_time, end_time, count, dividend_type, field_list, fill_data
                 )
@@ -418,6 +434,55 @@ class RealAdapter(BaseDataAdapter):
         except Exception as exc:  # noqa: BLE001
             logger.error("get_more_info(%s) 失败: %s", code, exc)
             return {}
+
+    def get_market_snapshot_all(self) -> "pd.DataFrame":
+        """全市场快照 DataFrame（批量接口，供 pipeline.load_data 使用）。
+
+        Real 模式：逐只调 ``tq.get_more_info``（V8 快照源，88 字段），拼接为
+        DataFrame。受 global_qps 令牌桶限流（get_more_info 内含 acquire_or_skip），
+        单只失败返回 ``{}`` 自动跳过；每行补 ``code`` 列以兼容 pipeline。
+
+        注：全市场约 5500 只 × qps=10 ≈ 9 分钟，属 real 模式固有成本
+        （tqcenter 无批量快照接口）。
+        """
+        try:
+            stock_list = self.get_stock_list(list_type="1", market="5")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("get_market_snapshot_all 取股票列表失败: %s", exc)
+            return pd.DataFrame()
+
+        codes: list[str] = []
+        for it in stock_list or []:
+            if isinstance(it, dict):
+                c = it.get("Code") or it.get("code")
+                if c:
+                    codes.append(str(c))
+            elif isinstance(it, str) and it:
+                codes.append(it)
+
+        rows: list[dict] = []
+        for code in codes:
+            info = self.get_more_info(code)
+            if info:
+                info.setdefault("code", normalize(code))
+                rows.append(info)
+        if not rows:
+            logger.warning("get_market_snapshot_all 无数据（codes=%d）", len(codes))
+            return pd.DataFrame()
+        logger.info("get_market_snapshot_all 完成：%d / %d 只", len(rows), len(codes))
+        return pd.DataFrame(rows)
+
+    def get_snapshot_batch(self) -> "pd.DataFrame":
+        """``get_market_snapshot_all`` 别名（pipeline 方法名探测兼容）。"""
+        return self.get_market_snapshot_all()
+
+    def get_all_snapshots(self) -> "pd.DataFrame":
+        """``get_market_snapshot_all`` 别名。"""
+        return self.get_market_snapshot_all()
+
+    def get_snapshot(self) -> "pd.DataFrame":
+        """``get_market_snapshot_all`` 别名（pipeline 旧式批量接口）。"""
+        return self.get_market_snapshot_all()
 
     def get_stock_info(self, code: str, field_list: FieldList | None = None) -> dict:
         """``tq.get_stock_info(stock_code, field_list)``。"""
@@ -747,15 +812,17 @@ class RealAdapter(BaseDataAdapter):
             return False
 
     def send_user_block(self, block_code: str, stock_list: StockList) -> bool:
-        """``tq.send_user_block(block_code, stocks, show)``，追加语义。
+        """``tq.send_user_block(block_code, stock_list, show)``，追加语义。
 
-        说明书要点：参数名是 ``stocks``（不是 ``stock_list``）；空列表=清空该板块；
-        ZXG=自选股；更新板块前必须先 ``clear_sector``。
+        真实签名（tqcenter 实测，2026-06-24）：``send_user_block(block_code, stock_list, show=False)``。
+        注意参数名是 ``stock_list``（与说明书文档里的 ``stocks`` 不一致——R22 修：原代码用
+        ``stocks=`` 会报 ``unexpected keyword argument 'stocks'``，板块回写静默失败）。
+        空列表=清空该板块；ZXG=自选股；更新板块前必须先 ``clear_sector``。
         """
         tq = self._tq()
         try:
             codes = [normalize(c) for c in stock_list]
-            tq.send_user_block(block_code=block_code, stocks=codes)
+            tq.send_user_block(block_code=block_code, stock_list=codes)
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error("send_user_block(%s, %d stocks) 失败: %s", block_code, len(stock_list), exc)

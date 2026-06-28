@@ -365,9 +365,10 @@ class StrategyRunner:
         try:
             if not self.storage.table_exists("monitor_subscriptions"):
                 return
-            # 同 stock_code 旧记录先 DELETE（active=true 与 active=false 一起清）
+            # 同 stock_code 旧 active 记录先软删除（QuestDB 无 DELETE，用 UPDATE 归档）
             self.storage.execute(  # type: ignore[attr-defined]
-                "DELETE FROM monitor_subscriptions WHERE stock_code = ?",
+                "UPDATE monitor_subscriptions SET active = false, unsubscribed_at = now() "
+                "WHERE stock_code = ? AND active = true",
                 [code],
             )
             self.storage.execute(  # type: ignore[attr-defined]
