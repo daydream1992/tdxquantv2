@@ -1317,3 +1317,51 @@ Stage Summary:
 - 新增文件: engine/utils/env.py, .env (gitignored), .env.example
 - 修改: engine/channels/feishu.py (双模式), config/channels.yaml (feishu 段)
 - 安全: Secret 仅在 .env，未进 git；建议用户在飞书后台重置 Secret（已在对话明文出现）
+
+
+---
+Task ID: R22-接手
+Agent: Z.ai Code (主控)
+Task: 接手 tdxquantv2 项目维护，建立半自动 git push 协作模式
+
+Work Log:
+- 用户提供 Fine-grained PAT (Repository: tdxquantv2, Permission: Contents Read & Write)
+- 配置 git credentials: `git config --global credential.helper store` + `~/.git-credentials` (user: daydream1992, token 内嵌)
+- git config --global user.name="Z User" / user.email="z@container" (沙箱默认身份)
+- git clone https://github.com/daydream1992/tdxquantv2.git → /home/z/tdxquantv2 (R21 最新版, e30193e)
+- 权限诊断过程:
+  * 首次 push 报 403 "Permission denied"
+  * GitHub API `/user/repos` 显示 tdxquantv2 在列表 (Repository Access 已配)
+  * 但 `POST /git/refs` 建分支报 403 "Resource not accessible by personal access token"
+  * 根因: Fine-grained token 的 Repository permissions → Contents 仍是 Read-only (与 Repository Access 是两个独立配置)
+  * 用户修改 Contents → Read and write 后, 重新验证 push 闭环成功 (建临时分支 zz-perm-test → push → delete)
+- 读取 AI_HANDOVER.md (978 行, 14 章节) 建立项目全局认知:
+  * 项目本质: TdxQuant 量化交易系统 (5 层架构: Next.js → FastAPI → tqcenter → QuestDB)
+  * 三大能力: 选股 (5 策略 × 26 因子) / 监控 (实时行情 + 10 类预警 + 4 通道) / 回测
+  * 两种模式: mock (Linux 沙箱, CSV 样本) / real (Windows 生产, tqcenter 实盘)
+  * 当前状态: R21 Real 模式端到端打通 (24 只选股落库, 247s)
+  * 12 条硬约束 + 7 条易错点 + 4 条沙箱限制
+- 派 Explore agent 产出完整代码地图 (engine 15 路由 + 14 存储方法 + 40+ RealAdapter 方法 + 49 前端组件 + 13 API 对象 + 5 策略 YAML)
+- 安全确认: .env.github 未被 git 追踪 (.gitignore 含 .env* 规则), token 未进 git 历史, 仅在聊天记录明文出现 (建议用户后续 revoke 重生成)
+
+Stage Summary:
+- 协作模式: 半自动双向同步 (用户 git push 推本地改动 → 我 git pull → 分析改代码 → git commit + push → 用户 git pull 拉回)
+- git 身份: Z User <z@container> (沙箱默认, 与 daydream1992 账号区分, 便于后续 review 谁提交的)
+- 工作目录: /home/z/tdxquantv2 (R21 最新, e30193e)
+- 权限闭环验证: 建临时分支 zz-perm-test → push 成功 → delete 成功 (Contents Read & Write 确认生效)
+- 项目认知已建立: AI_HANDOVER 14 章 + Explore 代码地图 (本次会话上下文已具备)
+- 沙箱能力边界: 可做代码改进 (清理 TODO/修 bug/加因子/加通道/前端增强) + Mock 模式验证 (lint + py_compile + agent-browser); 不能做 Real 模式真机验证 (需 Windows + 通达信终端)
+
+- 下一步开发方向 (按 AI_HANDOVER §十三 + R21 遗留问题, 沙箱可验证性排序):
+  * P1-α: 修 selection_results.stock_name 为空 (get_more_info 88 字段无中文 name 列, exporter 映射 key 不匹配)
+  * P1-β: strategies YAML 显式配 data.kline_count (去掉代码层 250 兜底)
+  * P1-γ: 清理 engine/factors/ + engine/pipeline/ 的 P1-2/P1-3 残留 TODO (8 个因子文件 + 5 个 pipeline 文件)
+  * P2-α: 加新推送通道 (企业微信/钉钉, 插件式架构加文件即生效)
+  * P2-β: 加新因子 (北向资金/龙虎榜/资金流)
+  * P2-γ: 前端 10 Tab 细节增强 (cron 任务要求"样式越做越细")
+  * P2-δ: QuestDB ILP 批量写入优化 (9009 端口, 需真机测性能)
+
+- 未解决问题:
+  1. token 已在聊天记录明文出现, 建议用户协作结束后 revoke 重生成 (安全 hygiene)
+  2. COLLABORATION_GUIDE.md 提到 ".env.github 文件" 但实际未 commit (设计正确, token 不应进 git; 文档表述有歧义, 后续可优化)
+  3. git 提交身份是 "Z User <z@container>" 而非 daydream1992, 便于区分谁提交的, 但若用户希望统一身份可改全局 config
