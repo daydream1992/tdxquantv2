@@ -216,10 +216,25 @@ class Diagnoser:
             self._record("tdx", "tdxw_running", "WARN", str(exc))
 
     # ---------- 5. tqcenter 真实 import ----------
+    def _ensure_cfg(self):
+        """懒加载配置 (--section 模式下 check_config 可能没跑, self.cfg 为空)."""
+        if self.cfg:
+            return
+        cfg_path = PROJECT_ROOT / "config" / "app.yaml"
+        if not cfg_path.exists():
+            return
+        try:
+            import yaml
+            with open(cfg_path, encoding="utf-8") as f:
+                self.cfg = yaml.safe_load(f) or {}
+        except Exception:  # noqa: BLE001
+            pass
+
     def check_tqcenter(self):
         print("\n" + "=" * 64)
         print("  [5/9] tqcenter 真实 import + API 签名 (Bug 12 类)")
         print("=" * 64)
+        self._ensure_cfg()
         py_path = self.cfg.get("tqcenter", {}).get("python_path", "")
         if not py_path:
             self._print(FAIL_MARK, "tqcenter.python_path", "未配置, 跳过")
@@ -247,7 +262,18 @@ class Diagnoser:
             self._record("tqcenter", "import", "FAIL", str(exc))
             return
 
-        # 检查关键 API 存在性
+        # tqcenter 的 API 是 `class tq` 的 classmethod (tqcenter.py 约 588 行起),
+        # 不是模块层函数. 必须在类对象上查 hasattr, 否则恒为 False (R22 诊断误报修复).
+        tq_cls = getattr(tq_mod, "tq", None)
+        if tq_cls is None:
+            self._print(FAIL_MARK, "tqcenter.tq 类", "未找到",
+                        "API 挂在 class tq 上, 模块无 tq 类则无法验证")
+            self._record("tqcenter", "tq_class", "FAIL", "未找到 class tq")
+            return
+        self._print(PASS_MARK, "tqcenter.tq 类", "找到")
+        self._record("tqcenter", "tq_class", "PASS", "找到")
+
+        # 检查关键 API 存在性 (在 class tq 上查)
         apis = [
             "get_stock_list", "get_more_info", "get_market_data",
             "send_user_block", "create_sector", "get_sector_list",
@@ -256,7 +282,7 @@ class Diagnoser:
         ]
         missing = []
         for api in apis:
-            has = hasattr(tq_mod, api)
+            has = hasattr(tq_cls, api)
             if has:
                 self._print(PASS_MARK, f"  tq.{api}", "存在")
             else:
@@ -267,18 +293,31 @@ class Diagnoser:
                      f"缺失: {missing}" if missing else "全部存在")
 
         # send_user_block 签名验证 (Bug 12: 参数名 stocks→stock_list)
+        # 注意: classmethod 的 __func__ 才能拿到去掉 cls 的真实签名
         try:
             import inspect
-            sig = inspect.signature(tq_mod.send_user_block)
-            params = list(sig.parameters.keys())
-            ok = "stock_list" in params
-            self._print(PASS_MARK if ok else FAIL_MARK,
-                        "send_user_block 签名",
-                        f"params={params}",
-                        "stock_list OK" if ok
-                        else "Bug12: 期望 stock_list, 实际可能是 stocks")
-            self._record("tqcenter", "send_user_block_sig",
-                         "PASS" if ok else "FAIL", str(params))
+            raw = getattr(tq_cls, "send_user_block", None)
+            if raw is None:
+                self._print(FAIL_MARK, "send_user_block 签名",
+                            "方法不存在")
+                self._record("tqcenter", "send_user_block_sig",
+                             "FAIL", "方法不存在")
+            else:
+                # classmethod object → __func__ 拿底层函数
+                target = getattr(raw, "__func__", raw)
+                sig = inspect.signature(target)
+                params = list(sig.parameters.keys())
+                # 去掉 cls (classmethod 第一参)
+                if params and params[0] == "cls":
+                    params = params[1:]
+                ok = "stock_list" in params
+                self._print(PASS_MARK if ok else FAIL_MARK,
+                            "send_user_block 签名",
+                            f"params={params}",
+                            "stock_list OK" if ok
+                            else "Bug12: 期望 stock_list, 实际可能是 stocks")
+                self._record("tqcenter", "send_user_block_sig",
+                             "PASS" if ok else "FAIL", str(params))
         except Exception as exc:
             self._print(WARN_MARK, "send_user_block 签名", f"无法检查: {exc}")
             self._record("tqcenter", "send_user_block_sig", "WARN", str(exc))
